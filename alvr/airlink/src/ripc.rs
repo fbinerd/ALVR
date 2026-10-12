@@ -37,7 +37,7 @@ pub const RUNTIME_SERVICE_BOOTSTRAP_METHODS: [u32; 7] = [
 pub const RUNTIME_SERVICE_GPU_PREPARE_REQUEST: [u8; 5] = [0x08, 0x6c, 0x16, 0, 0];
 
 const CHANNEL_BUFFER_HANDSHAKE: [u8; 28] = [
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 5, 0, 0, 0, 1, 1, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 5, 0, 0, 0, 1, 1, 0, 0, 0,
 ];
 const GPU_BUFFER_HANDSHAKE_SIZE: usize = 70;
 const GPU_BUFFER_HANDSHAKE_HEADER_SIZE: u64 = 42;
@@ -53,8 +53,8 @@ const MESSAGE_HEADER_SIZE: usize = 32;
 pub const GPU_BUFFER_CHANNEL_NAME: &str = "gpu_buffer_stream_channel";
 const RUNTIME_SERVICE_CLIENT_CREATE_PAYLOAD_HEX: &str = concat!(
     "1b000000289f04c117000000636f6d2e6f63756c75732e73797374656d647269",
-    "763000000000defe742c000000636f6d2e6f63756c75732e767272756e7469",
-    "6d65736572766963652e567252756e74696d655365727669636500000000"
+    "7665723000000000defe742c000000636f6d2e6f63756c75732e767272756e74",
+    "696d65736572766963652e567252756e74696d655365727669636500000000"
 );
 
 fn reflect_string(value: &str) -> Vec<u8> {
@@ -631,7 +631,7 @@ pub fn pack_session_invite_accepted_event(
             let prefix = [
                 0x01, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
                 0, 0, 0, 0, 9, b'T', b'C', b'P', b'_', b'D', b'I', b'S', b'C', b'O', 0, 0, 0,
-                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 14, b'2', b'0', b'8',
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 14, b'2', b'0', b'8',
                 b'.', b'0', b'.', b'0', b'.', b'7', b'4', b'.', b'5', b'3', b'5', b'$',
             ];
             let mut invite = prefix.to_vec();
@@ -672,9 +672,18 @@ pub fn pack_session_invite_accepted_event(
     event_payload.extend_from_slice(&CLIENT_EVENT_SESSION_INVITE_ACCEPTED.to_le_bytes());
     event_payload.extend_from_slice(&REFLECT_INVITE_OK_MESSAGE_TYPE_HASH.to_le_bytes());
     event_payload.append(&mut event_object);
-    let header = request.response_to(MESSAGE_TYPE_SESSION_EVENT, event_payload.len())?;
+    // An event is not the answer to a call: Windows sends request and memory
+    // ids of zero, not the ids of the invite it follows.
+    let mut header = request.response_to(MESSAGE_TYPE_SESSION_EVENT, event_payload.len())?;
+    header.request_id = 0;
+    header.memory_id = 0;
     RuntimeIpcMessage::pack(header, &event_payload)
 }
+
+/// The streaming client sends a 4 kB record every 5 s (`commandGotDelivered`);
+/// Windows answers with a bare success response of this type.
+pub const CLIENT_EVENT_PERIODIC_REPORT: u32 = 0xbb61_cbe2;
+pub const RPC_RESPONSE_TYPE_PERIODIC_REPORT: u32 = 0xc0f0_87f1;
 
 const OAF_BROADCAST_HANDLER: u32 = 0x5ede_83cc;
 const OAF_BROADCAST_TYPE: u32 = 0xd591_54e0;
@@ -776,7 +785,7 @@ impl HandshakeMessage {
         let header_size = u64::from_le_bytes(data[0..8].try_into().unwrap());
         let payload_size = u64::from_le_bytes(data[8..16].try_into().unwrap());
         if header_size != HANDSHAKE_HEADER_SIZE
-            || payload_size != (data.len() - 16) as u64
+            || payload_size + HANDSHAKE_HEADER_SIZE != (data.len() - 16) as u64
             || u32::from_le_bytes(data[16..20].try_into().unwrap()) != HANDSHAKE_TAG
         {
             return Err("invalid RIPC handshake frame");
@@ -810,4 +819,47 @@ pub fn gpu_buffer_handshake_ack(data: &[u8]) -> Option<Vec<u8>> {
     let mut response = data.to_vec();
     response[GPU_BUFFER_HANDSHAKE_ACK_OFFSET] = 1;
     Some(response)
+}
+
+#[cfg(test)]
+mod handshake_tests {
+    use super::HandshakeMessage;
+
+    #[test]
+    fn unpack_accepts_what_pack_writes() {
+        let message = HandshakeMessage {
+            reflect_version: 2,
+            handshake_pass: 1,
+            payload: vec![0x34, 0x03, 0x01, 0x00],
+        };
+        let packed = message.pack().unwrap();
+        // 16 bytes of sizes, 8 bytes of header, then the payload.
+        assert_eq!(packed.len(), 16 + 8 + 4);
+        let unpacked = HandshakeMessage::unpack(&packed).unwrap();
+        assert_eq!(unpacked.reflect_version, 2);
+        assert_eq!(unpacked.handshake_pass, 1);
+        assert_eq!(unpacked.payload, message.payload);
+    }
+}
+
+#[cfg(test)]
+mod captured_layout_tests {
+    use super::*;
+
+    #[test]
+    fn client_create_payload_is_complete() {
+        let payload = decode_hex(RUNTIME_SERVICE_CLIENT_CREATE_PAYLOAD_HEX).unwrap();
+        assert_eq!(payload.len(), 95);
+        assert!(payload
+            .windows(b"com.oculus.systemdriver".len())
+            .any(|window| window == b"com.oculus.systemdriver"));
+    }
+
+    #[test]
+    fn channel_handshake_matches_the_headset() {
+        assert_eq!(
+            CHANNEL_BUFFER_HANDSHAKE,
+            [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 5, 0, 0, 0, 1, 1, 0, 0, 0]
+        );
+    }
 }

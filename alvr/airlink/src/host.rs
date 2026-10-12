@@ -141,6 +141,7 @@ impl AirLinkHost {
         let mut quest_endpoint_uuid = None;
         let mut runtime_service = RuntimeServiceState::default();
         let mut next_video_frame_id = 2u32;
+        let mut frame_reader = transport::FrameReader::default();
         let mut headset_offset_ns = 0i64;
         loop {
             let (topic, payload) = tokio::select! {
@@ -209,7 +210,7 @@ impl AirLinkHost {
                     }
                     continue;
                 }
-                incoming = transport::read_frame(stream) => incoming?,
+                incoming = frame_reader.read_frame(stream) => incoming?,
             };
             let header = match disco::message_header(&payload) {
                 Ok(header) => header,
@@ -483,6 +484,14 @@ impl AirLinkHost {
                 }
                 let event = protocol_result(ripc::ClientEvent::unpack(&message.payload))?;
                 match event.handler_id {
+                    ripc::CLIENT_EVENT_PERIODIC_REPORT => {
+                        let response = protocol_result(ripc::pack_success_response(
+                            header,
+                            1,
+                            ripc::RPC_RESPONSE_TYPE_PERIODIC_REPORT,
+                        ))?;
+                        self.send(stream, topic, &response).await?;
+                    }
                     ripc::CLIENT_EVENT_NOTIFY_CLIENT_IS_READY => {
                         let response = protocol_result(ripc::pack_success_response(
                             header,
