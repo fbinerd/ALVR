@@ -45,7 +45,10 @@ struct RuntimeServiceState {
     reverse_client_id: Option<u32>,
     bootstrap_index: usize,
     streaming_route: Option<ripc::RuntimeIpcHeader>,
+    oaf_client_route: Option<ripc::RuntimeIpcHeader>,
     gpu_stream_ready: bool,
+    screen_is_on_sent: bool,
+    openxr_runtime_sent: bool,
 }
 
 impl AirLinkHost {
@@ -138,12 +141,38 @@ impl AirLinkHost {
                 received = self.video_receiver.recv() => {
                     match received {
                         Ok(frame) if runtime_service.gpu_stream_ready => {
+                            if !runtime_service.screen_is_on_sent {
+                                if let Some(route) = runtime_service.oaf_client_route {
+                                    let event = protocol_result(ripc::pack_oaf_broadcast_event(
+                                        route,
+                                        "SCREEN_IS_ON_UPDATE",
+                                        "\t\t\"on\" : true",
+                                        unix_timestamp_ms(),
+                                    ))?;
+                                    self.send(stream, ripc::CLIENT_TRAFFIC_TOPIC, &event).await?;
+                                    runtime_service.screen_is_on_sent = true;
+                                    log::info!("sent Air Link SCREEN_IS_ON_UPDATE");
+                                }
+                            }
                             let packet = frame.pack(
                                 next_video_frame_id,
                                 monotonic_nanos(),
                                 headset_offset_ns,
                             );
                             self.send(stream, ripc::GPU_BUFFER_STREAM_TOPIC, &packet).await?;
+                            if next_video_frame_id >= 110 && !runtime_service.openxr_runtime_sent {
+                                if let Some(route) = runtime_service.oaf_client_route {
+                                    let event = protocol_result(ripc::pack_oaf_broadcast_event(
+                                        route,
+                                        "OPENXR_RUNTIME_UPDATE",
+                                        "\t\t\"isOculus\" : true,\n\t\t\"runtimeName\" : \"Oculus OpenXR\"",
+                                        unix_timestamp_ms(),
+                                    ))?;
+                                    self.send(stream, ripc::CLIENT_TRAFFIC_TOPIC, &event).await?;
+                                    runtime_service.openxr_runtime_sent = true;
+                                    log::info!("sent Air Link OPENXR_RUNTIME_UPDATE");
+                                }
+                            }
                             next_video_frame_id = next_video_frame_id.saturating_add(1);
                         }
                         Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
@@ -380,7 +409,7 @@ impl AirLinkHost {
                 if topic == ripc::CLIENT_TRAFFIC_TOPIC
                     && message.payload.windows(b"OafRipcServer".len()).any(|w| w == b"OafRipcServer")
                 {
-                    runtime_service.streaming_route = Some(header);
+                    runtime_service.oaf_client_route = Some(header);
                 }
                 let rpc = ripc::RuntimeRpcRequest::unpack(&message.payload).ok();
                 if let Some(rpc) = rpc.filter(|rpc| {
@@ -554,6 +583,13 @@ fn protocol_result<T>(
     result: Result<T, &'static str>,
 ) -> Result<T, Box<dyn std::error::Error + Send + Sync>> {
     result.map_err(|error| Error::new(ErrorKind::InvalidData, error).into())
+}
+
+fn unix_timestamp_ms() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
 }
 
 #[cfg(unix)]

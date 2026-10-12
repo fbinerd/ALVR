@@ -676,6 +676,59 @@ pub fn pack_session_invite_accepted_event(
     RuntimeIpcMessage::pack(header, &event_payload)
 }
 
+const OAF_BROADCAST_HANDLER: u32 = 0x5ede_83cc;
+const OAF_BROADCAST_TYPE: u32 = 0xd591_54e0;
+
+fn encode_varint(mut value: u64, output: &mut Vec<u8>) {
+    while value >= 0x80 {
+        output.push((value as u8 & 0x7f) | 0x80);
+        value >>= 7;
+    }
+    output.push(value as u8);
+}
+
+pub fn pack_oaf_broadcast_event(
+    route: RuntimeIpcHeader,
+    command: &str,
+    payload_json: &str,
+    timestamp_ms: u128,
+) -> Result<Vec<u8>, &'static str> {
+    let text = format!(
+        "{{\n\t\"messageType\" : \"PUSH\",\n\t\"payload\" : \n\t{{\n{payload_json}\n\t}},\n\t\"payloadType\" : \"{command}\",\n\t\"sequenceId\" : \"null\",\n\t\"timestamp\" : \"{timestamp_ms}\"\n}}"
+    );
+    let name = command.as_bytes();
+    let mut record = Vec::with_capacity(10 + name.len() + text.len());
+    record.extend_from_slice(&0u32.to_le_bytes());
+    record.extend_from_slice(&1u32.to_le_bytes());
+    encode_varint(name.len() as u64, &mut record);
+    record.extend_from_slice(name);
+    encode_varint(text.len() as u64, &mut record);
+    record.extend_from_slice(text.as_bytes());
+    record.push(0);
+
+    let mut event = Vec::with_capacity(10 + record.len() + 5);
+    event.extend_from_slice(&2u16.to_le_bytes());
+    event.extend_from_slice(&OAF_BROADCAST_HANDLER.to_le_bytes());
+    event.extend_from_slice(&OAF_BROADCAST_TYPE.to_le_bytes());
+    encode_varint((record.len() as u64) << 1, &mut event);
+    event.extend_from_slice(&record);
+
+    RuntimeIpcMessage::pack(
+        RuntimeIpcHeader {
+            message_type: MESSAGE_TYPE_SESSION_EVENT,
+            message_size: u32::try_from(event.len()).map_err(|_| "OAF event too large")?,
+            client_id: route.client_id,
+            server_id: route.server_id,
+            one_way: false,
+            request_id: 0,
+            memory_id: 0,
+            message_direction: MESSAGE_DIRECTION_RESPONSE,
+            rpc_failure_status: 0,
+        },
+        &event,
+    )
+}
+
 fn decode_hex(data: &str) -> Result<Vec<u8>, &'static str> {
     let compact = data.bytes().filter(|byte| !byte.is_ascii_whitespace()).collect::<Vec<_>>();
     if compact.len() % 2 != 0 {
