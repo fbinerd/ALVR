@@ -73,7 +73,8 @@ pub(crate) fn airlink_streaming_config(settings: &Settings) -> ServerNegotiatedS
         codec: settings.video.preferred_codec,
         h264_profile: settings.video.encoder_config.h264_profile,
         use_10bit_encoder: settings.video.encoder_config.use_10bit.unwrap_or(false),
-        encoding_gamma: settings.video.encoder_config.encoding_gamma.unwrap_or(1.0),
+        // The headset shows Air Link video with a 2.2 power curve.
+        encoding_gamma: 2.2,
         enable_hdr: settings.video.encoder_config.hdr.enable.unwrap_or(false),
     }
 }
