@@ -84,7 +84,14 @@ fn main() {
         unsafe { env::set_var("WINIT_X11_SCALE_FACTOR", "1") };
     }
 
-    eframe::run_native(
+    // The Air Link virtual speakers and microphone exist only while the
+    // dashboard runs. They are made here and not in the driver: SteamVR runs
+    // in a container that has no pactl.
+    if let Err(error) = alvr_audio::set_airlink_devices_enabled(true) {
+        alvr_common::warn!("Cannot create the AirLink audio devices: {error}");
+    }
+
+    let result = eframe::run_native(
         &format!("ALVR Dashboard (streamer v{})", *ALVR_VERSION),
         NativeOptions {
             viewport: ViewportBuilder::default()
@@ -110,7 +117,11 @@ fn main() {
             })
         },
     )
-    .unwrap();
+    ;
+
+    alvr_audio::set_airlink_devices_enabled(false).ok();
+
+    result.unwrap();
 }
 
 #[cfg(target_arch = "wasm32")]
