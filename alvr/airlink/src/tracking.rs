@@ -9,8 +9,10 @@ pub struct AirLinkPose {
 #[derive(Clone, Copy, Debug)]
 pub struct AirLinkTrackingSample {
     pub head: AirLinkPose,
-    pub left_hand: AirLinkPose,
-    pub right_hand: AirLinkPose,
+    /// Absent while the controller is asleep or out of sight: its pose is
+    /// then not a rotation. The head pose of the packet is still good.
+    pub left_hand: Option<AirLinkPose>,
+    pub right_hand: Option<AirLinkPose>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -64,8 +66,8 @@ pub fn unpack_tracking(data: &[u8]) -> Option<AirLinkTrackingSample> {
         return None;
     }
     Some(AirLinkTrackingSample {
-        left_hand: read_pose(data, 82)?,
-        right_hand: read_pose(data, 184)?,
+        left_hand: read_pose(data, 82),
+        right_hand: read_pose(data, 184),
         head: read_pose(data, 388)?,
     })
 }
