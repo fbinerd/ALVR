@@ -264,6 +264,10 @@ extern "C" void SetProximityState(bool headset_is_worn);
 extern "C" void InitOpenvrClient();
 extern "C" void ShutdownOpenvrClient();
 extern "C" void SetChaperoneArea(float areaWidth, float areaHeight);
+// perimeter: count points of x, z in metres. Fewer than three keep the stored outline.
+extern "C" void SetAirLinkGuardian(
+    const float* perimeter, int count, float areaWidth, float areaHeight
+);
 
 // NalParsing.cpp
 void ParseFrameNals(

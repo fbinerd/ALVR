@@ -99,6 +99,38 @@ void _SetChaperoneArea(float areaWidth, float areaHeight) {
 #endif
 }
 
+// Guardian of a Meta Air Link headset. Unlike _SetChaperoneArea this keeps
+// the real outline and leaves SteamVR's chaperone visibility as the user set it.
+void SetAirLinkGuardian(const float* perimeter, int count, float areaWidth, float areaHeight) {
+    Debug("SetAirLinkGuardian");
+
+#ifndef __APPLE__
+    std::unique_lock<std::mutex> lock(chaperone_mutex);
+
+    const vr::HmdMatrix34_t MATRIX_IDENTITY
+        = { { { 1.0, 0.0, 0.0, 0.0 }, { 0.0, 1.0, 0.0, 0.0 }, { 0.0, 0.0, 1.0, 0.0 } } };
+
+    auto setup = vr::VRChaperoneSetup();
+    if (setup == nullptr) {
+        return;
+    }
+
+    setup->RevertWorkingCopy();
+    if (perimeter != nullptr && count >= 3) {
+        setup->SetWorkingPerimeter(
+            reinterpret_cast<vr::HmdVector2_t*>(const_cast<float*>(perimeter)), count
+        );
+    }
+    // Poses reach SteamVR floor-relative already.
+    setup->SetWorkingStandingZeroPoseToRawTrackingPose(&MATRIX_IDENTITY);
+    setup->SetWorkingSeatedZeroPoseToRawTrackingPose(&MATRIX_IDENTITY);
+    if (areaWidth > 0.0f && areaHeight > 0.0f) {
+        setup->SetWorkingPlayAreaSize(areaWidth, areaHeight);
+    }
+    setup->CommitWorkingCopy(vr::EChaperoneConfigFile_Live);
+#endif
+}
+
 #ifdef __linux__
 std::unique_ptr<vr::HmdMatrix34_t> GetInvZeroPose() {
     Debug("GetInvZeroPose");
