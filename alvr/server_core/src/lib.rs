@@ -331,6 +331,10 @@ impl ServerCoreContext {
                 .ok();
             started_sender.send(ServerCoreEvent::ProximityState(true)).ok();
         });
+        let keyframe_sender = self.connection_context.events_sender.clone();
+        let on_keyframe_needed = Arc::new(move || {
+            keyframe_sender.send(ServerCoreEvent::RequestIDR).ok();
+        });
         let stopped_sender = self.connection_context.events_sender.clone();
         let on_streaming_stopped = Arc::new(move || {
             stopped_sender.send(ServerCoreEvent::ProximityState(false)).ok();
@@ -494,6 +498,7 @@ impl ServerCoreContext {
                     on_streaming_stopped,
                     on_tracking_update,
                     on_controller_input,
+                    on_keyframe_needed,
                 )
                 .await
                 {
