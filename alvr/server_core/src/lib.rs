@@ -429,8 +429,32 @@ impl ServerCoreContext {
         };
         let button_mapper = Arc::new(Mutex::new(button_mapper));
         let button_events = self.connection_context.events_sender.clone();
+        let battery_events = self.connection_context.events_sender.clone();
+        // Last reported charges and when: sent on change and every 30 s.
+        let battery_reported = Mutex::new(([u8::MAX; 3], Instant::now()));
         let on_controller_input = Arc::new(
             move |input: alvr_airlink::tracking::AirLinkControllerInput| {
+                {
+                    let mut reported = battery_reported.lock();
+                    if reported.0 != input.battery_percent
+                        || reported.1.elapsed() > Duration::from_secs(30)
+                    {
+                        *reported = (input.battery_percent, Instant::now());
+                        let devices = [*HAND_LEFT_ID, *HAND_RIGHT_ID, *HEAD_ID];
+                        for (device_id, percent) in devices.into_iter().zip(input.battery_percent)
+                        {
+                            if percent <= 100 {
+                                battery_events
+                                    .send(ServerCoreEvent::Battery(BatteryInfo {
+                                        device_id,
+                                        gauge_value: f32::from(percent) / 100.0,
+                                        is_plugged: false,
+                                    }))
+                                    .ok();
+                            }
+                        }
+                    }
+                }
                 let binary = |path_id, value| ButtonEntry {
                     path_id,
                     value: ButtonValue::Binary(value),
