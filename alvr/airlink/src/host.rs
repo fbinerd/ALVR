@@ -29,9 +29,10 @@ use tokio_rustls::server::TlsStream;
 const MESH_TOPIC: u32 = 2;
 /// Side-by-side picture size announced in the GPU stream channel config.
 const GPU_STREAM_RESOLUTION: (u32, u32) = (3680, 1920);
+const STANDING_HEAD_HEIGHT: f32 = 1.6;
 const IDLE_POSE: AirLinkPose = AirLinkPose {
     orientation_xyzw: [0.0, 0.0, 0.0, 1.0],
-    position_xyz: [0.0, 1.6, 0.0],
+    position_xyz: [0.0, STANDING_HEAD_HEIGHT, 0.0],
 };
 /// Head pose reported until the headset's own tracking arrives.
 const IDLE_TRACKING_SAMPLE: AirLinkTrackingSample = AirLinkTrackingSample {
@@ -163,6 +164,9 @@ impl AirLinkHost {
         // The headset sends its first tracking packet only after video has
         // started, and ALVR drops every frame that has no head pose.
         let mut tracking_received = false;
+        // Height of the floor in the headset's tracking space. SteamVR gets
+        // floor-relative poses; frame metadata goes back to tracking space.
+        let mut floor_y: Option<f32> = None;
         let mut idle_pose_timer = tokio::time::interval(std::time::Duration::from_micros(13_889));
         idle_pose_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
@@ -175,7 +179,8 @@ impl AirLinkHost {
                 }
                 received = self.video_receiver.recv() => {
                     match received {
-                        Ok(frame) if runtime_service.gpu_stream_ready => {
+                        Ok(mut frame) if runtime_service.gpu_stream_ready => {
+                            frame.head_pose[5] += floor_y.unwrap_or(0.0);
                             if !runtime_service.screen_is_on_sent {
                                 if let Some(route) = runtime_service.oaf_client_route {
                                     let event = protocol_result(ripc::pack_oaf_broadcast_event(
@@ -337,11 +342,21 @@ impl AirLinkHost {
                 if let Some(response) = ripc::channel_buffer_handshake_ack(&payload) {
                     self.send(stream, topic, response).await?;
                 } else if topic == 11 {
-                    if let Some(sample) = crate::tracking::unpack_tracking(&payload) {
+                    if let Some(mut sample) = crate::tracking::unpack_tracking(&payload) {
                         if !tracking_received {
                             tracking_received = true;
                             log::info!("Air Link tracking starts");
                         }
+                        // A headset with no roomscale boundary reports no floor:
+                        // assume the user stands when the stream starts.
+                        let floor = *floor_y.get_or_insert_with(|| {
+                            let floor = sample.head.position_xyz[1] - STANDING_HEAD_HEIGHT;
+                            log::info!("Air Link floor assumed at y={floor:.3} m in tracking space");
+                            floor
+                        });
+                        sample.head.position_xyz[1] -= floor;
+                        sample.left_hand.position_xyz[1] -= floor;
+                        sample.right_hand.position_xyz[1] -= floor;
                         (self.on_tracking_update)(sample);
                     }
                 } else if topic == 12 {
