@@ -12,6 +12,7 @@ use crate::{
     ripc,
     transport::{self, AirLinkListener},
 };
+use crate::guardian::AirLinkGuardian;
 use crate::video::AirLinkVideoFrame;
 use crate::tracking::{AirLinkControllerInput, AirLinkPose, AirLinkTrackingSample};
 use ring::rand::{SecureRandom, SystemRandom};
@@ -50,6 +51,7 @@ pub struct AirLinkHost {
     on_streaming_started: Arc<dyn Fn() + Send + Sync>,
     on_streaming_stopped: Arc<dyn Fn() + Send + Sync>,
     on_keyframe_needed: Arc<dyn Fn() + Send + Sync>,
+    on_guardian_update: Arc<dyn Fn(AirLinkGuardian) + Send + Sync>,
     on_tracking_update: Arc<dyn Fn(AirLinkTrackingSample) + Send + Sync>,
     on_controller_input: Arc<dyn Fn(AirLinkControllerInput) + Send + Sync>,
     streaming_active: bool,
@@ -69,6 +71,7 @@ struct RuntimeServiceState {
     pending_gpu_connect_response: Option<Vec<u8>>,
     mesh_sent: bool,
     openxr_runtime_sent: bool,
+    guardian: AirLinkGuardian,
 }
 
 impl AirLinkHost {
@@ -84,6 +87,7 @@ impl AirLinkHost {
         on_tracking_update: Arc<dyn Fn(AirLinkTrackingSample) + Send + Sync>,
         on_controller_input: Arc<dyn Fn(AirLinkControllerInput) + Send + Sync>,
         on_keyframe_needed: Arc<dyn Fn() + Send + Sync>,
+        on_guardian_update: Arc<dyn Fn(AirLinkGuardian) + Send + Sync>,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let identity = HostIdentity::load_or_create(state_dir)?;
         let (certificate, private_key) = identity.rustls_identity();
@@ -109,6 +113,7 @@ impl AirLinkHost {
             on_tracking_update,
             on_controller_input,
             on_keyframe_needed,
+            on_guardian_update,
             streaming_active: false,
         })
     }
@@ -180,7 +185,8 @@ impl AirLinkHost {
                 received = self.video_receiver.recv() => {
                     match received {
                         Ok(mut frame) if runtime_service.gpu_stream_ready => {
-                            frame.head_pose[5] += floor_y.unwrap_or(0.0);
+                            frame.head_pose[5] +=
+                                runtime_service.guardian.floor_y.or(floor_y).unwrap_or(0.0);
                             if !runtime_service.screen_is_on_sent {
                                 if let Some(route) = runtime_service.oaf_client_route {
                                     let event = protocol_result(ripc::pack_oaf_broadcast_event(
@@ -349,10 +355,14 @@ impl AirLinkHost {
                         }
                         // A headset with no roomscale boundary reports no floor:
                         // assume the user stands when the stream starts.
-                        let floor = *floor_y.get_or_insert_with(|| {
-                            let floor = sample.head.position_xyz[1] - STANDING_HEAD_HEIGHT;
-                            log::info!("Air Link floor assumed at y={floor:.3} m in tracking space");
-                            floor
+                        let floor = runtime_service.guardian.floor_y.unwrap_or_else(|| {
+                            *floor_y.get_or_insert_with(|| {
+                                let floor = sample.head.position_xyz[1] - STANDING_HEAD_HEIGHT;
+                                log::info!(
+                                    "Air Link floor assumed at y={floor:.3} m in tracking space"
+                                );
+                                floor
+                            })
                         });
                         sample.head.position_xyz[1] -= floor;
                         sample.left_hand.position_xyz[1] -= floor;
@@ -479,6 +489,16 @@ impl AirLinkHost {
                 && runtime_service.reverse_client_id == Some(header.client_id)
                 && runtime_service.bootstrap_index < ripc::RUNTIME_SERVICE_BOOTSTRAP_METHODS.len()
             {
+                if runtime_service.guardian.update(&message.payload) {
+                    let guardian = &runtime_service.guardian;
+                    log::info!(
+                        "Air Link Guardian: floor {:?}, {} outline points, play area {:?}",
+                        guardian.floor_y,
+                        guardian.perimeter.len(),
+                        guardian.play_area
+                    );
+                    (self.on_guardian_update)(guardian.clone());
+                }
                 let index = runtime_service.bootstrap_index;
                 let next_method = ripc::RUNTIME_SERVICE_BOOTSTRAP_METHODS[index];
                 if index == 6 {

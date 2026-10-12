@@ -122,6 +122,12 @@ pub enum ServerCoreEvent {
     ClientDisconnected,
     Battery(BatteryInfo),
     PlayspaceSync(Vec2),
+    /// Guardian of a Meta Air Link headset: outline on the floor (x, z in
+    /// metres, floor-relative tracking space) and play area size.
+    AirLinkGuardian {
+        perimeter: Vec<Vec2>,
+        play_area: Option<Vec2>,
+    },
     LocalViewParams([ViewParams; 2]), // In relation to head
     Tracking {
         poll_timestamp: Duration,
@@ -335,6 +341,15 @@ impl ServerCoreContext {
         let on_keyframe_needed = Arc::new(move || {
             keyframe_sender.send(ServerCoreEvent::RequestIDR).ok();
         });
+        let guardian_sender = self.connection_context.events_sender.clone();
+        let on_guardian_update = Arc::new(move |guardian: alvr_airlink::guardian::AirLinkGuardian| {
+            guardian_sender
+                .send(ServerCoreEvent::AirLinkGuardian {
+                    perimeter: guardian.perimeter.iter().map(|p| Vec2::from_array(*p)).collect(),
+                    play_area: guardian.play_area_or_extent().map(Vec2::from_array),
+                })
+                .ok();
+        });
         let stopped_sender = self.connection_context.events_sender.clone();
         let on_streaming_stopped = Arc::new(move || {
             stopped_sender.send(ServerCoreEvent::ProximityState(false)).ok();
@@ -499,6 +514,7 @@ impl ServerCoreContext {
                     on_tracking_update,
                     on_controller_input,
                     on_keyframe_needed,
+                    on_guardian_update,
                 )
                 .await
                 {
