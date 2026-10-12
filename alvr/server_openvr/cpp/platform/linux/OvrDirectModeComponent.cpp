@@ -519,8 +519,56 @@ void OvrDirectModeComponent::SubmitLayer(const SubmitLayerPerEye_t (&perEye)[2])
     m_presentMutex.unlock();
 }
 
+// SteamVR's compositor owns the texture sets of everything it draws itself.
+// Those hold linear values, unlike the sRGB-encoded ones applications submit.
+static bool IsCompositorProcess(uint32_t pid) {
+    char path[64];
+    snprintf(path, sizeof(path), "/proc/%u/comm", pid);
+    FILE* file = fopen(path, "r");
+    if (file == nullptr) {
+        return false;
+    }
+    char name[32] = {};
+    bool found = fgets(name, sizeof(name), file) != nullptr
+        && strncmp(name, "vrcompositor", 12) == 0;
+    fclose(file);
+    return found;
+}
+
 /** Submits queued layers for display. */
 void OvrDirectModeComponent::Present(vr::SharedTextureHandle_t syncTexture) {
+    // Diagnostic: which layers SteamVR submits. Logged when the number of
+    // layers or the texture set behind any of them changes.
+    {
+        static int lastCount = -1;
+        static const void* lastSets[MAX_LAYERS] = {};
+        bool changed = m_submitLayer != lastCount;
+        const void* sets[MAX_LAYERS] = {};
+        for (int i = 0; i < m_submitLayer && i < MAX_LAYERS; ++i) {
+            auto it = m_handleMap.find(m_submitLayers[i][0].hTexture);
+            sets[i] = it == m_handleMap.end() ? nullptr : (const void*)it->second.first;
+            changed = changed || sets[i] != lastSets[i];
+        }
+        if (changed) {
+            Info("Present: %d layer(s)\n", m_submitLayer);
+            for (int i = 0; i < m_submitLayer && i < MAX_LAYERS; ++i) {
+                auto it = m_handleMap.find(m_submitLayers[i][0].hTexture);
+                auto const& b = m_submitLayers[i][0].bounds;
+                if (it == m_handleMap.end()) {
+                    Info("  layer %d: unknown texture %llu\n", i, m_submitLayers[i][0].hTexture);
+                } else {
+                    auto const& d = it->second.first->textDesc;
+                    Info(
+                        "  layer %d: set %p pid %d format %d %dx%d bounds u %.3f..%.3f v %.3f..%.3f\n",
+                        i, (void*)it->second.first, it->second.first->pid, d.nFormat, d.nWidth,
+                        d.nHeight, b.uMin, b.uMax, b.vMin, b.vMax
+                    );
+                }
+                lastSets[i] = sets[i];
+            }
+            lastCount = m_submitLayer;
+        }
+    }
     m_submitLayer = 0;
 
     switch (m_encoderState.load()) {
@@ -617,6 +665,7 @@ void OvrDirectModeComponent::Present(vr::SharedTextureHandle_t syncTexture) {
         auto& desc = leftIt->second.first->textDesc;
 
         alvr::render::RendererCreateInfo rendererCI {
+            .linearInput = IsCompositorProcess(leftIt->second.first->pid),
             .format = (vk::Format)(VkFormat)desc.nFormat,
             .inputEyeExtent {
                 .width = desc.nWidth,

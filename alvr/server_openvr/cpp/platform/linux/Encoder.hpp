@@ -147,7 +147,9 @@ public:
 
         if (pipeCIs.empty()) {
             // The order of this needs to be kept in sync with the shader!
-            auto info = makeSpecs((float)settings->m_encodingGamma);
+            auto info = makeSpecs(
+                (float)settings->m_encodingGamma, rendererCI.linearInput ? 1.f : 0.f
+            );
             info.shaderData = std::vector(
                 QUAD_SHADER_COMP_SPV_PTR, QUAD_SHADER_COMP_SPV_PTR + QUAD_SHADER_COMP_SPV_LEN
             );
