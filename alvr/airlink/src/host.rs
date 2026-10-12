@@ -54,6 +54,8 @@ struct RuntimeServiceState {
     oaf_client_route: Option<ripc::RuntimeIpcHeader>,
     gpu_stream_ready: bool,
     screen_is_on_sent: bool,
+    buffer_pool_acked: bool,
+    pending_gpu_connect_response: Option<Vec<u8>>,
     mesh_sent: bool,
     openxr_runtime_sent: bool,
 }
@@ -220,6 +222,9 @@ impl AirLinkHost {
                 }
                 incoming = frame_reader.read_frame(stream) => incoming?,
             };
+            if topic == ripc::SERVER_TRAFFIC_TOPIC || topic == ripc::CLIENT_TRAFFIC_TOPIC {
+                trace_frame("rx", topic, &payload);
+            }
             let header = match disco::message_header(&payload) {
                 Ok(header) => header,
                 Err(_) => continue,
@@ -358,6 +363,15 @@ impl AirLinkHost {
                         }
                         self.send(stream, topic, &response).await?;
                         gpu_buffer_handshake_ack_sent = true;
+                        runtime_service.buffer_pool_acked = true;
+                        if let Some(pending) = runtime_service.pending_gpu_connect_response.take()
+                        {
+                            self.send(stream, ripc::CLIENT_TRAFFIC_TOPIC, &pending).await?;
+                            runtime_service.gpu_stream_ready = true;
+                            // Frames encoded so far were dropped; start on a
+                            // fresh keyframe.
+                            (self.on_keyframe_needed)();
+                        }
                     }
                 } else if let Ok(message) = ripc::RuntimeIpcMessage::unpack(&payload) {
                     self.handle_runtime_ipc(
@@ -485,11 +499,17 @@ impl AirLinkHost {
                         let response = protocol_result(ripc::pack_runtime_rpc_success_response(
                             header, rpc, ripc::GPU_STREAM_CHANNEL_DID_CONNECT_RESPONSE,
                         ))?;
-                        self.send(stream, topic, &response).await?;
-                        runtime_service.gpu_stream_ready = true;
-                        // Frames encoded before this point were dropped, the
-                        // first keyframe among them; ask for a new one.
-                        (self.on_keyframe_needed)();
+                        if runtime_service.buffer_pool_acked {
+                            self.send(stream, topic, &response).await?;
+                            runtime_service.gpu_stream_ready = true;
+                            (self.on_keyframe_needed)();
+                        } else {
+                            // Windows answers this call only after it has
+                            // acknowledged the channel's buffer-pool handshake.
+                            // Video sent before that exchange is lost, the
+                            // keyframe included.
+                            runtime_service.pending_gpu_connect_response = Some(response);
+                        }
                         return Ok(());
                     }
                 }
@@ -614,8 +634,38 @@ impl AirLinkHost {
         topic: u32,
         payload: &[u8],
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        if topic == ripc::SERVER_TRAFFIC_TOPIC
+            || topic == ripc::CLIENT_TRAFFIC_TOPIC
+            || (topic == MESH_TOPIC && payload.len() > 28)
+        {
+            trace_frame("tx", topic, payload);
+        }
         transport::write_frame(stream, topic, payload).await
     }
+}
+
+/// One line per RuntimeIPC frame while tracing is enabled: enough to
+/// follow a session next to the headset's log and to the reference host.
+fn trace_frame(direction: &str, topic: u32, payload: &[u8]) {
+    static ENABLED: std::sync::LazyLock<bool> =
+        std::sync::LazyLock::new(|| {
+            // SteamVR starts the driver, so a marker file is easier than an
+            // environment variable: touch ~/.config/alvr/airlink_trace.
+            std::env::var_os("ALVR_AIRLINK_TRACE").is_some()
+                || std::env::var_os("HOME").is_some_and(|home| {
+                    Path::new(&home).join(".config/alvr/airlink_trace").exists()
+                })
+        });
+    if !*ENABLED {
+        return;
+    }
+    let head: String = payload
+        .iter()
+        .skip(16)
+        .take(40)
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    log::info!("airlink {direction} topic={topic} size={} {head}", payload.len());
 }
 
 fn parse_uuid_bytes(value: &str) -> Result<[u8; 16], Box<dyn std::error::Error + Send + Sync>> {
