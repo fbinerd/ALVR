@@ -72,6 +72,7 @@ pub fn initialize_environment(layout: afs::Layout) {
     SESSION_MANAGER.write().session_mut();
 }
 
+#[derive(Clone)]
 pub struct ServerNegotiatedStreamingConfig {
     pub transcoding_view_resolution: UVec2,
     pub emulated_headset_view_resolution: UVec2,
@@ -116,6 +117,7 @@ pub struct ConnectionContext {
     connection_threads: Mutex<Vec<JoinHandle<()>>>,
     clients_to_be_removed: Mutex<HashSet<String>>,
     video_channel_sender: Mutex<Option<SyncSender<VideoPacket>>>,
+    airlink_video_sender: broadcast::Sender<alvr_airlink::video::AirLinkVideoFrame>,
     haptics_sender: Mutex<Option<StreamSender<Haptics>>>,
 }
 
@@ -210,6 +212,7 @@ impl ServerCoreContext {
         SESSION_MANAGER.write().clean_client_list();
 
         let (events_sender, events_receiver) = mpsc::channel();
+        let (airlink_video_sender, _) = broadcast::channel(64);
 
         // Create a temporary StatisticsManager until a headset connects
         let initial_settings = SESSION_MANAGER.read().settings().clone();
@@ -236,6 +239,7 @@ impl ServerCoreContext {
             connection_threads: Mutex::new(Vec::new()),
             clients_to_be_removed: Mutex::new(HashSet::new()),
             video_channel_sender: Mutex::new(None),
+            airlink_video_sender,
             haptics_sender: Mutex::new(None),
         });
 
@@ -286,6 +290,19 @@ impl ServerCoreContext {
         let hostname = env::var("HOSTNAME").unwrap_or_else(|_| "alvr-host".to_owned());
         let flavor = env::var("USER").unwrap_or_else(|_| "user".to_owned());
         let endpoint_name = format!("{flavor}::{hostname}");
+        let video_receiver = self.connection_context.airlink_video_sender.subscribe();
+        let settings = SESSION_MANAGER.read().settings().clone();
+        let negotiated_config = connection::airlink_streaming_config(&settings);
+        let started_sender = self.connection_context.events_sender.clone();
+        let on_streaming_started = Arc::new(move || {
+            started_sender
+                .send(ServerCoreEvent::ClientConnected(negotiated_config.clone()))
+                .ok();
+        });
+        let stopped_sender = self.connection_context.events_sender.clone();
+        let on_streaming_stopped = Arc::new(move || {
+            stopped_sender.send(ServerCoreEvent::ClientDisconnected).ok();
+        });
         let advertise_address = alvr_system_info::local_ip();
         if advertise_address.is_unspecified() {
             error!("Cannot advertise Air Link host: local IP address is unspecified");
@@ -310,6 +327,9 @@ impl ServerCoreContext {
                     advertise_address,
                     &hostname,
                     &endpoint_name,
+                    video_receiver,
+                    on_streaming_started,
+                    on_streaming_stopped,
                 )
                 .await
                 {
@@ -461,6 +481,25 @@ impl ServerCoreContext {
         nal_buffer: Vec<u8>,
     ) {
         dbg_server_core!("send_video_nal");
+
+        static AIRLINK_STREAM_CORRUPTED: AtomicBool = AtomicBool::new(true);
+        if is_idr {
+            AIRLINK_STREAM_CORRUPTED.store(false, Ordering::SeqCst);
+        }
+        if !AIRLINK_STREAM_CORRUPTED.load(Ordering::SeqCst) {
+            let pose = global_view_params[0].pose;
+            let position = pose.position.to_array();
+            let orientation = pose.orientation.to_array();
+            let frame = alvr_airlink::video::AirLinkVideoFrame {
+                is_idr,
+                nal: nal_buffer.clone(),
+                head_pose: [
+                    position[0], position[1], position[2], orientation[0], orientation[1],
+                    orientation[2], orientation[3],
+                ],
+            };
+            self.connection_context.airlink_video_sender.send(frame).ok();
+        }
 
         // start in the corrupts state, the client didn't receive the initial IDR yet.
         static STREAM_CORRUPTED: AtomicBool = AtomicBool::new(true);
