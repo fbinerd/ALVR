@@ -148,6 +148,7 @@ impl AirLinkHost {
         let mut next_video_frame_id = 2u32;
         let mut frame_reader = transport::FrameReader::default();
         let mut last_keyframe_request = std::time::Instant::now();
+        let mut skipped_before_keyframe = 0u32;
         let mut headset_offset_ns = 0i64;
         loop {
             let (topic, payload) = tokio::select! {
@@ -169,11 +170,23 @@ impl AirLinkHost {
                             }
                             // The headset's decoder has to start on a keyframe.
                             if next_video_frame_id == 2 && !frame.is_idr {
+                                skipped_before_keyframe += 1;
                                 if last_keyframe_request.elapsed().as_millis() > 500 {
+                                    log::info!(
+                                        "Air Link video waiting for a keyframe: \
+                                         {skipped_before_keyframe} frames skipped"
+                                    );
                                     (self.on_keyframe_needed)();
                                     last_keyframe_request = std::time::Instant::now();
                                 }
                                 continue;
+                            }
+                            if next_video_frame_id == 2 {
+                                log::info!(
+                                    "Air Link video starts: keyframe of {} bytes after \
+                                     {skipped_before_keyframe} skipped frames",
+                                    frame.nal.len()
+                                );
                             }
                             if !runtime_service.mesh_sent {
                                 // Without the rectify mesh the headset decodes every
@@ -368,6 +381,7 @@ impl AirLinkHost {
                         {
                             self.send(stream, ripc::CLIENT_TRAFFIC_TOPIC, &pending).await?;
                             runtime_service.gpu_stream_ready = true;
+                            log::info!("Air Link GPU stream ready");
                             // Frames encoded so far were dropped; start on a
                             // fresh keyframe.
                             (self.on_keyframe_needed)();
