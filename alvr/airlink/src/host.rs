@@ -13,7 +13,7 @@ use crate::{
     transport::{self, AirLinkListener},
 };
 use crate::video::AirLinkVideoFrame;
-use crate::tracking::{AirLinkControllerInput, AirLinkTrackingSample};
+use crate::tracking::{AirLinkControllerInput, AirLinkPose, AirLinkTrackingSample};
 use ring::rand::{SecureRandom, SystemRandom};
 use std::{
     io::{Error, ErrorKind},
@@ -29,6 +29,16 @@ use tokio_rustls::server::TlsStream;
 const MESH_TOPIC: u32 = 2;
 /// Side-by-side picture size announced in the GPU stream channel config.
 const GPU_STREAM_RESOLUTION: (u32, u32) = (3680, 1920);
+const IDLE_POSE: AirLinkPose = AirLinkPose {
+    orientation_xyzw: [0.0, 0.0, 0.0, 1.0],
+    position_xyz: [0.0, 1.6, 0.0],
+};
+/// Head pose reported until the headset's own tracking arrives.
+const IDLE_TRACKING_SAMPLE: AirLinkTrackingSample = AirLinkTrackingSample {
+    head: IDLE_POSE,
+    left_hand: IDLE_POSE,
+    right_hand: IDLE_POSE,
+};
 
 pub struct AirLinkHost {
     listener: AirLinkListener,
@@ -150,8 +160,19 @@ impl AirLinkHost {
         let mut last_keyframe_request = std::time::Instant::now();
         let mut skipped_before_keyframe = 0u32;
         let mut headset_offset_ns = 0i64;
+        // The headset sends its first tracking packet only after video has
+        // started, and ALVR drops every frame that has no head pose.
+        let mut tracking_received = false;
+        let mut idle_pose_timer = tokio::time::interval(std::time::Duration::from_micros(13_889));
+        idle_pose_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             let (topic, payload) = tokio::select! {
+                _ = idle_pose_timer.tick(),
+                    if runtime_service.gpu_stream_ready && !tracking_received =>
+                {
+                    (self.on_tracking_update)(IDLE_TRACKING_SAMPLE);
+                    continue;
+                }
                 received = self.video_receiver.recv() => {
                     match received {
                         Ok(frame) if runtime_service.gpu_stream_ready => {
@@ -317,6 +338,10 @@ impl AirLinkHost {
                     self.send(stream, topic, response).await?;
                 } else if topic == 11 {
                     if let Some(sample) = crate::tracking::unpack_tracking(&payload) {
+                        if !tracking_received {
+                            tracking_received = true;
+                            log::info!("Air Link tracking starts");
+                        }
                         (self.on_tracking_update)(sample);
                     }
                 } else if topic == 12 {
