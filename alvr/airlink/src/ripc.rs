@@ -160,7 +160,11 @@ pub fn pack_gpu_stream_channel_config_event(route: RuntimeIpcHeader) -> Result<V
     let mut payload = Vec::from(2u16.to_le_bytes());
     payload.extend_from_slice(&GPU_STREAM_CHANNEL_DID_CREATE_HANDLER.to_le_bytes());
     payload.extend_from_slice(&GPU_STREAM_CHANNEL_DID_CREATE_TYPE.to_le_bytes());
-    payload.extend_from_slice(&[0x3a, 0x60, 0x0e, 0, 0, 0x80, 7, 0, 0, 3, 0, 0, 0, 0x20, 1, 0, 0, 0, 1, 0, 2, 0, 1, 0, 0x48, 0, 0, 0, 0, 1]);
+    let (width, height) = crate::video::stream_size();
+    payload.push(0x3a);
+    payload.extend_from_slice(&width.to_le_bytes());
+    payload.extend_from_slice(&height.to_le_bytes());
+    payload.extend_from_slice(&[3, 0, 0, 0, 0x20, 1, 0, 0, 0, 1, 0, 2, 0, 1, 0, 0x48, 0, 0, 0, 0, 1]);
     let header = RuntimeIpcHeader {
         message_type: MESSAGE_TYPE_SESSION_EVENT,
         message_size: payload.len() as u32,
@@ -531,7 +535,25 @@ pub fn pack_channel_create_response(
         return Err("unsupported RIPC channel client/server pair");
     }
     let payload = if channel.channel_name == GPU_BUFFER_CHANNEL_NAME {
-        decode_hex(GPU_BUFFER_CHANNEL_RESPONSE_BODY_HEX)?
+        // The captured body names the picture size twice, as 3680x1920.
+        let mut body = decode_hex(GPU_BUFFER_CHANNEL_RESPONSE_BODY_HEX)?;
+        let captured = [0x60, 0x0e, 0, 0, 0x80, 0x07, 0, 0];
+        let (width, height) = crate::video::stream_size();
+        let mut current = [0u8; 8];
+        current[..4].copy_from_slice(&width.to_le_bytes());
+        current[4..].copy_from_slice(&height.to_le_bytes());
+        let positions: Vec<usize> = body
+            .windows(captured.len())
+            .enumerate()
+            .filter_map(|(index, window)| (window == captured).then_some(index))
+            .collect();
+        if positions.len() != 2 {
+            return Err("GPU buffer channel response template lost its picture size fields");
+        }
+        for position in positions {
+            body[position..position + 8].copy_from_slice(&current);
+        }
+        body
     } else {
         let (type_hash, channel_id) = channel_type_info(&channel.channel_name)
             .ok_or("unsupported RIPC channel type")?;

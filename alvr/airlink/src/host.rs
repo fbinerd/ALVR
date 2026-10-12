@@ -29,7 +29,6 @@ use tokio_rustls::server::TlsStream;
 /// MeshChannel is the first stream channel the headset creates.
 const MESH_TOPIC: u32 = 2;
 /// Side-by-side picture size announced in the GPU stream channel config.
-const GPU_STREAM_RESOLUTION: (u32, u32) = (3680, 1920);
 const STANDING_HEAD_HEIGHT: f32 = 1.6;
 const IDLE_POSE: AirLinkPose = AirLinkPose {
     orientation_xyzw: [0.0, 0.0, 0.0, 1.0],
@@ -239,7 +238,7 @@ impl AirLinkHost {
                             if !runtime_service.mesh_sent {
                                 // Without the rectify mesh the headset decodes every
                                 // frame and keeps showing its loading environment.
-                                let mesh = crate::mesh::pack(GPU_STREAM_RESOLUTION);
+                                let mesh = crate::mesh::pack(crate::video::stream_size());
                                 self.send(stream, MESH_TOPIC, &mesh).await?;
                                 runtime_service.mesh_sent = true;
                                 log::info!("sent Air Link rectify mesh: {} bytes", mesh.len());
