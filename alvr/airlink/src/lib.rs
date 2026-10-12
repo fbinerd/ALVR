@@ -7,6 +7,7 @@ pub mod disco;
 pub mod discovery;
 pub mod host;
 pub mod identity;
+pub mod mesh;
 pub mod ripc;
 pub mod tracking;
 pub mod transport;
