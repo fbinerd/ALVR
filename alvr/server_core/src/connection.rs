@@ -55,6 +55,49 @@ pub struct VideoPacket {
     pub payload: Vec<u8>,
 }
 
+pub(crate) fn airlink_streaming_config(settings: &Settings) -> ServerNegotiatedStreamingConfig {
+    let quest_2_default = UVec2::new(1832, 1920);
+    let transcoding_view_resolution = get_view_res(
+        settings.video.transcoding_view_resolution.clone(),
+        quest_2_default,
+    );
+    let emulated_headset_view_resolution = get_view_res(
+        settings.video.emulated_headset_view_resolution.clone(),
+        quest_2_default,
+    );
+    ServerNegotiatedStreamingConfig {
+        transcoding_view_resolution,
+        emulated_headset_view_resolution,
+        refresh_rate: settings.video.preferred_fps,
+        foveated_encoding: None,
+        codec: settings.video.preferred_codec,
+        h264_profile: settings.video.encoder_config.h264_profile,
+        use_10bit_encoder: settings.video.encoder_config.use_10bit.unwrap_or(false),
+        encoding_gamma: settings.video.encoder_config.encoding_gamma.unwrap_or(1.0),
+        enable_hdr: settings.video.encoder_config.hdr.enable.unwrap_or(false),
+    }
+}
+
+fn get_view_res(config: FrameSize, default_res: UVec2) -> UVec2 {
+    let res = match config {
+        FrameSize::Scale(scale) => default_res.as_vec2() * scale,
+        FrameSize::Absolute { width, height } => {
+            let width = width as f32;
+            Vec2::new(
+                width,
+                height.map_or_else(
+                    || {
+                        let default_res = default_res.as_vec2();
+                        width * default_res.y / default_res.x
+                    },
+                    |height| height as f32,
+                ),
+            )
+        }
+    };
+    UVec2::new(align32(res.x), align32(res.y))
+}
+
 fn align32(value: f32) -> u32 {
     ((value / 32.).floor() * 32.) as u32
 }
@@ -606,27 +649,6 @@ fn connection_pipeline(
     };
 
     let initial_settings = session_manager_lock.settings().clone();
-
-    fn get_view_res(config: FrameSize, default_res: UVec2) -> UVec2 {
-        let res = match config {
-            FrameSize::Scale(scale) => default_res.as_vec2() * scale,
-            FrameSize::Absolute { width, height } => {
-                let width = width as f32;
-                Vec2::new(
-                    width,
-                    height.map_or_else(
-                        || {
-                            let default_res = default_res.as_vec2();
-                            width * default_res.y / default_res.x
-                        },
-                        |h| h as f32,
-                    ),
-                )
-            }
-        };
-
-        UVec2::new(align32(res.x), align32(res.y))
-    }
 
     let mut transcoding_view_resolution = get_view_res(
         initial_settings.video.transcoding_view_resolution.clone(),
