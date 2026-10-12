@@ -41,6 +41,7 @@ use std::{
     ffi::OsStr,
     fs::File,
     io::Write,
+    net::SocketAddr,
     sync::{
         Arc, LazyLock, OnceLock,
         atomic::{AtomicBool, Ordering},
@@ -187,6 +188,8 @@ pub struct ServerCoreContext {
     lifecycle_state: Arc<RwLock<LifecycleState>>,
     connection_context: Arc<ConnectionContext>,
     connection_thread: Arc<RwLock<Option<JoinHandle<()>>>>,
+    airlink_shutdown: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    airlink_thread: Mutex<Option<JoinHandle<()>>>,
     webserver_runtime: Option<Runtime>,
 }
 
@@ -247,6 +250,8 @@ impl ServerCoreContext {
                 lifecycle_state: Arc::new(RwLock::new(LifecycleState::StartingUp)),
                 connection_context,
                 connection_thread: Arc::new(RwLock::new(None)),
+                airlink_shutdown: Mutex::new(None),
+                airlink_thread: Mutex::new(None),
                 webserver_runtime: Some(webserver_runtime),
             },
             events_receiver,
@@ -259,10 +264,65 @@ impl ServerCoreContext {
         // Note: Idle state is not used on the server side
         *self.lifecycle_state.write() = LifecycleState::Resumed;
 
+        self.start_airlink_host();
+
         let connection_context = Arc::clone(&self.connection_context);
         let lifecycle_state = Arc::clone(&self.lifecycle_state);
         *self.connection_thread.write() = Some(thread::spawn(move || {
             connection::handshake_loop(connection_context, lifecycle_state);
+        }));
+    }
+
+    fn start_airlink_host(&self) {
+        if self.airlink_thread.lock().is_some() {
+            return;
+        }
+
+        let Some(layout) = FILESYSTEM_LAYOUT.get() else {
+            error!("Cannot start Air Link host before ALVR environment initialization");
+            return;
+        };
+        let state_dir = layout.config_dir.join("airlink");
+        let hostname = env::var("HOSTNAME").unwrap_or_else(|_| "alvr-host".to_owned());
+        let flavor = env::var("USER").unwrap_or_else(|_| "user".to_owned());
+        let endpoint_name = format!("{flavor}::{hostname}");
+        let advertise_address = alvr_system_info::local_ip();
+        if advertise_address.is_unspecified() {
+            error!("Cannot advertise Air Link host: local IP address is unspecified");
+            return;
+        }
+
+        let (shutdown_sender, shutdown_receiver) = tokio::sync::oneshot::channel();
+        *self.airlink_shutdown.lock() = Some(shutdown_sender);
+        *self.airlink_thread.lock() = Some(thread::spawn(move || {
+            let runtime = match Runtime::new() {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    error!("Cannot start Air Link runtime: {error}");
+                    return;
+                }
+            };
+            runtime.block_on(async move {
+                let address = SocketAddr::from(([0, 0, 0, 0], 0));
+                let host = match alvr_airlink::host::AirLinkHost::bind(
+                    state_dir,
+                    address,
+                    advertise_address,
+                    &hostname,
+                    &endpoint_name,
+                )
+                .await
+                {
+                    Ok(host) => host,
+                    Err(error) => {
+                        error!("Cannot start Meta Air Link host: {error}");
+                        return;
+                    }
+                };
+                if let Err(error) = host.run(shutdown_receiver).await {
+                    error!("Meta Air Link host stopped: {error}");
+                }
+            });
         }));
     }
 
@@ -548,6 +608,14 @@ impl Drop for ServerCoreContext {
 
         // Invoke connection runtimes shutdown
         *self.lifecycle_state.write() = LifecycleState::ShuttingDown;
+
+        if let Some(shutdown) = self.airlink_shutdown.lock().take() {
+            shutdown.send(()).ok();
+        }
+        if let Some(thread) = self.airlink_thread.lock().take() {
+            dbg_server_core!("Joining Meta Air Link host thread");
+            thread.join().ok();
+        }
 
         dbg_server_core!("Setting clients as Disconnecting");
         {
