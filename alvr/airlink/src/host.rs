@@ -13,6 +13,7 @@ use crate::{
     transport::{self, AirLinkListener},
 };
 use crate::video::AirLinkVideoFrame;
+use crate::tracking::{AirLinkControllerInput, AirLinkTrackingSample};
 use ring::rand::{SecureRandom, SystemRandom};
 use std::{
     io::{Error, ErrorKind},
@@ -32,6 +33,8 @@ pub struct AirLinkHost {
     video_receiver: broadcast::Receiver<AirLinkVideoFrame>,
     on_streaming_started: Arc<dyn Fn() + Send + Sync>,
     on_streaming_stopped: Arc<dyn Fn() + Send + Sync>,
+    on_tracking_update: Arc<dyn Fn(AirLinkTrackingSample) + Send + Sync>,
+    on_controller_input: Arc<dyn Fn(AirLinkControllerInput) + Send + Sync>,
     streaming_active: bool,
 }
 
@@ -55,6 +58,8 @@ impl AirLinkHost {
         video_receiver: broadcast::Receiver<AirLinkVideoFrame>,
         on_streaming_started: Arc<dyn Fn() + Send + Sync>,
         on_streaming_stopped: Arc<dyn Fn() + Send + Sync>,
+        on_tracking_update: Arc<dyn Fn(AirLinkTrackingSample) + Send + Sync>,
+        on_controller_input: Arc<dyn Fn(AirLinkControllerInput) + Send + Sync>,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let identity = HostIdentity::load_or_create(state_dir)?;
         let (certificate, private_key) = identity.rustls_identity();
@@ -77,6 +82,8 @@ impl AirLinkHost {
             video_receiver,
             on_streaming_started,
             on_streaming_stopped,
+            on_tracking_update,
+            on_controller_input,
             streaming_active: false,
         })
     }
@@ -229,6 +236,14 @@ impl AirLinkHost {
             } else if (2..=14).contains(&topic) {
                 if let Some(response) = ripc::channel_buffer_handshake_ack(&payload) {
                     self.send(stream, topic, response).await?;
+                } else if topic == 11 {
+                    if let Some(sample) = crate::tracking::unpack_tracking(&payload) {
+                        (self.on_tracking_update)(sample);
+                    }
+                } else if topic == 12 {
+                    if let Some(input) = crate::tracking::unpack_controller_input(&payload) {
+                        (self.on_controller_input)(input);
+                    }
                 }
             } else if (topic == ripc::SERVER_TRAFFIC_TOPIC
                 || topic == ripc::CLIENT_TRAFFIC_TOPIC)
