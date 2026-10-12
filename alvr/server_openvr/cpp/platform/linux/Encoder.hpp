@@ -153,11 +153,12 @@ public:
         }
 
         if (pipeCIs.empty()) {
-            pipeCIs.push_back({
-                .shaderData = std::vector(
-                    QUAD_SHADER_COMP_SPV_PTR, QUAD_SHADER_COMP_SPV_PTR + QUAD_SHADER_COMP_SPV_LEN
-                ),
-            });
+            // The order of this needs to be kept in sync with the shader!
+            auto info = makeSpecs((float)settings->m_encodingGamma);
+            info.shaderData = std::vector(
+                QUAD_SHADER_COMP_SPV_PTR, QUAD_SHADER_COMP_SPV_PTR + QUAD_SHADER_COMP_SPV_LEN
+            );
+            pipeCIs.push_back(info);
             warpCapableChain = true;
         } else {
             warpCapableChain = settings->m_enableFoveatedEncoding;
