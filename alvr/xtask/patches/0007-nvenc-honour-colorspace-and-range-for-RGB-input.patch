@@ -1,0 +1,46 @@
+From: Fabiano Tassotti <fabianotassotti@gmail.com>
+Subject: [PATCH] nvenc: honour colorspace and range for RGB input
+
+NVENC converts RGB input to YUV itself, following the VUI colour matrix and
+full range flag. FFmpeg forced limited range BT.601 there, whatever the
+caller set. Meta Air Link headsets read the stream as full range BT.709 and
+ignore the VUI, so the picture came out washed out with shifted hues.
+
+---
+ libavcodec/nvenc.c | 10 ++++++++--
+ 1 file changed, 8 insertions(+), 2 deletions(-)
+
+--- a/libavcodec/nvenc.c
++++ b/libavcodec/nvenc.c
+@@ -1276,10 +1276,13 @@
+     const AVPixFmtDescriptor *pixdesc = av_pix_fmt_desc_get(ctx->data_pix_fmt);
+ 
+     if ((pixdesc->flags & AV_PIX_FMT_FLAG_RGB) && !IS_GBRP(ctx->data_pix_fmt)) {
+-        vui->colourMatrix = to_nv_color_matrix(AVCOL_SPC_BT470BG);
++        // The encoder converts RGB input itself and follows these two fields.
++        // Honour what the caller asked for instead of forcing limited BT.601.
++        vui->colourMatrix = to_nv_color_matrix(avctx->colorspace == AVCOL_SPC_UNSPECIFIED
++                                               ? AVCOL_SPC_BT470BG : avctx->colorspace);
+         vui->colourPrimaries = to_nv_color_pri(avctx->color_primaries);
+         vui->transferCharacteristics = to_nv_color_trc(avctx->color_trc);
+-        vui->videoFullRangeFlag = 0;
++        vui->videoFullRangeFlag = (avctx->color_range == AVCOL_RANGE_JPEG);
+     } else {
+         vui->colourMatrix = to_nv_color_matrix(IS_GBRP(ctx->data_pix_fmt) ? AVCOL_SPC_RGB : avctx->colorspace);
+         vui->colourPrimaries = to_nv_color_pri(avctx->color_primaries);
+@@ -1467,10 +1470,13 @@
+     const AVPixFmtDescriptor *pixdesc = av_pix_fmt_desc_get(ctx->data_pix_fmt);
+ 
+     if ((pixdesc->flags & AV_PIX_FMT_FLAG_RGB) && !IS_GBRP(ctx->data_pix_fmt)) {
+-        vui->colourMatrix = to_nv_color_matrix(AVCOL_SPC_BT470BG);
++        // The encoder converts RGB input itself and follows these two fields.
++        // Honour what the caller asked for instead of forcing limited BT.601.
++        vui->colourMatrix = to_nv_color_matrix(avctx->colorspace == AVCOL_SPC_UNSPECIFIED
++                                               ? AVCOL_SPC_BT470BG : avctx->colorspace);
+         vui->colourPrimaries = to_nv_color_pri(avctx->color_primaries);
+         vui->transferCharacteristics = to_nv_color_trc(avctx->color_trc);
+-        vui->videoFullRangeFlag = 0;
++        vui->videoFullRangeFlag = (avctx->color_range == AVCOL_RANGE_JPEG);
+     } else {
+         vui->colourMatrix = to_nv_color_matrix(IS_GBRP(ctx->data_pix_fmt) ? AVCOL_SPC_RGB : avctx->colorspace);
+         vui->colourPrimaries = to_nv_color_pri(avctx->color_primaries);
