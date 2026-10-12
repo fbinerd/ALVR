@@ -333,21 +333,6 @@ void OvrDirectModeComponent::EncodeWorkerLoop() {
 }
 
 
-// True for SteamVR's compositor, which owns the texture sets of everything it
-// draws itself.
-static bool IsCompositorProcess(uint32_t pid) {
-    char path[64];
-    snprintf(path, sizeof(path), "/proc/%u/comm", pid);
-    FILE* file = fopen(path, "r");
-    if (file == nullptr) {
-        return false;
-    }
-    char name[32] = {};
-    bool found = fgets(name, sizeof(name), file) != nullptr
-        && strncmp(name, "vrcompositor", 12) == 0;
-    fclose(file);
-    return found;
-}
 
 void OvrDirectModeComponent::CreateSwapTextureSet(
     uint32_t unPid,
@@ -388,14 +373,14 @@ void OvrDirectModeComponent::CreateSwapTextureSet(
             pSwapTextureSetDesc->nHeight,
             true,
             false,
-            // Compute access only for applications. An sRGB image cannot be a
-            // storage image, so with it SteamVR's compositor writes what it
-            // draws itself (its environment, skybox overrides and loading
-            // screens, the dashboard) through a UNORM view, as linear values:
-            // 8 bit linear has almost no levels near black, and those values
-            // were then encoded as if they were sRGB. Applications need it:
-            // without it VRChat stops when its first frames are due.
-            !IsCompositorProcess(unPid),
+            // No compute access. An sRGB image cannot be a storage image, so
+            // with it SteamVR's compositor reads and writes these images
+            // through UNORM views: what it draws itself (its environment,
+            // skybox overrides and loading screens, the dashboard) lands as
+            // linear values, 8 bit linear has almost no levels near black, and
+            // an application's frame composited under the dashboard is read
+            // as if it were linear and comes out washed.
+            false,
             1,
             1,
             creationFlags,
