@@ -664,9 +664,18 @@ impl ServerCoreContext {
                 .map_or(global_view_params[0].pose, |motion| motion.pose);
             let position = pose.position.to_array();
             let orientation = pose.orientation.to_array();
+            // The encoder's parameter sets were split off the keyframe and
+            // stored as the decoder config; the headset needs them in band.
+            let mut nal = Vec::new();
+            if is_idr
+                && let Some(config) = &*self.connection_context.decoder_config.lock()
+            {
+                nal = alvr_airlink::video::without_delimiters_and_sei(&config.config_buffer);
+            }
+            nal.extend(alvr_airlink::video::without_delimiters_and_sei(&nal_buffer));
             let frame = alvr_airlink::video::AirLinkVideoFrame {
                 is_idr,
-                nal: nal_buffer.clone(),
+                nal,
                 head_pose: [
                     orientation[0], orientation[1], orientation[2], orientation[3], position[0],
                     position[1], position[2],

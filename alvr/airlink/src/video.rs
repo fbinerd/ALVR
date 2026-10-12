@@ -65,6 +65,35 @@ fn encode_varint(mut value: u64, output: &mut Vec<u8>) {
     output.push(value as u8);
 }
 
+/// Annex-B units as the headset's decoder takes them: four-byte start codes,
+/// no access unit delimiters (type 35) and no SEI (types 39 and 40).
+pub fn without_delimiters_and_sei(data: &[u8]) -> Vec<u8> {
+    let mut starts = Vec::new();
+    let mut i = 0;
+    while i + 3 < data.len() {
+        if data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 1 {
+            starts.push(i);
+            i += 3;
+        } else {
+            i += 1;
+        }
+    }
+    let mut out = Vec::with_capacity(data.len() + 4);
+    for (index, &start) in starts.iter().enumerate() {
+        let mut end = starts.get(index + 1).copied().unwrap_or(data.len());
+        // A four-byte start code belongs to the unit that follows it.
+        if index + 1 < starts.len() && end > 0 && data[end - 1] == 0 {
+            end -= 1;
+        }
+        let nal_type = (data[start + 3] >> 1) & 0x3f;
+        if !matches!(nal_type, 35 | 39 | 40) {
+            out.push(0);
+            out.extend_from_slice(&data[start..end]);
+        }
+    }
+    out
+}
+
 impl AirLinkVideoFrame {
     /// Build the observed Quest v209 packet header and 205-byte frame metadata.
     pub fn pack(&self, frame_id: u32, host_now_ns: u64, headset_offset_ns: i64) -> Vec<u8> {
