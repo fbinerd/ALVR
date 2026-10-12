@@ -663,8 +663,8 @@ impl ServerCoreContext {
                 is_idr,
                 nal: nal_buffer.clone(),
                 head_pose: [
-                    position[0], position[1], position[2], orientation[0], orientation[1],
-                    orientation[2], orientation[3],
+                    orientation[0], orientation[1], orientation[2], orientation[3], position[0],
+                    position[1], position[2],
                 ],
             };
             self.connection_context.airlink_video_sender.send(frame).ok();
