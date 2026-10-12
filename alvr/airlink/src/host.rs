@@ -25,6 +25,11 @@ use tokio::net::TcpStream;
 use tokio::sync::{broadcast, oneshot};
 use tokio_rustls::server::TlsStream;
 
+/// MeshChannel is the first stream channel the headset creates.
+const MESH_TOPIC: u32 = 2;
+/// Side-by-side picture size announced in the GPU stream channel config.
+const GPU_STREAM_RESOLUTION: (u32, u32) = (3680, 1920);
+
 pub struct AirLinkHost {
     listener: AirLinkListener,
     _advertiser: AirLinkAdvertiser,
@@ -48,6 +53,7 @@ struct RuntimeServiceState {
     oaf_client_route: Option<ripc::RuntimeIpcHeader>,
     gpu_stream_ready: bool,
     screen_is_on_sent: bool,
+    mesh_sent: bool,
     openxr_runtime_sent: bool,
 }
 
@@ -154,6 +160,18 @@ impl AirLinkHost {
                                     log::info!("sent Air Link SCREEN_IS_ON_UPDATE");
                                 }
                             }
+                            // The headset's decoder has to start on a keyframe.
+                            if next_video_frame_id == 2 && !frame.is_idr {
+                                continue;
+                            }
+                            if !runtime_service.mesh_sent {
+                                // Without the rectify mesh the headset decodes every
+                                // frame and keeps showing its loading environment.
+                                let mesh = crate::mesh::pack(GPU_STREAM_RESOLUTION);
+                                self.send(stream, MESH_TOPIC, &mesh).await?;
+                                runtime_service.mesh_sent = true;
+                                log::info!("sent Air Link rectify mesh: {} bytes", mesh.len());
+                            }
                             let packet = frame.pack(
                                 next_video_frame_id,
                                 monotonic_nanos(),
@@ -173,7 +191,12 @@ impl AirLinkHost {
                                     log::info!("sent Air Link OPENXR_RUNTIME_UPDATE");
                                 }
                             }
-                            next_video_frame_id = next_video_frame_id.saturating_add(1);
+                            // Windows numbers frames 2, 4, 5, ...; frame 3 never appears.
+                            next_video_frame_id = if next_video_frame_id == 2 {
+                                4
+                            } else {
+                                next_video_frame_id.saturating_add(1)
+                            };
                         }
                         Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
                         Err(broadcast::error::RecvError::Closed) => {
