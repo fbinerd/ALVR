@@ -5,6 +5,7 @@
 
 pub mod disco;
 pub mod discovery;
+pub mod guardian;
 pub mod host;
 pub mod identity;
 pub mod mesh;
