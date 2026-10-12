@@ -26,6 +26,10 @@ pub struct AirLinkHandInput {
 pub struct AirLinkControllerInput {
     pub left: AirLinkHandInput,
     pub right: AirLinkHandInput,
+    /// Battery charge in percent: left controller, right controller, headset.
+    /// One byte each at 36, 97 and 223; in the captures they only fall, each
+    /// on its own, and the headset's matches its own log.
+    pub battery_percent: [u8; 3],
 }
 
 fn read_f32(data: &[u8], offset: usize) -> Option<f32> {
@@ -98,5 +102,6 @@ pub fn unpack_controller_input(data: &[u8]) -> Option<AirLinkControllerInput> {
     Some(AirLinkControllerInput {
         left: read_hand_input(data, 37)?,
         right: read_hand_input(data, 98)?,
+        battery_percent: [data[36], data[97], data[223]],
     })
 }
