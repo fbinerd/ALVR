@@ -55,6 +55,23 @@ pub struct VideoPacket {
     pub payload: Vec<u8>,
 }
 
+/// Transfer curve of Air Link video. 2.2 is what Meta Horizon Link sends: a
+/// plain power curve, brighter than sRGB near black. 1 keeps the picture sRGB
+/// encoded, as Steam Link sends it: deeper blacks. Read at every stream start
+/// from `ALVR_AIRLINK_GAMMA` or `~/.config/alvr/airlink_gamma`.
+fn airlink_encoding_gamma() -> f32 {
+    std::env::var("ALVR_AIRLINK_GAMMA")
+        .ok()
+        .or_else(|| {
+            let home = std::env::var_os("HOME")?;
+            std::fs::read_to_string(std::path::Path::new(&home).join(".config/alvr/airlink_gamma"))
+                .ok()
+        })
+        .and_then(|text| text.trim().parse::<f32>().ok())
+        .filter(|gamma| (1.0..=3.0).contains(gamma))
+        .unwrap_or(2.2)
+}
+
 pub(crate) fn airlink_streaming_config(settings: &Settings) -> ServerNegotiatedStreamingConfig {
     let quest_2_default = UVec2::new(1832, 1920);
     let transcoding_view_resolution = get_view_res(
@@ -73,8 +90,7 @@ pub(crate) fn airlink_streaming_config(settings: &Settings) -> ServerNegotiatedS
         codec: settings.video.preferred_codec,
         h264_profile: settings.video.encoder_config.h264_profile,
         use_10bit_encoder: settings.video.encoder_config.use_10bit.unwrap_or(false),
-        // The headset shows Air Link video with a 2.2 power curve.
-        encoding_gamma: 2.2,
+        encoding_gamma: airlink_encoding_gamma(),
         enable_hdr: settings.video.encoder_config.hdr.enable.unwrap_or(false),
     }
 }

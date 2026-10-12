@@ -326,11 +326,13 @@ impl ServerCoreContext {
         let endpoint_name = format!("{flavor}::{hostname}");
         let video_receiver = self.connection_context.airlink_video_sender.subscribe();
         let settings = SESSION_MANAGER.read().settings().clone();
-        let negotiated_config = connection::airlink_streaming_config(&settings);
         let started_sender = self.connection_context.events_sender.clone();
         let on_streaming_started = Arc::new(move || {
+            // Built at every stream start, so setting changes apply on re-entry.
+            let negotiated_config =
+                connection::airlink_streaming_config(SESSION_MANAGER.read().settings());
             started_sender
-                .send(ServerCoreEvent::ClientConnected(negotiated_config.clone()))
+                .send(ServerCoreEvent::ClientConnected(negotiated_config))
                 .ok();
             started_sender
                 .send(ServerCoreEvent::LocalViewParams(airlink_view_params()))
