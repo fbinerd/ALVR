@@ -9,4 +9,5 @@ pub mod host;
 pub mod identity;
 pub mod ripc;
 pub mod transport;
+pub mod video;
 pub mod xrsp;

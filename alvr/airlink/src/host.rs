@@ -12,14 +12,16 @@ use crate::{
     ripc,
     transport::{self, AirLinkListener},
 };
+use crate::video::AirLinkVideoFrame;
 use ring::rand::{SecureRandom, SystemRandom};
 use std::{
     io::{Error, ErrorKind},
     net::{IpAddr, SocketAddr},
     path::Path,
+    sync::Arc,
 };
 use tokio::net::TcpStream;
-use tokio::sync::oneshot;
+use tokio::sync::{broadcast, oneshot};
 use tokio_rustls::server::TlsStream;
 
 pub struct AirLinkHost {
@@ -27,6 +29,10 @@ pub struct AirLinkHost {
     _advertiser: AirLinkAdvertiser,
     identity: HostIdentity,
     endpoint_name: String,
+    video_receiver: broadcast::Receiver<AirLinkVideoFrame>,
+    on_streaming_started: Arc<dyn Fn() + Send + Sync>,
+    on_streaming_stopped: Arc<dyn Fn() + Send + Sync>,
+    streaming_active: bool,
 }
 
 #[derive(Default)]
@@ -36,6 +42,7 @@ struct RuntimeServiceState {
     reverse_client_id: Option<u32>,
     bootstrap_index: usize,
     streaming_route: Option<ripc::RuntimeIpcHeader>,
+    gpu_stream_ready: bool,
 }
 
 impl AirLinkHost {
@@ -45,6 +52,9 @@ impl AirLinkHost {
         advertise_address: IpAddr,
         hostname: &str,
         endpoint_name: &str,
+        video_receiver: broadcast::Receiver<AirLinkVideoFrame>,
+        on_streaming_started: Arc<dyn Fn() + Send + Sync>,
+        on_streaming_stopped: Arc<dyn Fn() + Send + Sync>,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let identity = HostIdentity::load_or_create(state_dir)?;
         let (certificate, private_key) = identity.rustls_identity();
@@ -64,6 +74,10 @@ impl AirLinkHost {
             _advertiser: advertiser,
             identity,
             endpoint_name: endpoint_name.to_owned(),
+            video_receiver,
+            on_streaming_started,
+            on_streaming_stopped,
+            streaming_active: false,
         })
     }
 
@@ -72,7 +86,7 @@ impl AirLinkHost {
     }
 
     pub async fn run(
-        self,
+        mut self,
         mut shutdown: oneshot::Receiver<()>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         loop {
@@ -95,19 +109,49 @@ impl AirLinkHost {
             if let Err(error) = result {
                 log::warn!("Meta Air Link connection from {peer} ended: {error}");
             }
+            if self.streaming_active {
+                (self.on_streaming_stopped)();
+                self.streaming_active = false;
+            }
         }
     }
 
     async fn serve_connection(
-        &self,
+        &mut self,
         stream: &mut TlsStream<TcpStream>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let mut gpu_buffer_handshake_ack_sent = false;
         let mut gpu_initial_frame_sent = false;
         let mut quest_endpoint_uuid = None;
         let mut runtime_service = RuntimeServiceState::default();
+        let mut next_video_frame_id = 2u32;
+        let mut headset_offset_ns = 0i64;
         loop {
-            let (topic, payload) = transport::read_frame(stream).await?;
+            let (topic, payload) = tokio::select! {
+                received = self.video_receiver.recv() => {
+                    match received {
+                        Ok(frame) if runtime_service.gpu_stream_ready => {
+                            let packet = frame.pack(
+                                next_video_frame_id,
+                                monotonic_nanos(),
+                                headset_offset_ns,
+                            );
+                            self.send(stream, ripc::GPU_BUFFER_STREAM_TOPIC, &packet).await?;
+                            next_video_frame_id = next_video_frame_id.saturating_add(1);
+                        }
+                        Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                        Err(broadcast::error::RecvError::Closed) => {
+                            return Err(Error::new(
+                                ErrorKind::BrokenPipe,
+                                "ALVR video source closed",
+                            )
+                            .into());
+                        }
+                    }
+                    continue;
+                }
+                incoming = transport::read_frame(stream) => incoming?,
+            };
             let header = match disco::message_header(&payload) {
                 Ok(header) => header,
                 Err(_) => continue,
@@ -138,6 +182,7 @@ impl AirLinkHost {
                     MSG_CLOCK_SYNC_INIT => {
                         let client_time = protocol_result(disco::unpack_clock_sync_init(&payload))?;
                         let receive_time = monotonic_nanos();
+                        headset_offset_ns = client_time as i64 - receive_time as i64;
                         let send_time = monotonic_nanos();
                         let response = disco::pack_clock_sync_reply(
                             client_time,
@@ -248,7 +293,7 @@ impl AirLinkHost {
     }
 
     async fn handle_runtime_ipc(
-        &self,
+        &mut self,
         stream: &mut TlsStream<TcpStream>,
         topic: u32,
         message: ripc::RuntimeIpcMessage,
@@ -365,6 +410,7 @@ impl AirLinkHost {
                             header, rpc, ripc::GPU_STREAM_CHANNEL_DID_CONNECT_RESPONSE,
                         ))?;
                         self.send(stream, topic, &response).await?;
+                        runtime_service.gpu_stream_ready = true;
                         return Ok(());
                     }
                 }
@@ -407,6 +453,10 @@ impl AirLinkHost {
                         self.send(stream, topic, &accepted).await?;
                         if session_type == 3 {
                             runtime_service.streaming_invite_accepted = true;
+                            if !self.streaming_active {
+                                (self.on_streaming_started)();
+                                self.streaming_active = true;
+                            }
                         }
                     }
                     _ => {
