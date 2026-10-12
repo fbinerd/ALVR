@@ -372,29 +372,29 @@ impl ServerCoreContext {
                     position: Vec3::from_array(pose.position_xyz),
                 };
                 let timestamp = tracking_origin.elapsed();
-                let motions = [
-                    (
-                        *HEAD_ID,
-                        DeviceMotion {
-                            pose: pose(sample.head),
-                            ..DeviceMotion::default()
-                        },
-                    ),
-                    (
-                        *HAND_LEFT_ID,
-                        DeviceMotion {
-                            pose: pose(sample.left_hand),
-                            ..DeviceMotion::default()
-                        },
-                    ),
-                    (
-                        *HAND_RIGHT_ID,
-                        DeviceMotion {
-                            pose: pose(sample.right_hand),
-                            ..DeviceMotion::default()
-                        },
-                    ),
-                ];
+                let mut motions = vec![(
+                    *HEAD_ID,
+                    DeviceMotion {
+                        pose: pose(sample.head),
+                        ..DeviceMotion::default()
+                    },
+                )];
+                // A controller that is asleep or out of sight is left out:
+                // SteamVR then shows it as not tracked.
+                for (device_id, hand) in [
+                    (*HAND_LEFT_ID, sample.left_hand),
+                    (*HAND_RIGHT_ID, sample.right_hand),
+                ] {
+                    if let Some(hand) = hand {
+                        motions.push((
+                            device_id,
+                            DeviceMotion {
+                                pose: pose(hand),
+                                ..DeviceMotion::default()
+                            },
+                        ));
+                    }
+                }
                 tracking_context
                     .tracking_manager
                     .write()

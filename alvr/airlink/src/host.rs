@@ -38,8 +38,8 @@ const IDLE_POSE: AirLinkPose = AirLinkPose {
 /// Head pose reported until the headset's own tracking arrives.
 const IDLE_TRACKING_SAMPLE: AirLinkTrackingSample = AirLinkTrackingSample {
     head: IDLE_POSE,
-    left_hand: IDLE_POSE,
-    right_hand: IDLE_POSE,
+    left_hand: None,
+    right_hand: None,
 };
 
 pub struct AirLinkHost {
@@ -365,8 +365,11 @@ impl AirLinkHost {
                             })
                         });
                         sample.head.position_xyz[1] -= floor;
-                        sample.left_hand.position_xyz[1] -= floor;
-                        sample.right_hand.position_xyz[1] -= floor;
+                        for hand in [&mut sample.left_hand, &mut sample.right_hand] {
+                            if let Some(hand) = hand {
+                                hand.position_xyz[1] -= floor;
+                            }
+                        }
                         (self.on_tracking_update)(sample);
                     }
                 } else if topic == 12 {
