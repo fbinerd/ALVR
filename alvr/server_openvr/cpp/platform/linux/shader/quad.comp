@@ -4,6 +4,16 @@ layout (local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 layout (binding = 0) uniform sampler2D in_img;
 layout (binding = 1, rgba8) uniform writeonly image2D out_img;
 
+// Transfer curve of the encoded picture. 1 leaves the sRGB-encoded input as it
+// is. Any other value re-encodes it with a plain power curve of that gamma:
+// Meta Air Link headsets expect 2.2, which is brighter than sRGB near black.
+layout (constant_id = 0) const float encodingGamma = 1.;
+
+vec3 SrgbToLinear(vec3 c)
+{
+    return mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), step(0.04045, c));
+}
+
 // Rotational reprojection from the pose the frame was rendered with to the
 // newest tracking pose, folded into this pass so the warp costs no extra
 // resample. rotation is the source-from-destination view rotation
@@ -46,5 +56,8 @@ void main()
     }
 
     vec4 res = texture(in_img, npos);
+    if (encodingGamma != 1.) {
+        res.rgb = pow(SrgbToLinear(res.rgb), vec3(1. / encodingGamma));
+    }
     imageStore(out_img, pos, res);
 }
