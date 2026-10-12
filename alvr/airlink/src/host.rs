@@ -437,7 +437,7 @@ impl AirLinkHost {
                             self.send(
                                 stream,
                                 ripc::GPU_BUFFER_STREAM_TOPIC,
-                                &ripc::GPU_BUFFER_STREAM_INITIAL_FRAME,
+                                &ripc::gpu_buffer_stream_initial_frame(),
                             )
                             .await?;
                             gpu_initial_frame_sent = true;

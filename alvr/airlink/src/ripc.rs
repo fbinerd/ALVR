@@ -44,10 +44,28 @@ const GPU_BUFFER_HANDSHAKE_HEADER_SIZE: u64 = 42;
 const GPU_BUFFER_HANDSHAKE_PAYLOAD_SIZE: u64 = 12;
 const GPU_BUFFER_HANDSHAKE_ACK_OFFSET: usize = 53;
 
-pub const GPU_BUFFER_STREAM_INITIAL_FRAME: [u8; 23] = [
-    0x17, 0x9c, 0x04, 0, 0, 0, 0, 0x0f, 0x15, 0x02, 0x15, 0xc0, 0x39, 0x15, 0x80, 0x1e, 0x15,
-    0x04, 0x15, 0x04, 0x15, 0, 0,
-];
+/// First packet on the GPU buffer stream: it names the picture size again, as
+/// zigzag varints (3680x1920 in the capture: `15 c0 39 15 80 1e`). A size that
+/// differs from the stream configuration makes the headset drop the session
+/// when the first frame arrives.
+pub fn gpu_buffer_stream_initial_frame() -> Vec<u8> {
+    fn zigzag_varint(value: u32, out: &mut Vec<u8>) {
+        let mut value = u64::from(value) << 1;
+        while value >= 0x80 {
+            out.push((value & 0x7f) as u8 | 0x80);
+            value >>= 7;
+        }
+        out.push(value as u8);
+    }
+    let (width, height) = crate::video::stream_size();
+    let mut frame = vec![0, 0x9c, 0x04, 0, 0, 0, 0, 0x0f, 0x15, 0x02, 0x15];
+    zigzag_varint(width, &mut frame);
+    frame.push(0x15);
+    zigzag_varint(height, &mut frame);
+    frame.extend_from_slice(&[0x15, 0x04, 0x15, 0x04, 0x15, 0, 0]);
+    frame[0] = frame.len() as u8;
+    frame
+}
 
 const MESSAGE_HEADER_SIZE: usize = 32;
 pub const GPU_BUFFER_CHANNEL_NAME: &str = "gpu_buffer_stream_channel";
