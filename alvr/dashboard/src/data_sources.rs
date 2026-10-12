@@ -282,6 +282,26 @@ impl DataSources {
                                         )
                                     }
                                 }
+                                ServerRequest::GetAirLinkDevices => {
+                                    match alvr_audio::airlink_devices_enabled() {
+                                        Ok(enabled) => report_event_local(
+                                            &context,
+                                            &events_sender,
+                                            EventType::AirLinkDevices(enabled),
+                                        ),
+                                        Err(error) => error!("Failed to read AirLink devices: {error}"),
+                                    }
+                                }
+                                ServerRequest::SetAirLinkDevices(enabled) => {
+                                    match alvr_audio::set_airlink_devices_enabled(enabled) {
+                                        Ok(enabled) => report_event_local(
+                                            &context,
+                                            &events_sender,
+                                            EventType::AirLinkDevices(enabled),
+                                        ),
+                                        Err(error) => error!("Failed to update AirLink devices: {error}"),
+                                    }
+                                }
                                 ServerRequest::InsertIdr
                                 | ServerRequest::StartRecording
                                 | ServerRequest::StopRecording => {
@@ -341,6 +361,40 @@ impl DataSources {
                                 ServerRequest::RegisterAlvrDriver => post("drivers/register-alvr"),
                                 ServerRequest::UnregisterDriver(path) => {
                                     post_body(&rq, &base_uri, "drivers/unregister", Some(path))
+                                }
+                                ServerRequest::GetAirLinkDevices => {
+                                    if let Ok(response) = rq
+                                        .get(format!("{base_uri}/api/airlink-devices"))
+                                        .header("X-ALVR", "true")
+                                        .call()
+                                    {
+                                        if let Ok(enabled) =
+                                            response.into_body().read_json::<bool>()
+                                        {
+                                            report_event_local(
+                                                &context,
+                                                &events_sender,
+                                                EventType::AirLinkDevices(enabled),
+                                            );
+                                        }
+                                    }
+                                }
+                                ServerRequest::SetAirLinkDevices(enabled) => {
+                                    if let Ok(response) = rq
+                                        .post(format!("{base_uri}/api/airlink-devices"))
+                                        .header("X-ALVR", "true")
+                                        .send_json(enabled)
+                                    {
+                                        if let Ok(enabled) =
+                                            response.into_body().read_json::<bool>()
+                                        {
+                                            report_event_local(
+                                                &context,
+                                                &events_sender,
+                                                EventType::AirLinkDevices(enabled),
+                                            );
+                                        }
+                                    }
                                 }
                                 ServerRequest::InsertIdr => post("insert-idr"),
                                 ServerRequest::StartRecording => post("recording/start"),

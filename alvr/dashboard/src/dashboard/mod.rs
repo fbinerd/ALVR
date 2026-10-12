@@ -39,6 +39,8 @@ pub enum ServerRequest {
     GetDriverList,
     RegisterAlvrDriver,
     UnregisterDriver(PathBuf),
+    GetAirLinkDevices,
+    SetAirLinkDevices(bool),
     RestartSteamvr,
     ShutdownSteamvr,
 }
@@ -180,6 +182,9 @@ impl eframe::App for Dashboard {
                 EventType::ServerRequestsSelfRestart => self.restart_steamvr(&mut requests),
                 #[cfg(not(target_arch = "wasm32"))]
                 EventType::DriversList(list) => self.installation_tab.update_drivers(list),
+                EventType::AirLinkDevices(enabled) => {
+                    self.connections_tab.update_airlink_devices(enabled)
+                }
                 EventType::Adb(adb_event) => self
                     .connections_tab
                     .update_adb_download_progress(adb_event.download_progress),
