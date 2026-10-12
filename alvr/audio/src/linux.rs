@@ -124,7 +124,7 @@ impl AirLinkDevices {
                     ],
                 ),
             ];
-            let mut loaded = Vec::new();
+            let mut loaded: Vec<u32> = Vec::new();
             for (module, args) in modules {
                 let mut command_args = vec!["load-module", module];
                 command_args.extend(args.iter().map(String::as_str));

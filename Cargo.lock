@@ -201,6 +201,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "alvr_airlink"
+version = "21.0.0-dev14"
+dependencies = [
+ "libc",
+ "log",
+ "mdns-sd",
+ "rcgen",
+ "ring",
+ "rustls",
+ "tokio",
+ "tokio-rustls",
+ "uuid",
+]
+
+[[package]]
 name = "alvr_audio"
 version = "21.0.0-dev14"
 dependencies = [
@@ -394,6 +409,7 @@ name = "alvr_server_core"
 version = "21.0.0-dev14"
 dependencies = [
  "alvr_adb",
+ "alvr_airlink",
  "alvr_audio",
  "alvr_common",
  "alvr_events",
@@ -402,6 +418,7 @@ dependencies = [
  "alvr_server_io",
  "alvr_session",
  "alvr_sockets",
+ "alvr_system_info",
  "ash",
  "axum",
  "chrono",
@@ -4419,6 +4436,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "pem"
+version = "3.0.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1d30c53c26bc5b31a98cd02d20f25a7c8567146caf63ed593a9d87b2775291be"
+dependencies = [
+ "base64",
+ "serde_core",
+]
+
+[[package]]
 name = "peniko"
 version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4962,6 +4989,19 @@ name = "rawpointer"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "60a357793950651c4ed0f3f52338f53b2f809f32d83a07f72909fa13e4c6c1e3"
+
+[[package]]
+name = "rcgen"
+version = "0.13.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "75e669e5202259b5314d1ea5397316ad400819437857b90861765f24c4cf80a2"
+dependencies = [
+ "pem",
+ "ring",
+ "rustls-pki-types",
+ "time",
+ "yasna",
+]
 
 [[package]]
 name = "read-fonts"
@@ -6622,6 +6662,7 @@ version = "1.23.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bf80a72845275afea99e7f2b434723d3bc7e38470fcd1c7ed39a599c73319a53"
 dependencies = [
+ "getrandom 0.4.2",
  "js-sys",
  "serde_core",
  "wasm-bindgen",
@@ -8192,6 +8233,15 @@ name = "xshell-macros"
 version = "0.2.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32ac00cd3f8ec9c1d33fb3e7958a82df6989c42d747bd326c822b1d625283547"
+
+[[package]]
+name = "yasna"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e17bb3549cc1321ae1296b9cdc2698e2b6cb1992adfa19a8c72e5b7a738f44cd"
+dependencies = [
+ "time",
+]
 
 [[package]]
 name = "yoke"
