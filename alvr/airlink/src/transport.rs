@@ -52,22 +52,58 @@ impl AirLinkListener {
     }
 }
 
-pub async fn read_frame<R>(
-    stream: &mut R,
-) -> Result<(u32, Vec<u8>), Box<dyn std::error::Error + Send + Sync>>
-where
-    R: AsyncRead + Unpin,
-{
-    let mut header = [0; 8];
-    stream.read_exact(&mut header).await?;
-    let length = u32::from_be_bytes(header[..4].try_into()?) as usize;
-    let topic = u32::from_be_bytes(header[4..].try_into()?);
-    if length > MAX_FRAME_SIZE {
-        return Err(format!("DISCO frame exceeds {MAX_FRAME_SIZE} bytes").into());
+/// Reads DISCO frames and survives being dropped half way.
+///
+/// The host waits for a frame inside `tokio::select!` together with the video
+/// queue. A plain `read_exact` future that is dropped when a video frame wins
+/// has already consumed part of a frame, and the next read starts in the
+/// middle of it ("DISCO frame exceeds ... bytes" as soon as video flows).
+/// This reader keeps the partial bytes between calls; `read` itself loses
+/// nothing when cancelled.
+#[derive(Default)]
+pub struct FrameReader {
+    buffer: Vec<u8>,
+}
+
+impl FrameReader {
+    fn take_frame(
+        &mut self,
+    ) -> Result<Option<(u32, Vec<u8>)>, Box<dyn std::error::Error + Send + Sync>> {
+        if self.buffer.len() < 8 {
+            return Ok(None);
+        }
+        let length = u32::from_be_bytes(self.buffer[..4].try_into()?) as usize;
+        let topic = u32::from_be_bytes(self.buffer[4..8].try_into()?);
+        if length > MAX_FRAME_SIZE {
+            return Err(format!("DISCO frame exceeds {MAX_FRAME_SIZE} bytes").into());
+        }
+        if self.buffer.len() < 8 + length {
+            return Ok(None);
+        }
+        let payload = self.buffer[8..8 + length].to_vec();
+        self.buffer.drain(..8 + length);
+        Ok(Some((topic, payload)))
     }
-    let mut payload = vec![0; length];
-    stream.read_exact(&mut payload).await?;
-    Ok((topic, payload))
+
+    pub async fn read_frame<R>(
+        &mut self,
+        stream: &mut R,
+    ) -> Result<(u32, Vec<u8>), Box<dyn std::error::Error + Send + Sync>>
+    where
+        R: AsyncRead + Unpin,
+    {
+        loop {
+            if let Some(frame) = self.take_frame()? {
+                return Ok(frame);
+            }
+            let mut chunk = [0u8; 16 * 1024];
+            let read = stream.read(&mut chunk).await?;
+            if read == 0 {
+                return Err("connection closed by the headset".into());
+            }
+            self.buffer.extend_from_slice(&chunk[..read]);
+        }
+    }
 }
 
 pub async fn write_frame<W>(
@@ -79,9 +115,38 @@ where
     W: AsyncWrite + Unpin,
 {
     let length = u32::try_from(payload.len())?;
-    stream.write_all(&length.to_be_bytes()).await?;
-    stream.write_all(&topic.to_be_bytes()).await?;
+    // Header and payload as two writes: the peers put each in its own TLS
+    // record, and Windows' host ignores a frame that arrives in one.
+    let mut header = [0u8; 8];
+    header[..4].copy_from_slice(&length.to_be_bytes());
+    header[4..].copy_from_slice(&topic.to_be_bytes());
+    stream.write_all(&header).await?;
     stream.write_all(payload).await?;
     stream.flush().await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::FrameReader;
+
+    #[tokio::test]
+    async fn frames_survive_split_reads() {
+        let mut data = Vec::new();
+        for (topic, payload) in [(1u32, b"abc".as_slice()), (15u32, b"".as_slice())] {
+            data.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+            data.extend_from_slice(&topic.to_be_bytes());
+            data.extend_from_slice(payload);
+        }
+        let mut reader = FrameReader::default();
+        // Feed the bytes one at a time, as if every read were cut short.
+        let mut frames = Vec::new();
+        for byte in data {
+            reader.buffer.push(byte);
+            while let Some(frame) = reader.take_frame().unwrap() {
+                frames.push(frame);
+            }
+        }
+        assert_eq!(frames, vec![(1, b"abc".to_vec()), (15, Vec::new())]);
+    }
 }
