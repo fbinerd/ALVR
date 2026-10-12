@@ -459,9 +459,14 @@ Renderer::Renderer(
     if (inputFormat == vk::Format::eB8G8R8A8Srgb)
         unormFormat = vk::Format::eB8G8R8A8Unorm;
 
+    // Without MUTABLE_FORMAT only a view of the image's own format is legal.
+    // The input is copied, never sampled, so the view's format does not matter.
+    vk::Format inputViewFormat = createInfo.mutableFormat ? unormFormat : inputFormat;
+
     // TODO: Only put the usage flags for the images that need to have them
     vk::ImageCreateInfo inputImgCI {
-        .flags = vk::ImageCreateFlagBits::eMutableFormat,
+        .flags = createInfo.mutableFormat ? vk::ImageCreateFlagBits::eMutableFormat
+                                          : vk::ImageCreateFlags {},
         .imageType = vk::ImageType::e2D,
         .format = inputFormat,
 
@@ -481,7 +486,8 @@ Renderer::Renderer(
     };
 
     for (int i = 0; i < ImageCount; ++i) {
-        inputImages[i] = createImage(vkCtx, inputImgCI, createInfo.inputImgFds[i], unormFormat);
+        inputImages[i]
+            = createImage(vkCtx, inputImgCI, createInfo.inputImgFds[i], inputViewFormat);
     }
 
     // Everything downstream is UNORM regardless of the input format: the

@@ -63,6 +63,8 @@ struct PipelineCreateInfo {
 struct RendererCreateInfo {
     // The input images hold linear values, not sRGB-encoded ones.
     bool linearInput = false;
+    // The input images were created with VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT.
+    bool mutableFormat = true;
     vk::Format format;
     vk::Extent2D inputEyeExtent;
     vk::Extent2D outputExtent;

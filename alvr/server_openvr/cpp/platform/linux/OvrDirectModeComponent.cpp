@@ -332,6 +332,8 @@ void OvrDirectModeComponent::EncodeWorkerLoop() {
     }
 }
 
+static bool MutableFormatTextures();
+
 void OvrDirectModeComponent::CreateSwapTextureSet(
     uint32_t unPid,
     const SwapTextureSetDesc_t* pSwapTextureSetDesc,
@@ -361,7 +363,9 @@ void OvrDirectModeComponent::CreateSwapTextureSet(
         | vk::ImageUsageFlagBits::eInputAttachment
     );
 
-    uint32_t creationFlags = static_cast<uint32_t>(vk::ImageCreateFlagBits::eMutableFormat);
+    uint32_t creationFlags = MutableFormatTextures()
+        ? static_cast<uint32_t>(vk::ImageCreateFlagBits::eMutableFormat)
+        : 0;
 
     for (int i = 0; i < 3; i++) {
         vr::SharedTextureHandle_t myHandle = 0;
@@ -519,6 +523,21 @@ void OvrDirectModeComponent::SubmitLayer(const SubmitLayerPerEye_t (&perEye)[2])
     m_presentMutex.unlock();
 }
 
+// Experiment switch: with ~/.config/alvr/airlink_nomutable present the shared
+// textures are created without MUTABLE_FORMAT, to see whether the compositor
+// then fills them sRGB encoded like applications do.
+static bool MutableFormatTextures() {
+    static const bool result = [] {
+        const char* home = getenv("HOME");
+        if (home == nullptr) {
+            return true;
+        }
+        std::string path = std::string(home) + "/.config/alvr/airlink_nomutable";
+        return access(path.c_str(), F_OK) != 0;
+    }();
+    return result;
+}
+
 // SteamVR's compositor owns the texture sets of everything it draws itself.
 // Those hold linear values, unlike the sRGB-encoded ones applications submit.
 static bool IsCompositorProcess(uint32_t pid) {
@@ -665,7 +684,9 @@ void OvrDirectModeComponent::Present(vr::SharedTextureHandle_t syncTexture) {
         auto& desc = leftIt->second.first->textDesc;
 
         alvr::render::RendererCreateInfo rendererCI {
-            .linearInput = IsCompositorProcess(leftIt->second.first->pid),
+            .linearInput = MutableFormatTextures()
+                && IsCompositorProcess(leftIt->second.first->pid),
+            .mutableFormat = MutableFormatTextures(),
             .format = (vk::Format)(VkFormat)desc.nFormat,
             .inputEyeExtent {
                 .width = desc.nWidth,
