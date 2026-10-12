@@ -1,5 +1,24 @@
 //! Air Link video packet envelope for encoded ALVR frames.
 
+use std::sync::atomic::{AtomicU32, Ordering};
+
+// Size of the encoded picture, both eyes side by side. Meta Horizon Link
+// negotiates it per session (3680x1920 by default for a Quest 2, 2880x1536
+// seen with a narrower encode width) and names it in three places: the GPU
+// stream configuration event, the GPU buffer channel response and the rectify
+// mesh. They have to agree with what the encoder produces.
+static STREAM_WIDTH: AtomicU32 = AtomicU32::new(3680);
+static STREAM_HEIGHT: AtomicU32 = AtomicU32::new(1920);
+
+pub fn set_stream_size(width: u32, height: u32) {
+    STREAM_WIDTH.store(width, Ordering::Relaxed);
+    STREAM_HEIGHT.store(height, Ordering::Relaxed);
+}
+
+pub fn stream_size() -> (u32, u32) {
+    (STREAM_WIDTH.load(Ordering::Relaxed), STREAM_HEIGHT.load(Ordering::Relaxed))
+}
+
 #[derive(Clone, Debug)]
 pub struct AirLinkVideoFrame {
     pub is_idr: bool,

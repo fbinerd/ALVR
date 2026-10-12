@@ -82,6 +82,12 @@ pub(crate) fn airlink_streaming_config(settings: &Settings) -> ServerNegotiatedS
         settings.video.emulated_headset_view_resolution.clone(),
         quest_2_default,
     );
+    // On Linux the encoder's output is the driver's recommended target size,
+    // which is the emulated headset resolution, both eyes side by side.
+    alvr_airlink::video::set_stream_size(
+        emulated_headset_view_resolution.x * 2,
+        emulated_headset_view_resolution.y,
+    );
     ServerNegotiatedStreamingConfig {
         transcoding_view_resolution,
         emulated_headset_view_resolution,
