@@ -174,8 +174,24 @@ impl AirLinkHost {
         let mut floor_y: Option<f32> = None;
         let mut idle_pose_timer = tokio::time::interval(std::time::Duration::from_micros(13_889));
         idle_pose_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // The keyframe asked for when the stream becomes ready can be lost:
+        // ALVR drops a frame whose head pose it does not have yet, and then
+        // forwards nothing until it has seen a keyframe. Keep asking.
+        let mut keyframe_retry_timer =
+            tokio::time::interval(std::time::Duration::from_millis(500));
+        keyframe_retry_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             let (topic, payload) = tokio::select! {
+                _ = keyframe_retry_timer.tick(),
+                    if runtime_service.gpu_stream_ready && next_video_frame_id == 2 =>
+                {
+                    if last_keyframe_request.elapsed().as_millis() >= 500 {
+                        log::info!("Air Link video has not started: asking for a keyframe");
+                        (self.on_keyframe_needed)();
+                        last_keyframe_request = std::time::Instant::now();
+                    }
+                    continue;
+                }
                 _ = idle_pose_timer.tick(),
                     if runtime_service.gpu_stream_ready && !tracking_received =>
                 {
