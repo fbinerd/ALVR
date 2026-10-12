@@ -332,7 +332,6 @@ void OvrDirectModeComponent::EncodeWorkerLoop() {
     }
 }
 
-static bool MutableFormatTextures();
 
 void OvrDirectModeComponent::CreateSwapTextureSet(
     uint32_t unPid,
@@ -363,9 +362,7 @@ void OvrDirectModeComponent::CreateSwapTextureSet(
         | vk::ImageUsageFlagBits::eInputAttachment
     );
 
-    uint32_t creationFlags = MutableFormatTextures()
-        ? static_cast<uint32_t>(vk::ImageCreateFlagBits::eMutableFormat)
-        : 0;
+    uint32_t creationFlags = static_cast<uint32_t>(vk::ImageCreateFlagBits::eMutableFormat);
 
     for (int i = 0; i < 3; i++) {
         vr::SharedTextureHandle_t myHandle = 0;
@@ -375,7 +372,13 @@ void OvrDirectModeComponent::CreateSwapTextureSet(
             pSwapTextureSetDesc->nHeight,
             true,
             false,
-            true,
+            // No compute access. An sRGB image cannot be a storage image, so
+            // with it SteamVR's compositor writes what it draws itself (its
+            // environment, skybox overrides and loading screens, the
+            // dashboard) through a UNORM view, as linear values: 8 bit linear
+            // has almost no levels near black, and those values were then
+            // encoded as if they were sRGB, at about 15 % of the brightness.
+            false,
             1,
             1,
             creationFlags,
@@ -523,37 +526,6 @@ void OvrDirectModeComponent::SubmitLayer(const SubmitLayerPerEye_t (&perEye)[2])
     m_presentMutex.unlock();
 }
 
-// Experiment switch: with ~/.config/alvr/airlink_nomutable present the shared
-// textures are created without MUTABLE_FORMAT, to see whether the compositor
-// then fills them sRGB encoded like applications do.
-static bool MutableFormatTextures() {
-    static const bool result = [] {
-        const char* home = getenv("HOME");
-        if (home == nullptr) {
-            return true;
-        }
-        std::string path = std::string(home) + "/.config/alvr/airlink_nomutable";
-        return access(path.c_str(), F_OK) != 0;
-    }();
-    return result;
-}
-
-// SteamVR's compositor owns the texture sets of everything it draws itself.
-// Those hold linear values, unlike the sRGB-encoded ones applications submit.
-static bool IsCompositorProcess(uint32_t pid) {
-    char path[64];
-    snprintf(path, sizeof(path), "/proc/%u/comm", pid);
-    FILE* file = fopen(path, "r");
-    if (file == nullptr) {
-        return false;
-    }
-    char name[32] = {};
-    bool found = fgets(name, sizeof(name), file) != nullptr
-        && strncmp(name, "vrcompositor", 12) == 0;
-    fclose(file);
-    return found;
-}
-
 /** Submits queued layers for display. */
 void OvrDirectModeComponent::Present(vr::SharedTextureHandle_t syncTexture) {
     // Diagnostic: which layers SteamVR submits. Logged when the number of
@@ -684,9 +656,6 @@ void OvrDirectModeComponent::Present(vr::SharedTextureHandle_t syncTexture) {
         auto& desc = leftIt->second.first->textDesc;
 
         alvr::render::RendererCreateInfo rendererCI {
-            .linearInput = MutableFormatTextures()
-                && IsCompositorProcess(leftIt->second.first->pid),
-            .mutableFormat = MutableFormatTextures(),
             .format = (vk::Format)(VkFormat)desc.nFormat,
             .inputEyeExtent {
                 .width = desc.nWidth,
