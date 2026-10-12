@@ -22,6 +22,8 @@ pub struct DevicesTab {
     edit_popup_state: Option<EditPopupState>,
     adb_download_progress: Option<f32>,
     launch_steamvr_requested: bool,
+    airlink_devices_enabled: Option<bool>,
+    airlink_devices_status_requested: bool,
 }
 
 impl DevicesTab {
@@ -32,6 +34,8 @@ impl DevicesTab {
             edit_popup_state: None,
             adb_download_progress: None,
             launch_steamvr_requested: false,
+            airlink_devices_enabled: None,
+            airlink_devices_status_requested: false,
         }
     }
 
@@ -55,11 +59,19 @@ impl DevicesTab {
         std::mem::take(&mut self.launch_steamvr_requested)
     }
 
+    pub fn update_airlink_devices(&mut self, enabled: bool) {
+        self.airlink_devices_enabled = Some(enabled);
+    }
+
     pub fn ui(&mut self, ui: &mut Ui, connected_to_server: bool) -> Vec<ServerRequest> {
         let mut requests = vec![];
 
         if self.new_devices.is_none() {
             requests.push(ServerRequest::GetSession);
+        }
+        if !self.airlink_devices_status_requested {
+            requests.push(ServerRequest::GetAirLinkDevices);
+            self.airlink_devices_status_requested = true;
         }
 
         if !connected_to_server {
@@ -100,6 +112,12 @@ impl DevicesTab {
                     self.adb_download_progress,
                 )
             {
+                requests.push(request);
+            }
+
+            ui.add_space(theme::FRAME_PADDING);
+
+            if let Some(request) = airlink_devices_section(ui, self.airlink_devices_enabled) {
                 requests.push(request);
             }
 
@@ -190,6 +208,50 @@ impl DevicesTab {
 
         requests
     }
+}
+
+fn airlink_devices_section(ui: &mut Ui, enabled: Option<bool>) -> Option<ServerRequest> {
+    let mut request = None;
+
+    Frame::group(ui.style())
+        .fill(theme::SECTION_BG)
+        .inner_margin(egui::vec2(
+            theme::FRAME_PADDING + theme::FRAME_TEXT_SPACING,
+            theme::FRAME_PADDING,
+        ))
+        .show(ui, |ui| {
+            Grid::new("airlink-devices")
+                .num_columns(2)
+                .spacing(egui::vec2(8.0, 8.0))
+                .show(ui, |ui| {
+                    ui.heading("AirLink Devices");
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if let Some(enabled) = enabled {
+                            let mut enabled = enabled;
+                            if alvr_gui_common::switch(ui, &mut enabled).changed() {
+                                request = Some(ServerRequest::SetAirLinkDevices(enabled));
+                            }
+                        } else {
+                            ui.spinner();
+                        }
+                    });
+                    ui.end_row();
+
+                    ui.label("PipeWire endpoints reserved for Air Link audio.");
+                    ui.label(match enabled {
+                        Some(true) => "Active: AirLink Microphone and AirLink Speakers",
+                        Some(false) => "Inactive",
+                        None => "Checking PipeWire...",
+                    });
+                    ui.end_row();
+
+                    ui.label("Endpoints are created in the current user's PipeWire session.");
+                    ui.label("Quest audio transport is not connected yet.");
+                    ui.end_row();
+                });
+        });
+
+    request
 }
 
 fn wired_client_section(
