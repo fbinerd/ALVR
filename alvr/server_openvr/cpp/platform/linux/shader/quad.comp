@@ -65,7 +65,18 @@ void main()
         npos = clamp(srcUV, lo, hi);
     }
 
-    vec4 res = texture(in_img, npos);
+    // Shrinking with one bilinear tap skips source texels and aliases. Four
+    // taps spread over the output pixel's footprint cover it.
+    vec2 inTexel = 1. / vec2(textureSize(in_img, 0));
+    vec2 footprint = vec2(textureSize(in_img, 0)) / vec2(imageSize(out_img));
+    vec4 res;
+    if (max(footprint.x, footprint.y) > 1.05) {
+        vec2 d = .25 * footprint * inTexel;
+        res = .25 * (texture(in_img, npos + vec2(-d.x, -d.y)) + texture(in_img, npos + vec2(d.x, -d.y))
+            + texture(in_img, npos + vec2(-d.x, d.y)) + texture(in_img, npos + d));
+    } else {
+        res = texture(in_img, npos);
+    }
     if (encodingGamma != 1.) {
         vec3 linear = inputLinear != 0. ? res.rgb : SrgbToLinear(res.rgb);
         res.rgb = pow(linear, vec3(1. / encodingGamma));
