@@ -273,6 +273,16 @@ fn spawn_event_loop(events_receiver: mpsc::Receiver<ServerCoreEvent>) {
                 ServerCoreEvent::PlayspaceSync(bounds) => unsafe {
                     SetChaperoneArea(bounds.x, bounds.y)
                 },
+                ServerCoreEvent::AirLinkGuardian {
+                    perimeter,
+                    play_area,
+                } => {
+                    let points: Vec<f32> = perimeter.iter().flat_map(|p| p.to_array()).collect();
+                    let area = play_area.unwrap_or_default();
+                    unsafe {
+                        SetAirLinkGuardian(points.as_ptr(), perimeter.len() as i32, area.x, area.y)
+                    };
+                }
                 ServerCoreEvent::LocalViewParams(params) => unsafe {
                     *LOCAL_VIEW_PARAMS.write() = params;
                     if let Some(foveation) = &mut *EYE_TRACKED_FOVEATION.lock() {
