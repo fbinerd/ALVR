@@ -175,6 +175,38 @@ pub fn pack_gpu_stream_channel_config_event(route: RuntimeIpcHeader) -> Result<V
     RuntimeIpcMessage::pack(header, &payload)
 }
 
+/// Link sharpening on the headset: 1 disabled, 2 normal, 3 quality.
+///
+/// Meta Horizon Link 208 sends this session event on the streaming client's
+/// route when the stream channels exist and again whenever the setting
+/// changes. The body is 4143 bytes, zero after the first 43; the level is the
+/// byte at offset 38. Without it the headset leaves sharpening off.
+pub fn pack_sharpening_event(route: RuntimeIpcHeader, level: u8) -> Result<Vec<u8>, &'static str> {
+    const PREFIX: [u8; 43] = [
+        0x02, 0x00, 0xcb, 0xbd, 0x18, 0xd1, 0x00, 0x26, 0xd9, 0x62, 0xc6, 0x40, 0x34, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0c, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x06,
+        0x00, 0x00, 0x00, 0xef, 0xa0, 0xbc, 0x4d, 0x02, 0x02, 0x8c, 0x40, 0x80, 0x20,
+    ];
+    if !(1..=3).contains(&level) {
+        return Err("sharpening level out of range");
+    }
+    let mut payload = vec![0u8; 4143];
+    payload[..PREFIX.len()].copy_from_slice(&PREFIX);
+    payload[38] = level;
+    let header = RuntimeIpcHeader {
+        message_type: MESSAGE_TYPE_SESSION_EVENT,
+        message_size: payload.len() as u32,
+        client_id: route.client_id,
+        server_id: route.server_id,
+        one_way: false,
+        request_id: 0,
+        memory_id: 0,
+        message_direction: MESSAGE_DIRECTION_RESPONSE,
+        rpc_failure_status: 0,
+    };
+    RuntimeIpcMessage::pack(header, &payload)
+}
+
 const GPU_BUFFER_CHANNEL_RESPONSE_BODY_HEX: &str = concat!(
     "a006196770755f6275666665725f73747265616d5f6368616e6e656c",
     "6dee56c1d805196770755f6275666665725f73747265616d5f6368616e6e656c",
