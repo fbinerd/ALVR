@@ -524,6 +524,10 @@ impl AirLinkHost {
                     if let Some(route) = runtime_service.streaming_route {
                         let event = protocol_result(ripc::pack_gpu_stream_channel_config_event(route))?;
                         self.send(stream, ripc::CLIENT_TRAFFIC_TOPIC, &event).await?;
+                        let level = sharpening_level();
+                        let event = protocol_result(ripc::pack_sharpening_event(route, level))?;
+                        self.send(stream, ripc::CLIENT_TRAFFIC_TOPIC, &event).await?;
+                        log::info!("sent Air Link sharpening level {level}");
                     } else {
                         log::warn!("Air Link GPU config event skipped: no streaming invite route");
                     }
@@ -735,6 +739,21 @@ impl AirLinkHost {
         }
         transport::write_frame(stream, topic, payload).await
     }
+}
+
+/// Headset sharpening level: 2 (normal) as Meta Horizon Link does by default.
+/// `ALVR_AIRLINK_SHARPENING` or the first character of
+/// `~/.config/alvr/airlink_sharpening` selects 1 (off), 2 or 3 (quality).
+fn sharpening_level() -> u8 {
+    std::env::var("ALVR_AIRLINK_SHARPENING")
+        .ok()
+        .or_else(|| {
+            let home = std::env::var_os("HOME")?;
+            std::fs::read_to_string(Path::new(&home).join(".config/alvr/airlink_sharpening")).ok()
+        })
+        .and_then(|text| text.trim().parse::<u8>().ok())
+        .filter(|level| (1..=3).contains(level))
+        .unwrap_or(2)
 }
 
 /// One line per RuntimeIPC frame while tracing is enabled: enough to
