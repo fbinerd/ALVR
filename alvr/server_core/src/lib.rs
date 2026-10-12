@@ -17,18 +17,29 @@ pub use tracking::HandType;
 
 use crate::connection::VideoPacket;
 use alvr_common::{
-    AlvrFoveatedEncodingParams, ConnectionState, DEVICE_ID_TO_PATH, DeviceMotion, LifecycleState,
-    Pose, ViewParams, dbg_server_core, error,
-    glam::{Quat, UVec2, Vec2},
+    AlvrFoveatedEncodingParams, ConnectionState, DEVICE_ID_TO_PATH, DeviceMotion, Fov, HAND_LEFT_ID,
+    HAND_RIGHT_ID, HEAD_ID, LifecycleState, Pose, ViewParams, dbg_server_core, error,
+    glam::{Quat, UVec2, Vec2, Vec3},
     parking_lot::{Mutex, RwLock},
     settings_schema::Switch,
     warn,
 };
+use alvr_common::inputs::{
+    CONTROLLER_PROFILE_INFO, LEFT_MENU_CLICK_ID, LEFT_SQUEEZE_VALUE_ID,
+    LEFT_THUMBSTICK_CLICK_ID, LEFT_THUMBSTICK_TOUCH_ID, LEFT_THUMBSTICK_X_ID,
+    LEFT_THUMBSTICK_Y_ID, LEFT_THUMBREST_TOUCH_ID, LEFT_TRIGGER_TOUCH_ID,
+    LEFT_TRIGGER_VALUE_ID, LEFT_X_CLICK_ID, LEFT_X_TOUCH_ID, LEFT_Y_CLICK_ID,
+    LEFT_Y_TOUCH_ID, QUEST_CONTROLLER_PROFILE_ID, RIGHT_A_CLICK_ID, RIGHT_A_TOUCH_ID,
+    RIGHT_B_CLICK_ID, RIGHT_B_TOUCH_ID, RIGHT_SQUEEZE_VALUE_ID, RIGHT_SYSTEM_CLICK_ID,
+    RIGHT_THUMBSTICK_CLICK_ID, RIGHT_THUMBSTICK_TOUCH_ID, RIGHT_THUMBSTICK_X_ID,
+    RIGHT_THUMBSTICK_Y_ID, RIGHT_THUMBREST_TOUCH_ID, RIGHT_TRIGGER_TOUCH_ID,
+    RIGHT_TRIGGER_VALUE_ID,
+};
 use alvr_events::{EventType, HapticsEvent};
 use alvr_filesystem as afs;
 use alvr_packets::{
-    BatteryInfo, ButtonEntry, ClientConnectionsAction, DecoderInitializationConfig, Haptics,
-    VideoPacketHeader,
+    BatteryInfo, ButtonEntry, ButtonValue, ClientConnectionsAction, DecoderInitializationConfig,
+    Haptics, VideoPacketHeader,
 };
 use alvr_server_io::ServerSessionManager;
 use alvr_session::{CodecType, H264Profile, OpenvrProperty, Settings, SteamvrHmdInitConfig};
@@ -83,6 +94,23 @@ pub struct ServerNegotiatedStreamingConfig {
     pub use_10bit_encoder: bool,
     pub encoding_gamma: f32,
     pub enable_hdr: bool,
+}
+
+fn airlink_view_params() -> [ViewParams; 2] {
+    let (up, down, outer, inner) = (1.1106_f32, 1.1917_f32, 1.2799_f32, 1.0_f32);
+    let eye = |x: f32, left: f32, right: f32| ViewParams {
+        pose: Pose {
+            orientation: Quat::IDENTITY,
+            position: Vec3::new(x, 0.0, 0.0),
+        },
+        fov: Fov {
+            left: -left.atan(),
+            right: right.atan(),
+            up: up.atan(),
+            down: -down.atan(),
+        },
+    };
+    [eye(-0.0315, outer, inner), eye(0.0315, inner, outer)]
 }
 
 pub enum ServerCoreEvent {
@@ -298,11 +326,145 @@ impl ServerCoreContext {
             started_sender
                 .send(ServerCoreEvent::ClientConnected(negotiated_config.clone()))
                 .ok();
+            started_sender
+                .send(ServerCoreEvent::LocalViewParams(airlink_view_params()))
+                .ok();
+            started_sender.send(ServerCoreEvent::ProximityState(true)).ok();
         });
         let stopped_sender = self.connection_context.events_sender.clone();
         let on_streaming_stopped = Arc::new(move || {
+            stopped_sender.send(ServerCoreEvent::ProximityState(false)).ok();
             stopped_sender.send(ServerCoreEvent::ClientDisconnected).ok();
         });
+        let tracking_context = Arc::clone(&self.connection_context);
+        let tracking_events = self.connection_context.events_sender.clone();
+        let tracking_origin = Instant::now();
+        let headset_settings = settings.headset.clone();
+        let on_tracking_update = Arc::new(
+            move |sample: alvr_airlink::tracking::AirLinkTrackingSample| {
+                let pose = |pose: alvr_airlink::tracking::AirLinkPose| Pose {
+                    orientation: Quat::from_xyzw(
+                        pose.orientation_xyzw[0],
+                        pose.orientation_xyzw[1],
+                        pose.orientation_xyzw[2],
+                        pose.orientation_xyzw[3],
+                    )
+                    .normalize(),
+                    position: Vec3::from_array(pose.position_xyz),
+                };
+                let timestamp = tracking_origin.elapsed();
+                let motions = [
+                    (
+                        *HEAD_ID,
+                        DeviceMotion {
+                            pose: pose(sample.head),
+                            ..DeviceMotion::default()
+                        },
+                    ),
+                    (
+                        *HAND_LEFT_ID,
+                        DeviceMotion {
+                            pose: pose(sample.left_hand),
+                            ..DeviceMotion::default()
+                        },
+                    ),
+                    (
+                        *HAND_RIGHT_ID,
+                        DeviceMotion {
+                            pose: pose(sample.right_hand),
+                            ..DeviceMotion::default()
+                        },
+                    ),
+                ];
+                tracking_context
+                    .tracking_manager
+                    .write()
+                    .report_device_motions(&headset_settings, timestamp, &motions);
+                if let Some(stats) = &mut *tracking_context.statistics_manager.write() {
+                    stats.report_tracking_received(timestamp);
+                }
+                tracking_events
+                    .send(ServerCoreEvent::Tracking {
+                        poll_timestamp: timestamp,
+                    })
+                    .ok();
+            },
+        );
+
+        let button_mapper = if let Switch::Enabled(config) = &settings.headset.controllers {
+            let source_buttons = CONTROLLER_PROFILE_INFO
+                .get(&QUEST_CONTROLLER_PROFILE_ID)
+                .map(|profile| profile.button_set.clone())
+                .unwrap_or_default();
+            Some(if let Some(mappings) = &config.button_mappings {
+                input_mapping::ButtonMappingManager::new_manual(mappings)
+            } else {
+                input_mapping::ButtonMappingManager::new_automatic(
+                    &source_buttons,
+                    &config.emulation_mode,
+                    &config.button_mapping_config,
+                )
+            })
+        } else {
+            None
+        };
+        let button_mapper = Arc::new(Mutex::new(button_mapper));
+        let button_events = self.connection_context.events_sender.clone();
+        let on_controller_input = Arc::new(
+            move |input: alvr_airlink::tracking::AirLinkControllerInput| {
+                let binary = |path_id, value| ButtonEntry {
+                    path_id,
+                    value: ButtonValue::Binary(value),
+                };
+                let scalar = |path_id, value| ButtonEntry {
+                    path_id,
+                    value: ButtonValue::Scalar(value),
+                };
+                let left = input.left;
+                let right = input.right;
+                let entries = [
+                    binary(*LEFT_X_CLICK_ID, left.buttons & 0x100 != 0),
+                    binary(*LEFT_X_TOUCH_ID, left.touches & 1 != 0),
+                    binary(*LEFT_Y_CLICK_ID, left.buttons & 0x200 != 0),
+                    binary(*LEFT_Y_TOUCH_ID, left.touches & 2 != 0),
+                    binary(*LEFT_MENU_CLICK_ID, left.buttons & 0x4000_0000 != 0),
+                    scalar(*LEFT_SQUEEZE_VALUE_ID, left.grip),
+                    scalar(*LEFT_TRIGGER_VALUE_ID, left.trigger),
+                    binary(*LEFT_TRIGGER_TOUCH_ID, left.touches & 0x10 != 0),
+                    scalar(*LEFT_THUMBSTICK_X_ID, left.thumbstick_xy[0]),
+                    scalar(*LEFT_THUMBSTICK_Y_ID, left.thumbstick_xy[1]),
+                    binary(*LEFT_THUMBSTICK_CLICK_ID, left.buttons & 0x400 != 0),
+                    binary(*LEFT_THUMBSTICK_TOUCH_ID, left.touches & 4 != 0),
+                    binary(*LEFT_THUMBREST_TOUCH_ID, left.touches & 8 != 0),
+                    binary(*RIGHT_A_CLICK_ID, right.buttons & 1 != 0),
+                    binary(*RIGHT_A_TOUCH_ID, right.touches & 1 != 0),
+                    binary(*RIGHT_B_CLICK_ID, right.buttons & 2 != 0),
+                    binary(*RIGHT_B_TOUCH_ID, right.touches & 2 != 0),
+                    binary(*RIGHT_SYSTEM_CLICK_ID, right.buttons & 0x0100_0000 != 0),
+                    scalar(*RIGHT_SQUEEZE_VALUE_ID, right.grip),
+                    scalar(*RIGHT_TRIGGER_VALUE_ID, right.trigger),
+                    binary(*RIGHT_TRIGGER_TOUCH_ID, right.touches & 0x10 != 0),
+                    scalar(*RIGHT_THUMBSTICK_X_ID, right.thumbstick_xy[0]),
+                    scalar(*RIGHT_THUMBSTICK_Y_ID, right.thumbstick_xy[1]),
+                    binary(*RIGHT_THUMBSTICK_CLICK_ID, right.buttons & 4 != 0),
+                    binary(*RIGHT_THUMBSTICK_TOUCH_ID, right.touches & 4 != 0),
+                    binary(*RIGHT_THUMBREST_TOUCH_ID, right.touches & 8 != 0),
+                ];
+                let mapped = button_mapper
+                    .lock()
+                    .as_mut()
+                    .map(|mapper| {
+                        entries
+                            .into_iter()
+                            .flat_map(|entry| mapper.map_button(&entry))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                if !mapped.is_empty() {
+                    button_events.send(ServerCoreEvent::Buttons(mapped)).ok();
+                }
+            },
+        );
         let advertise_address = alvr_system_info::local_ip();
         if advertise_address.is_unspecified() {
             error!("Cannot advertise Air Link host: local IP address is unspecified");
@@ -330,6 +492,8 @@ impl ServerCoreContext {
                     video_receiver,
                     on_streaming_started,
                     on_streaming_stopped,
+                    on_tracking_update,
+                    on_controller_input,
                 )
                 .await
                 {
@@ -487,7 +651,12 @@ impl ServerCoreContext {
             AIRLINK_STREAM_CORRUPTED.store(false, Ordering::SeqCst);
         }
         if !AIRLINK_STREAM_CORRUPTED.load(Ordering::SeqCst) {
-            let pose = global_view_params[0].pose;
+            let pose = self
+                .connection_context
+                .tracking_manager
+                .read()
+                .get_device_motion(*HEAD_ID, timestamp)
+                .map_or(global_view_params[0].pose, |motion| motion.pose);
             let position = pose.position.to_array();
             let orientation = pose.orientation.to_array();
             let frame = alvr_airlink::video::AirLinkVideoFrame {

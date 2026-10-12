@@ -8,6 +8,7 @@ pub mod discovery;
 pub mod host;
 pub mod identity;
 pub mod ripc;
+pub mod tracking;
 pub mod transport;
 pub mod video;
 pub mod xrsp;
