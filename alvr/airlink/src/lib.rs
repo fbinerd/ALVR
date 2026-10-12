@@ -4,4 +4,5 @@
 //! the Rust home for the Meta discovery, DISCO, XRSP, and RuntimeIPC paths.
 
 pub mod disco;
+pub mod discovery;
 pub mod xrsp;
