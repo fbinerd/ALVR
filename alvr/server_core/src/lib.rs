@@ -325,6 +325,7 @@ impl ServerCoreContext {
         let flavor = env::var("USER").unwrap_or_else(|_| "user".to_owned());
         let endpoint_name = format!("{flavor}::{hostname}");
         let video_receiver = self.connection_context.airlink_video_sender.subscribe();
+        let audio = airlink_audio();
         let settings = SESSION_MANAGER.read().settings().clone();
         let started_sender = self.connection_context.events_sender.clone();
         let on_streaming_started = Arc::new(move || {
@@ -535,6 +536,7 @@ impl ServerCoreContext {
                     &hostname,
                     &endpoint_name,
                     video_receiver,
+                    audio,
                     on_streaming_started,
                     on_streaming_stopped,
                     on_tracking_update,
@@ -937,5 +939,81 @@ impl Drop for ServerCoreContext {
         }
 
         self.webserver_runtime.take();
+    }
+}
+
+/// Game audio and microphone for a Meta Air Link headset, through the
+/// AirLink devices the dashboard creates: what plays on "AirLink Speakers"
+/// is sent to the headset, the headset's microphone feeds "AirLink
+/// Microphone". The audio thread ends with the host.
+#[cfg(target_os = "linux")]
+fn airlink_audio() -> alvr_airlink::audio::AirLinkAudio {
+    use alvr_airlink::audio::{SAMPLE_RATE, SPEAKER_CHUNK_BYTES};
+    use std::collections::VecDeque;
+
+    // Chunks the host has not taken are dropped: 80 ms may wait.
+    let (speaker_sender, speaker_receiver) = tokio::sync::mpsc::channel::<Vec<u8>>(8);
+    let microphone_queue = Arc::new(Mutex::new(VecDeque::<f32>::new()));
+
+    let on_microphone = Arc::new({
+        let queue = Arc::clone(&microphone_queue);
+        move |samples: &[u8]| {
+            let mut queue = queue.lock();
+            queue.extend(
+                samples
+                    .chunks_exact(2)
+                    .map(|pair| f32::from(i16::from_le_bytes([pair[0], pair[1]])) / 32768.0),
+            );
+            // Nobody records from the microphone, or playback fell behind:
+            // keep the newest 200 ms.
+            let limit = SAMPLE_RATE as usize / 5;
+            if queue.len() > limit {
+                let excess = queue.len() - limit;
+                queue.drain(..excess);
+            }
+        }
+    });
+
+    thread::spawn({
+        let is_running_sender = speaker_sender.clone();
+        move || {
+            let mut pending = Vec::<u8>::new();
+            // Silence is sent for a second after the last sound, then nothing.
+            let mut silent_chunks = 0u32;
+            alvr_audio::linux::airlink_audio_loop(
+                move || !is_running_sender.is_closed(),
+                move |samples| {
+                    pending.extend_from_slice(samples);
+                    while pending.len() >= SPEAKER_CHUNK_BYTES {
+                        let rest = pending.split_off(SPEAKER_CHUNK_BYTES);
+                        let chunk = std::mem::replace(&mut pending, rest);
+                        if chunk.iter().all(|byte| *byte == 0) {
+                            silent_chunks = silent_chunks.saturating_add(1);
+                        } else {
+                            silent_chunks = 0;
+                        }
+                        if silent_chunks <= 100 {
+                            speaker_sender.try_send(chunk).ok();
+                        }
+                    }
+                },
+                microphone_queue,
+            );
+        }
+    });
+
+    alvr_airlink::audio::AirLinkAudio {
+        speaker_receiver,
+        on_microphone,
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn airlink_audio() -> alvr_airlink::audio::AirLinkAudio {
+    // Without a sender the host's speaker channel reads as closed.
+    let (_, speaker_receiver) = tokio::sync::mpsc::channel(1);
+    alvr_airlink::audio::AirLinkAudio {
+        speaker_receiver,
+        on_microphone: Arc::new(|_| {}),
     }
 }
