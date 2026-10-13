@@ -100,6 +100,7 @@ pub enum EventType {
     /// repeated while it waits.
     AirLinkPairing {
         address: Option<String>,
+        headset: Option<String>,
     },
     ServerRequestsSelfRestart,
     Adb(AdbEvent),
@@ -154,7 +155,9 @@ impl Event {
             EventType::AirLinkHeadset { address, streaming } => {
                 format!("{} streaming: {streaming}", address.as_deref().unwrap_or("none"))
             }
-            EventType::AirLinkPairing { address } => address.clone().unwrap_or_else(|| "none".into()),
+            EventType::AirLinkPairing { address, .. } => {
+                address.clone().unwrap_or_else(|| "none".into())
+            }
             EventType::ServerRequestsSelfRestart => "Request for server restart".into(),
             EventType::Adb(adb) => serde_json::to_string(adb).unwrap(),
             EventType::NewVersionFound { version, .. } => version.clone(),

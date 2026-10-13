@@ -625,13 +625,27 @@ impl ServerCoreContext {
                             AIRLINK_GAME_AUDIO.store(audio.game_audio.enabled(), Ordering::Relaxed);
                             AIRLINK_MICROPHONE.store(audio.microphone.enabled(), Ordering::Relaxed);
                         }
+                        // The headsets the user accepted are the trusted
+                        // entries of the client list that carry an Air Link id.
+                        alvr_airlink::host::set_known_headsets(
+                            SESSION_MANAGER
+                                .read()
+                                .client_list()
+                                .iter()
+                                .filter(|(_, client)| client.trusted)
+                                .filter_map(|(name, _)| airlink_headset_id(name))
+                                .collect(),
+                        );
                         let pairing = alvr_airlink::host::pairing_request();
                         ticks_since_pairing_report += 1;
                         if pairing != pairing_reported
                             || (pairing.is_some() && ticks_since_pairing_report >= 3)
                         {
                             alvr_events::send_event(EventType::AirLinkPairing {
-                                address: pairing.map(|address| address.ip().to_string()),
+                                address: pairing
+                                    .as_ref()
+                                    .map(|request| request.address.ip().to_string()),
+                                headset: pairing.as_ref().map(|request| request.headset_name.clone()),
                             });
                             pairing_reported = pairing;
                             ticks_since_pairing_report = 0;
@@ -1168,4 +1182,25 @@ fn airlink_audio() -> alvr_airlink::audio::AirLinkAudio {
         speaker_receiver,
         on_microphone: Arc::new(|_| {}),
     }
+}
+
+/// Air Link headsets sit in the client list under this name: the prefix and
+/// the headset's DISCO endpoint id in hexadecimal.
+pub const AIRLINK_CLIENT_PREFIX: &str = "airlink-";
+
+pub fn airlink_client_name(headset_id: [u8; 16]) -> String {
+    let hex: String = headset_id.iter().map(|byte| format!("{byte:02x}")).collect();
+    format!("{AIRLINK_CLIENT_PREFIX}{hex}")
+}
+
+fn airlink_headset_id(client_name: &str) -> Option<[u8; 16]> {
+    let hex = client_name.strip_prefix(AIRLINK_CLIENT_PREFIX)?;
+    if hex.len() != 32 {
+        return None;
+    }
+    let mut id = [0; 16];
+    for (index, byte) in id.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(hex.get(index * 2..index * 2 + 2)?, 16).ok()?;
+    }
+    Some(id)
 }
