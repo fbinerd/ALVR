@@ -72,15 +72,16 @@ static int LiveTrialValue(const char* name, int fallback, int max, int& cached, 
     }
     return cached;
 }
-// 10 ms by measurement. A game draws into a ring of three textures, and one
+// 8 ms by measurement. A game draws into a ring of three textures, and one
 // read too early still holds the frame of three presents ago. In VRChat with
 // its menu open, of the frames in which the picture moved, that was 16.4 %
-// with a 4 ms guard, 0.4 % with 7 ms and none in 1262 with 10 ms
-// (MetaHorizonLinux scripts/stale_frames.py on the stream's dump).
+// with a 4 ms guard, 0.4 % with 6 and with 7 ms, and none with 8, 10 or
+// 12 ms (MetaHorizonLinux scripts/stale_frames.py on the stream's dump).
+// Longer is not free: from about 13 ms on the PC skipped more frames.
 static int GuardSleepMsNow() {
-    static int cached = 10;
+    static int cached = 8;
     static int64_t readAtMs = 0;
-    return LiveTrialValue("encoder_guard_sleep_ms", 10, 30, cached, readAtMs);
+    return LiveTrialValue("encoder_guard_sleep_ms", 8, 30, cached, readAtMs);
 }
 // 0 in ~/.config/alvr/encoder_rewarp sends each frame as it was rendered,
 // stamped with the pose it was rendered for, and leaves all reprojection to
