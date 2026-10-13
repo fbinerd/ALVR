@@ -47,6 +47,25 @@ constexpr int64_t GpuWaitPollCapFrames = 2;
 // worker, so it costs pipeline depth, not compositor-thread budget.
 constexpr int GuardSleepMs = 4;
 
+// For trials: 0 in ~/.config/alvr/encoder_rewarp sends each frame as it was
+// rendered, stamped with the pose it was rendered for, and leaves all
+// reprojection to the headset. Read once.
+static bool ReadRewarpEnabled() {
+    int value = 1;
+    if (const char* home = getenv("HOME")) {
+        std::string path = std::string(home) + "/.config/alvr/encoder_rewarp";
+        if (FILE* file = fopen(path.c_str(), "r")) {
+            int read = 1;
+            if (fscanf(file, "%d", &read) == 1 && (read == 0 || read == 1)) {
+                value = read;
+            }
+            fclose(file);
+        }
+    }
+    return value != 0;
+}
+static const bool RewarpEnabled = ReadRewarpEnabled();
+
 // Cap on the wait for a texture's timeline semaphore, in frame intervals.
 // On timeout the frame is read anyway, as it would have been without it.
 constexpr int64_t TimelineWaitCapFrames = 2;
@@ -319,7 +338,7 @@ void OvrDirectModeComponent::EncodeWorkerLoop() {
             // rather than in Present so the target is as fresh as possible.
             uint64_t stampTimestampNs = job.targetTimestampNs;
             alvr::render::WarpParams warpParams {};
-            if (enc.warpCapable()) {
+            if (RewarpEnabled && enc.warpCapable()) {
                 auto latest = m_poseHistory->GetLatestPose();
 
                 FfiViewParams viewParams[2];
