@@ -554,6 +554,29 @@ impl ServerCoreContext {
                         return;
                     }
                 };
+                // Follows the host's switch in the settings and tells the
+                // dashboard which headset is connected: at every change, and
+                // every few seconds for a dashboard opened meanwhile.
+                tokio::spawn(async {
+                    let mut reported = None;
+                    let mut ticks_since_report = 0u32;
+                    loop {
+                        alvr_airlink::host::set_enabled(
+                            SESSION_MANAGER.read().settings().connection.airlink_host,
+                        );
+                        let status = alvr_airlink::host::headset_status();
+                        ticks_since_report += 1;
+                        if status != reported || (status.is_some() && ticks_since_report >= 3) {
+                            alvr_events::send_event(EventType::AirLinkHeadset {
+                                address: status.map(|status| status.address.ip().to_string()),
+                                streaming: status.is_some_and(|status| status.streaming),
+                            });
+                            reported = status;
+                            ticks_since_report = 0;
+                        }
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                    }
+                });
                 if let Err(error) = host.run(shutdown_receiver).await {
                     error!("Meta Air Link host stopped: {error}");
                 }

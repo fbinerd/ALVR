@@ -91,6 +91,11 @@ pub enum EventType {
     AirLinkDevices(bool),
     /// A Meta Air Link headset started (true) or stopped streaming.
     AirLinkStreaming(bool),
+    /// The headset connected with Meta Air Link, repeated while it stays.
+    AirLinkHeadset {
+        address: Option<String>,
+        streaming: bool,
+    },
     ServerRequestsSelfRestart,
     Adb(AdbEvent),
     NewVersionFound { version: String, message: String },
@@ -121,6 +126,7 @@ impl Event {
             EventType::DriversList(_) => "DRV LIST".to_string(),
             EventType::AirLinkDevices(_) => "AIRLINK DEVICES".to_string(),
             EventType::AirLinkStreaming(_) => "AIRLINK STREAMING".to_string(),
+            EventType::AirLinkHeadset { .. } => "AIRLINK HEADSET".to_string(),
             EventType::ServerRequestsSelfRestart => "RESTART".to_string(),
             EventType::Adb(_) => "ADB".to_string(),
             EventType::NewVersionFound { .. } => "NEW VER".to_string(),
@@ -139,6 +145,9 @@ impl Event {
             EventType::DriversList(drivers) => serde_json::to_string(drivers).unwrap(),
             EventType::AirLinkDevices(enabled) => enabled.to_string(),
             EventType::AirLinkStreaming(streaming) => streaming.to_string(),
+            EventType::AirLinkHeadset { address, streaming } => {
+                format!("{} streaming: {streaming}", address.as_deref().unwrap_or("none"))
+            }
             EventType::ServerRequestsSelfRestart => "Request for server restart".into(),
             EventType::Adb(adb) => serde_json::to_string(adb).unwrap(),
             EventType::NewVersionFound { version, .. } => version.clone(),
