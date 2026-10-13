@@ -28,6 +28,27 @@ use tokio_rustls::server::TlsStream;
 
 /// MeshChannel is the first stream channel the headset creates.
 const MESH_TOPIC: u32 = 2;
+
+static ENABLED: std::sync::LazyLock<tokio::sync::watch::Sender<bool>> =
+    std::sync::LazyLock::new(|| tokio::sync::watch::channel(true).0);
+static STATUS: std::sync::Mutex<Option<AirLinkHeadsetStatus>> = std::sync::Mutex::new(None);
+
+/// The headset connected to the host.
+#[derive(Clone, Copy, PartialEq)]
+pub struct AirLinkHeadsetStatus {
+    pub address: SocketAddr,
+    pub streaming: bool,
+}
+
+/// Switches the host on or off. Off, it is not advertised, drops the headset
+/// it serves and turns new connections away.
+pub fn set_enabled(enabled: bool) {
+    ENABLED.send_if_modified(|current| std::mem::replace(current, enabled) != enabled);
+}
+
+pub fn headset_status() -> Option<AirLinkHeadsetStatus> {
+    *STATUS.lock().unwrap()
+}
 const AUDIO_TOPIC: u32 = 3;
 const AUDIO_CONTROL_TOPIC: u32 = 4;
 
@@ -53,7 +74,9 @@ const IDLE_TRACKING_SAMPLE: AirLinkTrackingSample = AirLinkTrackingSample {
 
 pub struct AirLinkHost {
     listener: AirLinkListener,
-    _advertiser: AirLinkAdvertiser,
+    advertiser: Option<AirLinkAdvertiser>,
+    hostname: String,
+    advertise_address: IpAddr,
     identity: HostIdentity,
     endpoint_name: String,
     video_receiver: broadcast::Receiver<AirLinkVideoFrame>,
@@ -115,7 +138,9 @@ impl AirLinkHost {
         log::info!("Meta Air Link host listening on {address} (advertised port {port})");
         Ok(Self {
             listener,
-            _advertiser: advertiser,
+            advertiser: Some(advertiser),
+            hostname: hostname.to_owned(),
+            advertise_address,
             identity,
             endpoint_name: endpoint_name.to_owned(),
             video_receiver,
@@ -138,9 +163,37 @@ impl AirLinkHost {
         mut self,
         mut shutdown: oneshot::Receiver<()>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let mut enabled = ENABLED.subscribe();
         loop {
+            if !*enabled.borrow_and_update() {
+                if self.advertiser.take().is_some() {
+                    log::info!("Meta Air Link host switched off");
+                }
+                tokio::select! {
+                    _ = &mut shutdown => return Ok(()),
+                    changed = enabled.changed() => {
+                        if changed.is_err() {
+                            return Ok(());
+                        }
+                    }
+                    // A headset that remembers the host still finds its port.
+                    _ = self.listener.accept() => {}
+                }
+                continue;
+            }
+            if self.advertiser.is_none() {
+                self.advertiser = Some(AirLinkAdvertiser::register(
+                    &self.hostname,
+                    &self.endpoint_name,
+                    self.identity.endpoint_uuid(),
+                    self.advertise_address,
+                    self.listener.local_addr()?.port(),
+                )?);
+                log::info!("Meta Air Link host switched on");
+            }
             let accepted = tokio::select! {
                 _ = &mut shutdown => return Ok(()),
+                _ = enabled.changed() => continue,
                 result = self.listener.accept() => result,
             };
             let (mut stream, peer) = match accepted {
@@ -151,10 +204,16 @@ impl AirLinkHost {
                 }
             };
             log::info!("Meta Air Link TLS session established from {peer}");
+            *STATUS.lock().unwrap() = Some(AirLinkHeadsetStatus {
+                address: peer,
+                streaming: false,
+            });
             let result = tokio::select! {
                 _ = &mut shutdown => return Ok(()),
+                _ = enabled.changed() => Err("the host was switched off".into()),
                 result = self.serve_connection(&mut stream) => result,
             };
+            *STATUS.lock().unwrap() = None;
             if let Err(error) = result {
                 log::warn!("Meta Air Link connection from {peer} ended: {error}");
             }
@@ -711,6 +770,9 @@ impl AirLinkHost {
                             if !self.streaming_active {
                                 (self.on_streaming_started)();
                                 self.streaming_active = true;
+                                if let Some(status) = STATUS.lock().unwrap().as_mut() {
+                                    status.streaming = true;
+                                }
                             }
                         }
                     }
