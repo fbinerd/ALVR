@@ -230,18 +230,6 @@ fn airlink_devices_section(ui: &mut Ui, enabled: Option<bool>) -> Option<ServerR
                         }
                     });
                     ui.end_row();
-
-                    ui.label("PipeWire endpoints reserved for Air Link audio.");
-                    ui.label(match enabled {
-                        Some(true) => "Active: AirLink Microphone and AirLink Speakers",
-                        Some(false) => "Inactive",
-                        None => "Checking PipeWire...",
-                    });
-                    ui.end_row();
-
-                    ui.label("Endpoints are created in the current user's PipeWire session.");
-                    ui.label("The devices used while streaming are chosen in Settings, Audio.");
-                    ui.end_row();
                 });
         });
 
