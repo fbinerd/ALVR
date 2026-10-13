@@ -307,6 +307,31 @@ async fn get_airlink_devices() -> Result<Json<bool>, (StatusCode, String)> {
 
 /// The user accepted or refused the pairing a headset waits for.
 async fn answer_airlink_pairing(Json(accept): Json<bool>) {
+    // An accepted headset joins the trusted clients, where it stays until the
+    // user removes it; from then on it connects without a question.
+    if accept && let Some(request) = alvr_airlink::host::pairing_request() {
+        let name = crate::airlink_client_name(request.headset_id);
+        let mut session_manager = SESSION_MANAGER.write();
+        for action in [
+            ClientConnectionsAction::AddIfMissing {
+                trusted: true,
+                manual_ips: vec![],
+            },
+            ClientConnectionsAction::Trust,
+            // The headset names itself in the connect request; the Quest 2
+            // seen so far sends a bare number.
+            ClientConnectionsAction::SetDisplayName(
+                if request.headset_name.trim().chars().count() < 3 {
+                    "Meta Quest (Air Link)".to_owned()
+                } else {
+                    format!("{} (Meta Air Link)", request.headset_name.trim())
+                },
+            ),
+            ClientConnectionsAction::UpdateCurrentIp(Some(request.address.ip())),
+        ] {
+            session_manager.update_client_connections(name.clone(), action);
+        }
+    }
     alvr_airlink::host::answer_pairing(accept);
 }
 

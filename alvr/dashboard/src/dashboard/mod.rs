@@ -78,6 +78,7 @@ pub struct Dashboard {
     session: Option<SessionConfig>,
     airlink_streaming: bool,
     streaming_audio_active: bool,
+    streaming_audio_since: std::time::Instant,
     streaming_audio_applied: bool,
     streaming_audio_tried_at: Option<std::time::Instant>,
     // Address of the headset asking to pair and when the server last said so.
@@ -98,7 +99,6 @@ impl Dashboard {
         let audio = session.to_settings().audio;
         let speakers = audio.game_audio.as_option().map(|config| &config.streaming_device);
         let microphone = audio.microphone.as_option().map(|config| &config.streaming_device);
-        alvr_audio::linux::streaming_restore_default_devices();
         alvr_audio::linux::streaming_select_default_devices(speakers, microphone).is_ok()
     }
 
@@ -115,22 +115,38 @@ impl Dashboard {
                 })
             });
 
+        let now = std::time::Instant::now();
+        let due = |every_s: u64| {
+            self.streaming_audio_tried_at
+                .is_none_or(|at| now.duration_since(at) >= std::time::Duration::from_secs(every_s))
+        };
+
         if streaming != self.streaming_audio_active {
-            self.streaming_audio_active = streaming;
             self.streaming_audio_applied = false;
+            self.streaming_audio_active = streaming;
+            self.streaming_audio_since = now;
             self.streaming_audio_tried_at = None;
             if !streaming {
                 alvr_audio::linux::streaming_restore_default_devices();
             }
+            return;
         }
-        if streaming
-            && !self.streaming_audio_applied
-            && self
-                .streaming_audio_tried_at
-                .is_none_or(|at| at.elapsed() > std::time::Duration::from_secs(1))
-        {
-            self.streaming_audio_tried_at = Some(std::time::Instant::now());
-            self.streaming_audio_applied = self.select_streaming_audio_devices();
+
+        if !streaming {
+            // What "System default" means, and what comes back afterwards.
+            // Not right after a stream: its devices take a moment to go.
+            if now.duration_since(self.streaming_audio_since).as_secs() >= 3 && due(3) {
+                self.streaming_audio_tried_at = Some(now);
+                alvr_audio::linux::remember_idle_default_devices();
+            }
+        } else if !self.streaming_audio_applied && due(1) {
+            self.streaming_audio_tried_at = Some(now);
+            // The session manager makes ALVR's devices the default when they
+            // appear, whatever the user chose, and they appear a moment after
+            // streaming starts: keep at it for the first seconds.
+            let done = self.select_streaming_audio_devices();
+            self.streaming_audio_applied =
+                done && now.duration_since(self.streaming_audio_since).as_secs() >= 8;
         }
     }
 
@@ -169,6 +185,7 @@ impl Dashboard {
             session: None,
             airlink_streaming: false,
             streaming_audio_active: false,
+            streaming_audio_since: std::time::Instant::now(),
             streaming_audio_applied: false,
             streaming_audio_tried_at: None,
             airlink_pairing: None,
@@ -242,7 +259,6 @@ impl eframe::App for Dashboard {
                     self.session = Some(*session);
                     // A choice changed while the headset streams applies now.
                     self.streaming_audio_applied = false;
-                    self.streaming_audio_tried_at = None;
                 }
                 EventType::ServerRequestsSelfRestart => self.restart_steamvr(&mut requests),
                 #[cfg(not(target_arch = "wasm32"))]
@@ -255,15 +271,16 @@ impl eframe::App for Dashboard {
                 EventType::AirLinkHeadset { address, streaming } => self
                     .connections_tab
                     .update_airlink_headset(address, streaming),
-                EventType::AirLinkPairing { address } => {
+                EventType::AirLinkPairing { address, headset } => {
                     // The server may repeat the request once more before it
                     // has taken the answer.
                     let just_answered = self
                         .airlink_pairing_answered_at
                         .is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(4));
-                    self.airlink_pairing = address
-                        .filter(|_| !just_answered)
-                        .map(|address| (address, std::time::Instant::now()));
+                    self.airlink_pairing = address.filter(|_| !just_answered).map(|address| {
+                        let headset = headset.unwrap_or_else(|| "A headset".into());
+                        (format!("{headset} at {address}"), std::time::Instant::now())
+                    });
                 }
                 EventType::AirLinkStreaming(streaming) => self.airlink_streaming = streaming,
                 EventType::Adb(adb_event) => self
@@ -445,13 +462,15 @@ impl eframe::App for Dashboard {
             let address = address.clone();
             let answer = alvr_gui_common::modal(
                 ui,
-                "Meta Air Link pairing",
+                "Meta Air Link: new headset",
                 Some(move |ui: &mut eframe::egui::Ui| {
                     ui.label(format!(
-                        "The headset at {address} asks to pair with this computer through \
-                         Air Link."
+                        "{address} asks to connect to this computer through Air Link."
                     ));
-                    ui.label("Accept only if you started the pairing on your headset.");
+                    ui.label(
+                        "Accepted, it stays in the list of trusted devices and connects \
+                         without asking until you remove it there.",
+                    );
                 }),
                 &[accept.clone(), refuse],
                 Some(420.0),
