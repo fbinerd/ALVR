@@ -72,7 +72,7 @@ constexpr int64_t TimelineWaitCapFrames = 2;
 
 // The negotiated refresh rate expressed as a frame period.
 static std::chrono::nanoseconds frameInterval() {
-    return std::chrono::nanoseconds((int64_t)(1e9 / Settings_Instance()->m_refreshRate));
+    return std::chrono::nanoseconds((int64_t)(1e9 / Settings_Instance()->m_displayRefreshRate));
 }
 
 // Export the sync file a reader must wait on (the writer's fences) from a

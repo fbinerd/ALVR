@@ -88,10 +88,12 @@ pub(crate) fn airlink_streaming_config(settings: &Settings) -> ServerNegotiatedS
         emulated_headset_view_resolution.x * 2,
         emulated_headset_view_resolution.y,
     );
+    alvr_airlink::video::set_refresh_rate(settings.video.preferred_fps);
     ServerNegotiatedStreamingConfig {
         transcoding_view_resolution,
         emulated_headset_view_resolution,
         refresh_rate: settings.video.preferred_fps,
+        display_refresh_rate: (1.0 / alvr_airlink::video::frame_period_s()) as f32,
         foveated_encoding: None,
         codec: settings.video.preferred_codec,
         h264_profile: settings.video.encoder_config.h264_profile,
@@ -1498,6 +1500,7 @@ fn connection_pipeline(
                 transcoding_view_resolution,
                 emulated_headset_view_resolution: transcoding_view_resolution,
                 refresh_rate: fps as _,
+                display_refresh_rate: fps as _,
                 foveated_encoding,
                 codec,
                 h264_profile: encoder_profile,
