@@ -1,5 +1,5 @@
 use alvr_common::{ConnectionError, anyhow::{Result, bail}, debug, error, parking_lot::Mutex};
-use alvr_session::{AirLinkAudioDevice, AudioBufferingConfig};
+use alvr_session::{AudioBufferingConfig, StreamingAudioDevice};
 use alvr_sockets::{StreamReceiver, StreamSender};
 
 use std::os::unix::fs::FileTypeExt;
@@ -19,6 +19,9 @@ use std::{
 const AIRLINK_SPEAKERS_SINK: &str = "mhl_airlink_speakers";
 const AIRLINK_MICROPHONE_SINK: &str = "mhl_airlink_microphone_bus";
 const AIRLINK_MICROPHONE_SOURCE: &str = "mhl_airlink_microphone";
+// Node names of the streams ALVR makes for its own client (see below).
+const ALVR_CLIENT_SINK: &str = "ALVR Audio";
+const ALVR_CLIENT_SOURCE: &str = "ALVR Microphone";
 
 fn pactl(args: &[&str]) -> Result<String> {
     let executable = std::env::var_os("MHL_PACTL").unwrap_or_else(|| "pactl".into());
@@ -69,6 +72,24 @@ static AIRLINK_PREVIOUS_DEFAULTS: Mutex<(Option<String>, Option<String>)> =
 /// Name and description of the system's outputs (`kind` "sinks") or inputs
 /// ("sources"), without monitors and without the AirLink devices themselves.
 pub fn list_audio_devices(kind: &str) -> Result<Vec<(String, String)>> {
+    Ok(all_audio_devices(kind)?
+        .into_iter()
+        .filter(|(name, description)| {
+            ![
+                AIRLINK_SPEAKERS_SINK,
+                AIRLINK_MICROPHONE_SINK,
+                AIRLINK_MICROPHONE_SOURCE,
+            ]
+            .contains(&name.as_str())
+                && ![ALVR_CLIENT_SINK, ALVR_CLIENT_SOURCE]
+                    .iter()
+                    .any(|own| name == own || description == own)
+        })
+        .collect())
+}
+
+/// Every output or input but the monitors, as (name, description).
+fn all_audio_devices(kind: &str) -> Result<Vec<(String, String)>> {
     let listing = pactl(&["list", kind])?;
     let mut devices = Vec::new();
     let mut name = None;
@@ -78,17 +99,20 @@ pub fn list_audio_devices(kind: &str) -> Result<Vec<(String, String)>> {
         } else if let Some(description) = line.strip_prefix("Description: ")
             && let Some(name) = name.take()
             && !name.ends_with(".monitor")
-            && ![
-                AIRLINK_SPEAKERS_SINK,
-                AIRLINK_MICROPHONE_SINK,
-                AIRLINK_MICROPHONE_SOURCE,
-            ]
-            .contains(&name.as_str())
         {
             devices.push((name, description.to_owned()));
         }
     }
     Ok(devices)
+}
+
+/// The system's name of the device called `wanted`, by name or description.
+fn find_named_device(kind: &str, wanted: &str) -> Result<String> {
+    all_audio_devices(kind)?
+        .into_iter()
+        .find(|(name, description)| name == wanted || description == wanted)
+        .map(|(name, _)| name)
+        .ok_or_else(|| alvr_common::anyhow::anyhow!("the device \"{wanted}\" is not there"))
 }
 
 /// Name of the sink or source whose name or description contains `wanted`,
@@ -110,7 +134,7 @@ fn find_audio_device(kind: &str, wanted: &str) -> Result<String> {
 }
 
 fn select_default_device(
-    selection: &AirLinkAudioDevice,
+    selection: &StreamingAudioDevice,
     kind: &str,
     headset_device: &str,
     get: &str,
@@ -118,9 +142,9 @@ fn select_default_device(
     previous: &mut Option<String>,
 ) -> Result<()> {
     let target = match selection {
-        AirLinkAudioDevice::SystemDefault => return Ok(()),
-        AirLinkAudioDevice::Headset => headset_device.to_owned(),
-        AirLinkAudioDevice::Custom(wanted) => find_audio_device(kind, wanted)?,
+        StreamingAudioDevice::SystemDefault => return Ok(()),
+        StreamingAudioDevice::Headset => headset_device.to_owned(),
+        StreamingAudioDevice::Custom(wanted) => find_audio_device(kind, wanted)?,
     };
     let current = pactl(&[get])?;
     if current != target {
@@ -131,34 +155,64 @@ fn select_default_device(
     Ok(())
 }
 
-/// Makes the chosen devices the system's default output and input for the
-/// time a Meta Air Link headset streams.
-pub fn airlink_select_default_devices(
-    speakers: &AirLinkAudioDevice,
-    microphone: &AirLinkAudioDevice,
-) -> Result<()> {
-    let mut previous = AIRLINK_PREVIOUS_DEFAULTS.lock();
-    let speakers_result = select_default_device(
-        speakers,
-        "sinks",
-        AIRLINK_SPEAKERS_SINK,
-        "get-default-sink",
-        "set-default-sink",
-        &mut previous.0,
-    );
-    let microphone_result = select_default_device(
-        microphone,
-        "sources",
-        AIRLINK_MICROPHONE_SOURCE,
-        "get-default-source",
-        "set-default-source",
-        &mut previous.1,
-    );
-    speakers_result.and(microphone_result)
+/// Which kind of headset streams: each has its own audio devices.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum StreamingHeadset {
+    /// Meta Air Link: the AirLink devices the dashboard makes.
+    AirLink,
+    /// ALVR's client: the "ALVR Audio" and "ALVR Microphone" nodes the server
+    /// makes while it streams.
+    AlvrClient,
 }
 
-/// Puts back the defaults `airlink_select_default_devices` replaced.
-pub fn airlink_restore_default_devices() {
+/// Makes the chosen devices the system's default output and input for the
+/// time a headset streams. `None` leaves that side alone (its switch is off).
+/// Fails while a device is not there yet, as ALVR's nodes are for a moment
+/// after streaming starts: call again.
+pub fn streaming_select_default_devices(
+    headset: StreamingHeadset,
+    speakers: Option<&StreamingAudioDevice>,
+    microphone: Option<&StreamingAudioDevice>,
+) -> Result<()> {
+    let headset_device = |kind: &str, airlink: &str, alvr: &str| match headset {
+        StreamingHeadset::AirLink => Ok(airlink.to_owned()),
+        StreamingHeadset::AlvrClient => find_named_device(kind, alvr),
+    };
+    let mut previous = AIRLINK_PREVIOUS_DEFAULTS.lock();
+    let mut result = Ok(());
+    if let Some(speakers) = speakers {
+        result = headset_device("sinks", AIRLINK_SPEAKERS_SINK, ALVR_CLIENT_SINK).and_then(|device| {
+            select_default_device(
+                speakers,
+                "sinks",
+                &device,
+                "get-default-sink",
+                "set-default-sink",
+                &mut previous.0,
+            )
+        });
+    }
+    if let Some(microphone) = microphone {
+        let microphone_result =
+            headset_device("sources", AIRLINK_MICROPHONE_SOURCE, ALVR_CLIENT_SOURCE).and_then(
+                |device| {
+                    select_default_device(
+                        microphone,
+                        "sources",
+                        &device,
+                        "get-default-source",
+                        "set-default-source",
+                        &mut previous.1,
+                    )
+                },
+            );
+        result = result.and(microphone_result);
+    }
+    result
+}
+
+/// Puts back the defaults `streaming_select_default_devices` replaced.
+pub fn streaming_restore_default_devices() {
     let (sink, source) = std::mem::take(&mut *AIRLINK_PREVIOUS_DEFAULTS.lock());
     if let Some(sink) = sink {
         pactl(&["set-default-sink", &sink]).ok();
