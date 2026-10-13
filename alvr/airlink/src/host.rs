@@ -775,7 +775,7 @@ impl AirLinkHost {
                     if let Some(route) = runtime_service.streaming_route {
                         let event = protocol_result(ripc::pack_gpu_stream_channel_config_event(route))?;
                         self.send(stream, ripc::CLIENT_TRAFFIC_TOPIC, &event).await?;
-                        let level = sharpening_level();
+                        let level = crate::video::sharpening_level();
                         let event = protocol_result(ripc::pack_sharpening_event(route, level))?;
                         self.send(stream, ripc::CLIENT_TRAFFIC_TOPIC, &event).await?;
                         log::info!("sent Air Link sharpening level {level}");
@@ -995,21 +995,6 @@ impl AirLinkHost {
     }
 }
 
-/// Headset sharpening level: 2 (normal) as Meta Horizon Link does by default.
-/// `ALVR_AIRLINK_SHARPENING` or the first character of
-/// `~/.config/alvr/airlink_sharpening` selects 1 (off), 2 or 3 (quality).
-fn sharpening_level() -> u8 {
-    std::env::var("ALVR_AIRLINK_SHARPENING")
-        .ok()
-        .or_else(|| {
-            let home = std::env::var_os("HOME")?;
-            std::fs::read_to_string(Path::new(&home).join(".config/alvr/airlink_sharpening")).ok()
-        })
-        .and_then(|text| text.trim().parse::<u8>().ok())
-        .filter(|level| (1..=3).contains(level))
-        .unwrap_or(2)
-}
-
 /// One line per RuntimeIPC frame while tracing is enabled: enough to
 /// follow a session next to the headset's log and to the reference host.
 fn trace_frame(direction: &str, topic: u32, payload: &[u8]) {
@@ -1072,8 +1057,12 @@ fn display_lead_ms() -> f64 {
 
 /// How far ahead the head pose is predicted, in milliseconds: 40, or what
 /// `ALVR_AIRLINK_PREDICT_MS` or `~/.config/alvr/airlink_predict_ms` says
-/// (0 turns prediction off).
+/// (0 turns prediction off), and never over ALVR's "Maximum prediction".
 fn head_prediction_ms() -> f64 {
+    uncapped_head_prediction_ms().min(crate::video::head_prediction_cap_ms() as f64)
+}
+
+fn uncapped_head_prediction_ms() -> f64 {
     std::env::var("ALVR_AIRLINK_PREDICT_MS")
         .ok()
         .or_else(|| {
