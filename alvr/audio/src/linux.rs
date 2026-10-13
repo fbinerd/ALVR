@@ -506,3 +506,119 @@ fn fill_pw_buf(
         }
     }
 }
+
+/// Carries sound for a Meta Air Link headset through the AirLink devices
+/// until `is_running` says no: what applications play on the AirLink
+/// speakers goes to `on_speaker_samples` (f32 little endian, stereo, 48 kHz),
+/// and `microphone_queue` (mono, 48 kHz) is played into the device behind
+/// the AirLink microphone.
+pub fn airlink_audio_loop(
+    is_running: impl Fn() -> bool,
+    on_speaker_samples: impl FnMut(&[u8]) + Send + 'static,
+    microphone_queue: Arc<Mutex<VecDeque<f32>>>,
+) {
+    let (pw_sender, pw_receiver) = pipewire::channel::channel();
+
+    let pw_thread = thread::spawn(move || {
+        if let Err(e) = airlink_pw_main_loop(pw_receiver, on_speaker_samples, microphone_queue) {
+            error!("AirLink audio stopped on a PipeWire error: {e}");
+        }
+    });
+
+    while is_running() && !pw_thread.is_finished() {
+        sleep(Duration::from_millis(500));
+    }
+
+    pw_sender.send(Terminate).ok();
+    pw_thread.join().ok();
+}
+
+fn airlink_pw_main_loop(
+    pw_receiver: Receiver<Terminate>,
+    mut on_speaker_samples: impl FnMut(&[u8]) + 'static,
+    microphone_queue: Arc<Mutex<VecDeque<f32>>>,
+) -> Result<(), pipewire::Error> {
+    const SAMPLE_RATE: u32 = 48_000;
+
+    let mainloop = MainLoopRc::new(None)?;
+    let _receiver = pw_receiver.attach(mainloop.as_ref(), {
+        let mainloop = mainloop.clone();
+        move |_| mainloop.quit()
+    });
+    let context = ContextRc::new(&mainloop, None)?;
+    let pw_core = context.connect_rc(None)?;
+
+    // Both streams name their device and refuse any other: without the
+    // AirLink devices they stay unlinked instead of taking the default ones.
+    let speakers = StreamRc::new(
+        pw_core.clone(),
+        "alvr-airlink-speakers",
+        properties::properties! {
+            *keys::NODE_NAME => "ALVR AirLink Speakers Capture",
+            *keys::MEDIA_TYPE => "Audio",
+            *keys::MEDIA_CATEGORY => "Capture",
+            *keys::MEDIA_ROLE => "Game",
+            "target.object" => AIRLINK_SPEAKERS_SINK,
+            "stream.capture.sink" => "true",
+            "node.dont-fallback" => "true",
+        },
+    )?;
+    let _speakers_listener: StreamListener<()> = speakers
+        .add_local_listener()
+        .process(move |stream, _| {
+            if let Some(mut pw_buf) = stream.dequeue_buffer()
+                && let Some(pw_data) = pw_buf.datas_mut().first_mut()
+            {
+                let size = pw_data.chunk_mut().size() as usize;
+                if let Some(data) = pw_data.data()
+                    && let Some(samples) = data.get(..size)
+                {
+                    on_speaker_samples(samples);
+                }
+            }
+        })
+        .register()?;
+    let mut speakers_info = AudioInfoRaw::new();
+    speakers_info.set_format(AudioFormat::F32LE);
+    speakers_info.set_rate(SAMPLE_RATE);
+    speakers_info.set_channels(2);
+    speakers.connect(
+        Direction::Input,
+        None,
+        StreamFlags::AUTOCONNECT | StreamFlags::MAP_BUFFERS,
+        &mut [Pod::from_bytes(&audio_info_to_vec(speakers_info)).unwrap()],
+    )?;
+
+    let microphone = StreamRc::new(
+        pw_core.clone(),
+        "alvr-airlink-microphone",
+        properties::properties! {
+            *keys::NODE_NAME => "ALVR AirLink Microphone Playback",
+            *keys::MEDIA_TYPE => "Audio",
+            *keys::MEDIA_CATEGORY => "Playback",
+            *keys::MEDIA_ROLE => "Communication",
+            "target.object" => AIRLINK_MICROPHONE_SINK,
+            "node.dont-fallback" => "true",
+        },
+    )?;
+    let _microphone_listener: StreamListener<()> = microphone
+        .add_local_listener()
+        .process(move |stream, _| {
+            fill_pw_buf(microphone_queue.clone(), std::mem::size_of::<f32>(), 1, stream);
+        })
+        .register()?;
+    let mut microphone_info = AudioInfoRaw::new();
+    microphone_info.set_format(AudioFormat::F32LE);
+    microphone_info.set_rate(SAMPLE_RATE);
+    microphone_info.set_channels(1);
+    microphone.connect(
+        Direction::Output,
+        None,
+        StreamFlags::AUTOCONNECT | StreamFlags::MAP_BUFFERS,
+        &mut [Pod::from_bytes(&audio_info_to_vec(microphone_info)).unwrap()],
+    )?;
+
+    mainloop.run();
+
+    Ok(())
+}
