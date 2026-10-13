@@ -435,6 +435,7 @@ impl ServerCoreContext {
         let button_mapper = Arc::new(Mutex::new(button_mapper));
         let button_events = self.connection_context.events_sender.clone();
         let battery_events = self.connection_context.events_sender.clone();
+        let battery_context = Arc::clone(&self.connection_context);
         // Last reported charges and when: sent on change and every 30 s.
         let battery_reported = Mutex::new(([u8::MAX; 3], Instant::now()));
         let on_controller_input = Arc::new(
@@ -449,6 +450,15 @@ impl ServerCoreContext {
                         for (device_id, percent) in devices.into_iter().zip(input.battery_percent)
                         {
                             if percent <= 100 {
+                                if let Some(stats) =
+                                    &mut *battery_context.statistics_manager.write()
+                                {
+                                    stats.report_battery(
+                                        device_id,
+                                        f32::from(percent) / 100.0,
+                                        false,
+                                    );
+                                }
                                 battery_events
                                     .send(ServerCoreEvent::Battery(BatteryInfo {
                                         device_id,
@@ -751,6 +761,15 @@ impl ServerCoreContext {
                 ],
             };
             self.connection_context.airlink_video_sender.send(frame).ok();
+
+            // An Air Link headset sends no statistics of its own, and the
+            // code below, for ALVR's client, does not run without its stream.
+            if self.connection_context.video_channel_sender.lock().is_none()
+                && let Some(stats) = &mut *self.connection_context.statistics_manager.write()
+            {
+                stats.report_frame_encoded(timestamp, nal_buffer.len());
+                stats.report_frame_sent_without_client_statistics(timestamp);
+            }
         }
 
         // start in the corrupts state, the client didn't receive the initial IDR yet.
