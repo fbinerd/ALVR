@@ -75,9 +75,27 @@ pub struct Dashboard {
     new_version_popup: Option<components::NewVersionPopup>,
     setup_wizard_open: bool,
     session: Option<SessionConfig>,
+    airlink_streaming: bool,
 }
 
 impl Dashboard {
+    /// Makes the output and input chosen for Air Link the system's defaults.
+    /// Starts from the defaults of before streaming, so that a choice changed
+    /// meanwhile does not leave an earlier one behind.
+    fn select_airlink_audio_devices(&self) {
+        #[cfg(target_os = "linux")]
+        if let Some(session) = &self.session {
+            let audio = session.to_settings().audio;
+            alvr_audio::linux::airlink_restore_default_devices();
+            if let Err(error) = alvr_audio::linux::airlink_select_default_devices(
+                &audio.airlink_speakers,
+                &audio.airlink_microphone,
+            ) {
+                alvr_common::warn!("Cannot select the Air Link audio devices: {error}");
+            }
+        }
+    }
+
     pub fn new(creation_context: &eframe::CreationContext<'_>, data_sources: DataSources) -> Self {
         alvr_gui_common::theme::set_theme(&creation_context.egui_ctx);
 
@@ -111,6 +129,7 @@ impl Dashboard {
             setup_wizard: SetupWizard::new(),
             setup_wizard_open: false,
             session: None,
+            airlink_streaming: false,
             new_version_popup: None,
         }
     }
@@ -178,12 +197,27 @@ impl eframe::App for Dashboard {
                     }
 
                     self.session = Some(*session);
+                    // A choice changed while the headset streams applies now.
+                    if self.airlink_streaming {
+                        self.select_airlink_audio_devices();
+                    }
                 }
                 EventType::ServerRequestsSelfRestart => self.restart_steamvr(&mut requests),
                 #[cfg(not(target_arch = "wasm32"))]
                 EventType::DriversList(list) => self.installation_tab.update_drivers(list),
                 EventType::AirLinkDevices(enabled) => {
                     self.connections_tab.update_airlink_devices(enabled)
+                }
+                // The dashboard switches the system's default devices: the
+                // server runs in SteamVR's container, which has no pactl.
+                EventType::AirLinkStreaming(true) => {
+                    self.airlink_streaming = true;
+                    self.select_airlink_audio_devices();
+                }
+                EventType::AirLinkStreaming(false) => {
+                    self.airlink_streaming = false;
+                    #[cfg(target_os = "linux")]
+                    alvr_audio::linux::airlink_restore_default_devices();
                 }
                 EventType::Adb(adb_event) => self
                     .connections_tab

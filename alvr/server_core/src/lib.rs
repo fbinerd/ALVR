@@ -339,6 +339,7 @@ impl ServerCoreContext {
                 .send(ServerCoreEvent::LocalViewParams(airlink_view_params()))
                 .ok();
             started_sender.send(ServerCoreEvent::ProximityState(true)).ok();
+            alvr_events::send_event(EventType::AirLinkStreaming(true));
         });
         let keyframe_sender = self.connection_context.events_sender.clone();
         let on_keyframe_needed = Arc::new(move || {
@@ -357,6 +358,7 @@ impl ServerCoreContext {
         let on_streaming_stopped = Arc::new(move || {
             stopped_sender.send(ServerCoreEvent::ProximityState(false)).ok();
             stopped_sender.send(ServerCoreEvent::ClientDisconnected).ok();
+            alvr_events::send_event(EventType::AirLinkStreaming(false));
         });
         let tracking_context = Arc::clone(&self.connection_context);
         let tracking_events = self.connection_context.events_sender.clone();
