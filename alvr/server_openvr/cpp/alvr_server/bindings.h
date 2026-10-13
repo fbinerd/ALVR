@@ -103,6 +103,8 @@ struct FfiFoveationCenters {
 
 struct Settings {
     int m_refreshRate;
+    // The panel's real refresh rate: what SteamVR is paced at.
+    float m_displayRefreshRate;
     unsigned int m_renderWidth;
     unsigned int m_renderHeight;
     int m_recommendedTargetWidth;

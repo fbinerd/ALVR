@@ -278,6 +278,15 @@ impl AirLinkHost {
         while self.audio.speaker_receiver.try_recv().is_ok() {}
         let mut speaker_open = true;
         let mut speaker_packets = 0u64;
+        let mut display_grid_s: Option<f64> = None;
+        let display_lead_s = display_lead_ms() / 1000.0;
+        let frame_report_trace = std::env::var_os("HOME").is_some_and(|home| {
+            std::path::Path::new(&home)
+                .join(".config/alvr/airlink_frame_reports")
+                .exists()
+        });
+        let mut frame_reports: Vec<Vec<u64>> = Vec::new();
+        let mut frame_reports_since = std::time::Instant::now();
         // Pairing waits for the user's answer in the dashboard.
         let mut pairing_answer = PAIRING_ANSWER.subscribe();
         let mut pairing_pending = false;
@@ -386,10 +395,41 @@ impl AirLinkHost {
                                 runtime_service.mesh_sent = true;
                                 log::info!("sent Air Link rectify mesh: {} bytes", mesh.len());
                             }
+                            let host_now_ns = monotonic_nanos();
+                            // One refresh period after the previous frame's
+                            // slot; whole periods are skipped or repeated
+                            // when the PC missed frames or drifted away.
+                            let headset_now_s =
+                                (host_now_ns as i128 + i128::from(headset_offset_ns)) as f64 / 1e9;
+                            let period_s = crate::video::frame_period_s();
+                            let display_base_s = match display_grid_s {
+                                Some(previous) => {
+                                    let next = previous + period_s;
+                                    // Positive: the frame left later than
+                                    // its slot.
+                                    let error = headset_now_s - next;
+                                    if error.abs() > 4.0 * period_s {
+                                        // A stall or a clock step: start over.
+                                        headset_now_s
+                                    } else if error > 0.75 * period_s {
+                                        // The PC missed frames: their slots
+                                        // pass unused.
+                                        next + (error / period_s).round() * period_s
+                                    } else {
+                                        // Follow the PC's clock slowly, so
+                                        // send jitter does not reach the
+                                        // display times.
+                                        next + 0.01 * error
+                                    }
+                                }
+                                None => headset_now_s,
+                            };
+                            display_grid_s = Some(display_base_s);
                             let packet = frame.pack(
                                 next_video_frame_id,
-                                monotonic_nanos(),
+                                host_now_ns,
                                 headset_offset_ns,
+                                display_base_s + display_lead_s,
                             );
                             self.send(stream, ripc::GPU_BUFFER_STREAM_TOPIC, &packet).await?;
                             if next_video_frame_id >= 110 && !runtime_service.openxr_runtime_sent {
@@ -509,6 +549,34 @@ impl AirLinkHost {
                         log::debug!("Air Link pairing commitment received");
                     }
                     _ => log::debug!("Unhandled Air Link pairing message 0x{message:08x}"),
+                }
+            } else if topic == ripc::GPU_BUFFER_STREAM_TOPIC {
+                // The headset's report for each frame. Its fields are not
+                // decoded yet: with tracing on, their medians are logged
+                // once a second to relate them to what the headset shows.
+                if frame_report_trace
+                    && let Some((_, fields)) = crate::video::unpack_frame_report(&payload)
+                {
+                    frame_reports.push(fields);
+                    if frame_reports_since.elapsed().as_secs() >= 1 {
+                        let width = frame_reports.iter().map(Vec::len).max().unwrap_or(0);
+                        let medians: Vec<u64> = (0..width)
+                            .map(|index| {
+                                let mut column: Vec<u64> = frame_reports
+                                    .iter()
+                                    .filter_map(|fields| fields.get(index).copied())
+                                    .collect();
+                                column.sort_unstable();
+                                column[column.len() / 2]
+                            })
+                            .collect();
+                        log::info!(
+                            "Air Link frame reports: {} medians {medians:?}",
+                            frame_reports.len()
+                        );
+                        frame_reports.clear();
+                        frame_reports_since = std::time::Instant::now();
+                    }
                 }
             } else if (2..=14).contains(&topic) {
                 if let Some(response) = ripc::channel_buffer_handshake_ack(&payload) {
@@ -979,6 +1047,24 @@ fn unix_timestamp_ms() -> u128 {
 }
 
 #[cfg(unix)]
+/// Extra time between a frame's send time and the display time written into
+/// it, in milliseconds: 8, or what `~/.config/alvr/airlink_display_lead_ms`
+/// says. With none the headset logged frames ready 1.7 to 6.7 ms before their
+/// release (`window_min_release_margin_ms`), against 10.7 to 12.7 ms with
+/// Horizon, and repeated frames for a second whenever video and display
+/// slipped by one frame.
+fn display_lead_ms() -> f64 {
+    std::env::var_os("HOME")
+        .and_then(|home| {
+            std::fs::read_to_string(
+                std::path::Path::new(&home).join(".config/alvr/airlink_display_lead_ms"),
+            )
+            .ok()
+        })
+        .and_then(|text| text.trim().parse().ok())
+        .unwrap_or(8.0)
+}
+
 /// How far ahead the head pose is predicted, in milliseconds: 40, or what
 /// `ALVR_AIRLINK_PREDICT_MS` or `~/.config/alvr/airlink_predict_ms` says
 /// (0 turns prediction off).
