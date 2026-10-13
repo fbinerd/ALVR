@@ -1434,6 +1434,12 @@ TCP: Slower than UDP, but more stable. Pick this if you experience video or audi
     pub wired_client_type: ClientFlavor,
 
     #[schema(strings(
+        display_name = "Meta Air Link host",
+        help = "Lets a Meta Quest connect with its own Air Link, without the ALVR app. Off, the computer is not offered to the headset and a connected one is dropped."
+    ))]
+    pub airlink_host: bool,
+
+    #[schema(strings(
         help = r#"Wether ALVR should try to automatically launch the client when establishing a wired connection."#
     ))]
     pub wired_client_autolaunch: Switch<WiredClientAutoLaunchConfig>,
@@ -2221,6 +2227,7 @@ pub fn session_settings_default() -> SettingsDefault {
                     ClientFlavorDefaultVariant::Github
                 },
             },
+            airlink_host: true,
             wired_client_autolaunch: SwitchDefault {
                 enabled: true,
                 content: WiredClientAutoLaunchConfigDefault { boot_delay: 0 },

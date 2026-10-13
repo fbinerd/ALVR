@@ -23,6 +23,9 @@ pub struct DevicesTab {
     adb_download_progress: Option<f32>,
     airlink_devices_enabled: Option<bool>,
     airlink_devices_status_requested: bool,
+    airlink_host_enabled: Option<bool>,
+    // Address, streaming, and when the server last reported it.
+    airlink_headset: Option<(String, bool, std::time::Instant)>,
 }
 
 impl DevicesTab {
@@ -34,6 +37,8 @@ impl DevicesTab {
             adb_download_progress: None,
             airlink_devices_enabled: None,
             airlink_devices_status_requested: false,
+            airlink_host_enabled: None,
+            airlink_headset: None,
         }
     }
 
@@ -47,6 +52,7 @@ impl DevicesTab {
 
         self.trusted_devices = Some(trusted_clients);
         self.new_devices = Some(untrusted_clients);
+        self.airlink_host_enabled = Some(session.to_settings().connection.airlink_host);
     }
 
     pub fn update_adb_download_progress(&mut self, progress: f32) {
@@ -55,6 +61,11 @@ impl DevicesTab {
 
     pub fn update_airlink_devices(&mut self, enabled: bool) {
         self.airlink_devices_enabled = Some(enabled);
+    }
+
+    pub fn update_airlink_headset(&mut self, address: Option<String>, streaming: bool) {
+        self.airlink_headset =
+            address.map(|address| (address, streaming, std::time::Instant::now()));
     }
 
     pub fn ui(&mut self, ui: &mut Ui, connected_to_server: bool) -> Vec<ServerRequest> {
@@ -111,9 +122,22 @@ impl DevicesTab {
 
             ui.add_space(theme::FRAME_PADDING);
 
-            if let Some(request) = airlink_devices_section(ui, self.airlink_devices_enabled) {
-                requests.push(request);
+            // The server repeats the headset's status while it is connected;
+            // one that stopped coming is from a server that went away.
+            if self
+                .airlink_headset
+                .as_ref()
+                .is_some_and(|(_, _, at)| at.elapsed() > std::time::Duration::from_secs(8))
+            {
+                self.airlink_headset = None;
             }
+            requests.extend(airlink_section(
+                ui,
+                self.airlink_host_enabled,
+                self.airlink_headset
+                    .as_ref()
+                    .map(|(address, streaming, _)| (address.as_str(), *streaming)),
+            ));
 
             ui.add_space(theme::FRAME_PADDING);
 
@@ -204,8 +228,14 @@ impl DevicesTab {
     }
 }
 
-fn airlink_devices_section(ui: &mut Ui, enabled: Option<bool>) -> Option<ServerRequest> {
-    let mut request = None;
+/// The Meta Air Link host: its switch, which also makes and removes the
+/// AirLink audio devices, and the headset connected to it.
+fn airlink_section(
+    ui: &mut Ui,
+    enabled: Option<bool>,
+    headset: Option<(&str, bool)>,
+) -> Vec<ServerRequest> {
+    let mut requests = vec![];
 
     Frame::group(ui.style())
         .fill(theme::SECTION_BG)
@@ -214,26 +244,54 @@ fn airlink_devices_section(ui: &mut Ui, enabled: Option<bool>) -> Option<ServerR
             theme::FRAME_PADDING,
         ))
         .show(ui, |ui| {
-            Grid::new("airlink-devices")
+            Grid::new("airlink")
                 .num_columns(2)
                 .spacing(egui::vec2(8.0, 8.0))
                 .show(ui, |ui| {
-                    ui.heading("AirLink Devices");
+                    ui.heading("Meta Air Link");
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if let Some(enabled) = enabled {
                             let mut enabled = enabled;
                             if alvr_gui_common::switch(ui, &mut enabled).changed() {
-                                request = Some(ServerRequest::SetAirLinkDevices(enabled));
+                                requests.push(ServerRequest::SetSessionValues(vec![
+                                    alvr_packets::PathValuePair {
+                                        path: alvr_packets::parse_path(
+                                            "session_settings.connection.airlink_host",
+                                        )
+                                        .unwrap(),
+                                        value: serde_json::Value::Bool(enabled),
+                                    },
+                                ]));
+                                requests.push(ServerRequest::SetAirLinkDevices(enabled));
                             }
                         } else {
                             ui.spinner();
                         }
                     });
                     ui.end_row();
+
+                    match (enabled, headset) {
+                        (Some(true), Some((address, streaming))) => {
+                            ui.label(format!("Meta Quest: {address}"));
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                if streaming {
+                                    ui.colored_label(log_colors::INFO_LIGHT, "Streaming");
+                                } else {
+                                    ui.colored_label(log_colors::WARNING_LIGHT, "Connected");
+                                }
+                            });
+                            ui.end_row();
+                        }
+                        (Some(true), None) => {
+                            ui.label("No headset connected");
+                            ui.end_row();
+                        }
+                        _ => {}
+                    }
                 });
         });
 
-    request
+    requests
 }
 
 fn wired_client_section(

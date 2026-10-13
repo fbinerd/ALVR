@@ -210,6 +210,9 @@ impl eframe::App for Dashboard {
                 }
                 // The dashboard switches the system's default devices: the
                 // server runs in SteamVR's container, which has no pactl.
+                EventType::AirLinkHeadset { address, streaming } => self
+                    .connections_tab
+                    .update_airlink_headset(address, streaming),
                 EventType::AirLinkStreaming(true) => {
                     self.airlink_streaming = true;
                     self.select_airlink_audio_devices();
