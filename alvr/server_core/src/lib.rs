@@ -88,6 +88,10 @@ pub struct ServerNegotiatedStreamingConfig {
     pub transcoding_view_resolution: UVec2,
     pub emulated_headset_view_resolution: UVec2,
     pub refresh_rate: f32,
+    /// The rate the headset's panel really refreshes at, which paces
+    /// SteamVR. A Quest 2 over Meta Air Link is a little under the nominal
+    /// rate.
+    pub display_refresh_rate: f32,
     pub foveated_encoding: Option<AlvrFoveatedEncodingParams>,
     pub codec: CodecType,
     pub h264_profile: H264Profile,
@@ -361,7 +365,10 @@ impl ServerCoreContext {
                 let settings = session_manager.settings();
                 *started_context.statistics_manager.write() = Some(StatisticsManager::new(
                     settings.connection.statistics_history_size,
-                    Duration::from_secs_f32(1.0 / negotiated_config.refresh_rate),
+                    // At the headset's real refresh rate, a little under the
+                    // nominal one: at exactly 72 Hz a frame too many arrives
+                    // every six seconds and the headset repeats frames in waves.
+                    Duration::from_secs_f64(alvr_airlink::video::frame_period_s()),
                     if let Switch::Enabled(config) = &settings.headset.controllers {
                         config.steamvr_pipeline_frames
                     } else {

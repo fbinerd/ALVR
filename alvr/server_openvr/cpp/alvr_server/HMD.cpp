@@ -83,7 +83,7 @@ bool Hmd::activate() {
     vr_properties->SetFloatProperty(
         this->prop_container,
         vr::Prop_DisplayFrequency_Float,
-        static_cast<float>(Settings_Instance()->m_refreshRate)
+        Settings_Instance()->m_displayRefreshRate
     );
 
     vr::VRDriverInput()->CreateBooleanComponent(this->prop_container, "/proximity", &m_proximity);
@@ -209,7 +209,7 @@ void Hmd::StartStreaming() {
     vr::VRProperties()->SetFloatProperty(
         this->prop_container,
         vr::Prop_DisplayFrequency_Float,
-        static_cast<float>(Settings_Instance()->m_refreshRate)
+        Settings_Instance()->m_displayRefreshRate
     );
     // One frame period. A streamed display has no measured panel latency to
     // put here. ALVR compensates streaming latency in its own tracking path,
@@ -217,7 +217,7 @@ void Hmd::StartStreaming() {
     vr::VRProperties()->SetFloatProperty(
         this->prop_container,
         vr::Prop_SecondsFromVsyncToPhotons_Float,
-        1.0f / static_cast<float>(Settings_Instance()->m_refreshRate)
+        1.0f / Settings_Instance()->m_displayRefreshRate
     );
 #endif
 
