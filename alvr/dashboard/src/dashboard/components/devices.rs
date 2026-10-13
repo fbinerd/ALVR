@@ -2,10 +2,10 @@ use crate::dashboard::ServerRequest;
 use alvr_common::ConnectionState;
 use alvr_gui_common::theme::{self, log_colors};
 use alvr_packets::ClientConnectionsAction;
-use alvr_session::{ClientConnectionConfig, SessionConfig};
+use alvr_session::{AirLinkAudioDevice, ClientConnectionConfig, SessionConfig};
 use alvr_sockets::WIRED_CLIENT_HOSTNAME;
 use eframe::{
-    egui::{self, Frame, Grid, Layout, ProgressBar, RichText, TextEdit, Ui, Window},
+    egui::{self, ComboBox, Frame, Grid, Layout, ProgressBar, RichText, TextEdit, Ui, Window},
     emath::{Align, Align2},
     epaint::Color32,
 };
@@ -23,6 +23,36 @@ pub struct DevicesTab {
     adb_download_progress: Option<f32>,
     airlink_devices_enabled: Option<bool>,
     airlink_devices_status_requested: bool,
+    airlink_audio: AirLinkAudioChoices,
+}
+
+/// The output and input chosen for Air Link streaming and what the system
+/// offers, as (name, description).
+struct AirLinkAudioChoices {
+    speakers: Option<AirLinkAudioDevice>,
+    microphone: Option<AirLinkAudioDevice>,
+    outputs: Vec<(String, String)>,
+    inputs: Vec<(String, String)>,
+    listed_at: Option<std::time::Instant>,
+}
+
+impl AirLinkAudioChoices {
+    /// Devices come and go (a speaker box is switched on): list them again
+    /// every few seconds while the tab is shown.
+    fn refresh(&mut self) {
+        if self
+            .listed_at
+            .is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(3))
+        {
+            return;
+        }
+        self.listed_at = Some(std::time::Instant::now());
+        #[cfg(target_os = "linux")]
+        {
+            self.outputs = alvr_audio::linux::list_audio_devices("sinks").unwrap_or_default();
+            self.inputs = alvr_audio::linux::list_audio_devices("sources").unwrap_or_default();
+        }
+    }
 }
 
 impl DevicesTab {
@@ -34,6 +64,13 @@ impl DevicesTab {
             adb_download_progress: None,
             airlink_devices_enabled: None,
             airlink_devices_status_requested: false,
+            airlink_audio: AirLinkAudioChoices {
+                speakers: None,
+                microphone: None,
+                outputs: vec![],
+                inputs: vec![],
+                listed_at: None,
+            },
         }
     }
 
@@ -47,6 +84,10 @@ impl DevicesTab {
 
         self.trusted_devices = Some(trusted_clients);
         self.new_devices = Some(untrusted_clients);
+
+        let audio = session.to_settings().audio;
+        self.airlink_audio.speakers = Some(audio.airlink_speakers);
+        self.airlink_audio.microphone = Some(audio.airlink_microphone);
     }
 
     pub fn update_adb_download_progress(&mut self, progress: f32) {
@@ -111,9 +152,12 @@ impl DevicesTab {
 
             ui.add_space(theme::FRAME_PADDING);
 
-            if let Some(request) = airlink_devices_section(ui, self.airlink_devices_enabled) {
-                requests.push(request);
-            }
+            self.airlink_audio.refresh();
+            requests.extend(airlink_devices_section(
+                ui,
+                self.airlink_devices_enabled,
+                &self.airlink_audio,
+            ));
 
             ui.add_space(theme::FRAME_PADDING);
 
@@ -204,8 +248,72 @@ impl DevicesTab {
     }
 }
 
-fn airlink_devices_section(ui: &mut Ui, enabled: Option<bool>) -> Option<ServerRequest> {
+/// A drop-down with "Headset", "System default" and the system's devices.
+/// Gives the request that stores a new choice.
+fn airlink_audio_choice(
+    ui: &mut Ui,
+    setting: &str,
+    headset_label: &str,
+    current: Option<&AirLinkAudioDevice>,
+    devices: &[(String, String)],
+) -> Option<ServerRequest> {
+    let current = current?;
+    let selected_text = match current {
+        AirLinkAudioDevice::Headset => headset_label.to_owned(),
+        AirLinkAudioDevice::SystemDefault => "System default (not changed)".to_owned(),
+        AirLinkAudioDevice::Custom(name) => devices
+            .iter()
+            .find(|(device, _)| device == name)
+            .map_or_else(|| format!("{name} (not present)"), |(_, description)| description.clone()),
+    };
+
+    let mut chosen = None;
+    ComboBox::from_id_salt(setting)
+        .selected_text(selected_text)
+        .width(320.0)
+        .show_ui(ui, |ui| {
+            let mut option = |ui: &mut Ui, label: &str, value: AirLinkAudioDevice| {
+                if ui.selectable_label(*current == value, label).clicked() && *current != value {
+                    chosen = Some(value);
+                }
+            };
+            option(ui, headset_label, AirLinkAudioDevice::Headset);
+            option(ui, "System default (not changed)", AirLinkAudioDevice::SystemDefault);
+            for (name, description) in devices {
+                option(ui, description, AirLinkAudioDevice::Custom(name.clone()));
+            }
+        });
+
+    let chosen = chosen?;
+    let path = |leaf: &str| {
+        alvr_packets::parse_path(&format!("session_settings.audio.{setting}.{leaf}")).unwrap()
+    };
+    let (variant, custom) = match chosen {
+        AirLinkAudioDevice::Headset => ("Headset", None),
+        AirLinkAudioDevice::SystemDefault => ("SystemDefault", None),
+        AirLinkAudioDevice::Custom(name) => ("Custom", Some(name)),
+    };
+    let mut values = vec![];
+    if let Some(name) = custom {
+        values.push(alvr_packets::PathValuePair {
+            path: path("Custom"),
+            value: serde_json::Value::String(name),
+        });
+    }
+    values.push(alvr_packets::PathValuePair {
+        path: path("variant"),
+        value: serde_json::Value::String(variant.into()),
+    });
+    Some(ServerRequest::SetSessionValues(values))
+}
+
+fn airlink_devices_section(
+    ui: &mut Ui,
+    enabled: Option<bool>,
+    audio: &AirLinkAudioChoices,
+) -> Vec<ServerRequest> {
     let mut request = None;
+    let mut choice_requests = vec![];
 
     Frame::group(ui.style())
         .fill(theme::SECTION_BG)
@@ -239,13 +347,37 @@ fn airlink_devices_section(ui: &mut Ui, enabled: Option<bool>) -> Option<ServerR
                     });
                     ui.end_row();
 
-                    ui.label("Endpoints are created in the current user's PipeWire session.");
-                    ui.label("Quest audio transport is not connected yet.");
+                    ui.label("Sound output while streaming");
+                    choice_requests.extend(airlink_audio_choice(
+                        ui,
+                        "airlink_speakers",
+                        "Headset speakers",
+                        audio.speakers.as_ref(),
+                        &audio.outputs,
+                    ));
+                    ui.end_row();
+
+                    ui.label("Microphone while streaming");
+                    choice_requests.extend(airlink_audio_choice(
+                        ui,
+                        "airlink_microphone",
+                        "Headset microphone",
+                        audio.microphone.as_ref(),
+                        &audio.inputs,
+                    ));
+                    ui.end_row();
+
+                    ui.label("");
+                    ui.label(
+                        "The choice becomes the system's default device when an Air Link \
+                         headset starts streaming; the previous one comes back when it ends.",
+                    );
                     ui.end_row();
                 });
         });
 
-    request
+    choice_requests.extend(request);
+    choice_requests
 }
 
 fn wired_client_section(

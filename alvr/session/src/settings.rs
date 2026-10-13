@@ -838,8 +838,35 @@ pub struct MicrophoneConfig {
     pub buffering: AudioBufferingConfig,
 }
 
+#[derive(SettingsSchema, Serialize, Deserialize, Clone, PartialEq)]
+#[schema(gui = "button_group")]
+pub enum AirLinkAudioDevice {
+    #[schema(strings(display_name = "Headset"))]
+    Headset,
+    #[schema(strings(display_name = "System default"))]
+    SystemDefault,
+    #[schema(strings(display_name = "Other device"))]
+    Custom(String),
+}
+
 #[derive(SettingsSchema, Serialize, Deserialize, Clone)]
 pub struct AudioConfig {
+    #[schema(strings(
+        display_name = "Air Link sound output",
+        help = r"Where the computer's sound goes while a Meta Air Link headset is streaming.
+Headset: the headset's speakers. System default: left as it is. Other device: any output, by its name or part of it as the system's sound settings show it (a speaker box, for instance).
+The choice becomes the system's default output when streaming starts; the previous one comes back when it ends."
+    ))]
+    pub airlink_speakers: AirLinkAudioDevice,
+
+    #[schema(strings(
+        display_name = "Air Link microphone",
+        help = r"Which microphone applications get while a Meta Air Link headset is streaming.
+Headset: the headset's microphone. System default: left as it is. Other device: any input, by its name or part of it as the system's sound settings show it.
+The choice becomes the system's default input when streaming starts; the previous one comes back when it ends."
+    ))]
+    pub airlink_microphone: AirLinkAudioDevice,
+
     #[schema(strings(display_name = "Headset speaker"))]
     pub game_audio: Switch<GameAudioConfig>,
 
@@ -1919,6 +1946,14 @@ pub fn session_settings_default() -> SettingsDefault {
             },
         },
         audio: AudioConfigDefault {
+            airlink_speakers: AirLinkAudioDeviceDefault {
+                Custom: "".into(),
+                variant: AirLinkAudioDeviceDefaultVariant::Headset,
+            },
+            airlink_microphone: AirLinkAudioDeviceDefault {
+                Custom: "".into(),
+                variant: AirLinkAudioDeviceDefaultVariant::Headset,
+            },
             game_audio: SwitchDefault {
                 enabled: true,
                 content: GameAudioConfigDefault {
