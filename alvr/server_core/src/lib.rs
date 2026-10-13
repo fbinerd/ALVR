@@ -347,10 +347,28 @@ impl ServerCoreContext {
         let audio = airlink_audio();
         let settings = SESSION_MANAGER.read().settings().clone();
         let started_sender = self.connection_context.events_sender.clone();
+        let started_context = Arc::clone(&self.connection_context);
         let on_streaming_started = Arc::new(move || {
             // Built at every stream start, so setting changes apply on re-entry.
             let negotiated_config =
                 connection::airlink_streaming_config(SESSION_MANAGER.read().settings());
+            // The statistics manager also paces SteamVR's frames (its virtual
+            // vsync). The one made at start-up runs at 90 Hz; left in place
+            // the PC produced about 74 frames per second for a 72 Hz
+            // headset, whose frame queue overflowed all the time.
+            {
+                let session_manager = SESSION_MANAGER.read();
+                let settings = session_manager.settings();
+                *started_context.statistics_manager.write() = Some(StatisticsManager::new(
+                    settings.connection.statistics_history_size,
+                    Duration::from_secs_f32(1.0 / negotiated_config.refresh_rate),
+                    if let Switch::Enabled(config) = &settings.headset.controllers {
+                        config.steamvr_pipeline_frames
+                    } else {
+                        0.0
+                    },
+                ));
+            }
             started_sender
                 .send(ServerCoreEvent::ClientConnected(negotiated_config))
                 .ok();
