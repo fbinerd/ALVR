@@ -321,7 +321,26 @@ impl ServerCoreContext {
             return;
         };
         let state_dir = layout.config_dir.join("airlink");
-        let hostname = env::var("HOSTNAME").unwrap_or_else(|_| "alvr-host".to_owned());
+        // The name the headset lists: the one set by the user, else the
+        // computer's. SteamVR's container has no HOSTNAME in its environment.
+        let hostname = Some(
+            SESSION_MANAGER
+                .read()
+                .settings()
+                .connection
+                .airlink_host_name
+                .trim()
+                .to_owned(),
+        )
+        .filter(|name| !name.is_empty())
+        .or_else(|| {
+            std::fs::read_to_string("/proc/sys/kernel/hostname")
+                .ok()
+                .map(|name| name.trim().to_owned())
+                .filter(|name| !name.is_empty())
+        })
+        .or_else(|| env::var("HOSTNAME").ok())
+        .unwrap_or_else(|| "alvr-host".to_owned());
         let flavor = env::var("USER").unwrap_or_else(|_| "user".to_owned());
         let endpoint_name = format!("{flavor}::{hostname}");
         let video_receiver = self.connection_context.airlink_video_sender.subscribe();
@@ -570,7 +589,20 @@ impl ServerCoreContext {
                 tokio::spawn(async {
                     let mut reported = None;
                     let mut ticks_since_report = 0u32;
+                    let mut pairing_reported = None;
+                    let mut ticks_since_pairing_report = 0u32;
                     loop {
+                        let pairing = alvr_airlink::host::pairing_request();
+                        ticks_since_pairing_report += 1;
+                        if pairing != pairing_reported
+                            || (pairing.is_some() && ticks_since_pairing_report >= 3)
+                        {
+                            alvr_events::send_event(EventType::AirLinkPairing {
+                                address: pairing.map(|address| address.ip().to_string()),
+                            });
+                            pairing_reported = pairing;
+                            ticks_since_pairing_report = 0;
+                        }
                         alvr_airlink::host::set_enabled(
                             SESSION_MANAGER.read().settings().connection.airlink_host,
                         );
