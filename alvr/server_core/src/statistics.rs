@@ -56,6 +56,7 @@ pub struct StatisticsManager {
     last_vsync_time: Instant,
     frame_interval: Duration,
     last_throughput_directives: BitrateDirectives,
+    last_unreported_frame_instant: Instant,
 }
 
 impl StatisticsManager {
@@ -86,6 +87,7 @@ impl StatisticsManager {
             last_vsync_time: Instant::now(),
             frame_interval: nominal_server_frame_interval,
             last_throughput_directives: BitrateDirectives::default(),
+            last_unreported_frame_instant: Instant::now(),
         }
     }
 
@@ -285,6 +287,36 @@ impl StatisticsManager {
         } else {
             (Duration::ZERO, Duration::ZERO)
         }
+    }
+
+    /// Statistics for a headset that reports nothing back (Meta Air Link),
+    /// called when a frame is handed to the network. Only what the server
+    /// measures is real: the frame rate is that of the frames sent, the total
+    /// latency ends at this call, and decoding, client compositing and the
+    /// network count as zero.
+    pub fn report_frame_sent_without_client_statistics(&mut self, target_timestamp: Duration) {
+        let now = Instant::now();
+        let frame_interval = now.saturating_duration_since(self.last_unreported_frame_instant);
+        self.last_unreported_frame_instant = now;
+
+        let Some(total_pipeline_latency) = self
+            .history_buffer
+            .iter()
+            .find(|frame| frame.target_timestamp == target_timestamp)
+            .map(|frame| now.saturating_duration_since(frame.tracking_received))
+        else {
+            return;
+        };
+
+        self.report_statistics(ClientStatistics {
+            target_timestamp,
+            frame_interval,
+            video_decode: Duration::ZERO,
+            video_decoder_queue: Duration::ZERO,
+            rendering: Duration::ZERO,
+            vsync_queue: Duration::ZERO,
+            total_pipeline_latency,
+        });
     }
 
     pub fn motion_to_photon_latency_average(&self) -> Duration {

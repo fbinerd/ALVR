@@ -32,6 +32,11 @@ pub struct AirLinkControllerInput {
     /// One byte each at 36, 97 and 223; in the captures they only fall, each
     /// on its own, and the headset's matches its own log.
     pub battery_percent: [u8; 3],
+    /// Height of the tracking space's origin above the floor, f32 at 25. With
+    /// the head's y it gives 1.1 to 1.2 m in captures of the user seated and
+    /// 1.5 m playing upright; it changes when the user recenters (to 1.1) or
+    /// sets the Guardian up again.
+    pub origin_height: Option<f32>,
 }
 
 fn read_f32(data: &[u8], offset: usize) -> Option<f32> {
@@ -105,5 +110,6 @@ pub fn unpack_controller_input(data: &[u8]) -> Option<AirLinkControllerInput> {
         left: read_hand_input(data, 37)?,
         right: read_hand_input(data, 98)?,
         battery_percent: [data[36], data[97], data[223]],
+        origin_height: read_f32(data, 25).filter(|height| (0.1..3.0).contains(height)),
     })
 }

@@ -242,7 +242,12 @@ impl AirLinkHost {
         let mut tracking_received = false;
         // Height of the floor in the headset's tracking space. SteamVR gets
         // floor-relative poses; frame metadata goes back to tracking space.
+        // The headset reports it with the controller input. The Guardian
+        // polygon's height is no use: it is in another space (the user,
+        // seated, came out 0.5 m above the floor).
+        let mut reported_floor_y: Option<f32> = None;
         let mut floor_y: Option<f32> = None;
+        let mut floor_logged_at = None;
         let mut idle_pose_timer = tokio::time::interval(std::time::Duration::from_micros(13_889));
         idle_pose_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         // The keyframe asked for when the stream becomes ready can be lost:
@@ -301,8 +306,7 @@ impl AirLinkHost {
                 received = self.video_receiver.recv() => {
                     match received {
                         Ok(mut frame) if runtime_service.gpu_stream_ready => {
-                            frame.head_pose[5] +=
-                                runtime_service.guardian.floor_y.or(floor_y).unwrap_or(0.0);
+                            frame.head_pose[5] += reported_floor_y.or(floor_y).unwrap_or(0.0);
                             if !runtime_service.screen_is_on_sent {
                                 if let Some(route) = runtime_service.oaf_client_route {
                                     let event = protocol_result(ripc::pack_oaf_broadcast_event(
@@ -479,9 +483,9 @@ impl AirLinkHost {
                             tracking_received = true;
                             log::info!("Air Link tracking starts");
                         }
-                        // A headset with no roomscale boundary reports no floor:
-                        // assume the user stands when the stream starts.
-                        let floor = runtime_service.guardian.floor_y.unwrap_or_else(|| {
+                        // Until the headset has reported the floor, assume the
+                        // user stands when the stream starts.
+                        let floor = reported_floor_y.unwrap_or_else(|| {
                             *floor_y.get_or_insert_with(|| {
                                 let floor = sample.head.position_xyz[1] - STANDING_HEAD_HEIGHT;
                                 log::info!(
@@ -491,6 +495,20 @@ impl AirLinkHost {
                             })
                         });
                         sample.head.position_xyz[1] -= floor;
+                        if floor_logged_at.is_none_or(|at: std::time::Instant| {
+                            at.elapsed().as_secs() >= 30
+                        }) {
+                            floor_logged_at = Some(std::time::Instant::now());
+                            log::info!(
+                                "Air Link head {:.2} m above the floor (floor y={floor:.3}, {})",
+                                sample.head.position_xyz[1],
+                                if reported_floor_y.is_some() {
+                                    "reported by the headset"
+                                } else {
+                                    "assumed"
+                                }
+                            );
+                        }
                         for hand in [&mut sample.left_hand, &mut sample.right_hand] {
                             if let Some(hand) = hand {
                                 hand.position_xyz[1] -= floor;
@@ -500,6 +518,9 @@ impl AirLinkHost {
                     }
                 } else if topic == 12 {
                     if let Some(input) = crate::tracking::unpack_controller_input(&payload) {
+                        if let Some(height) = input.origin_height {
+                            reported_floor_y = Some(-height);
+                        }
                         (self.on_controller_input)(input);
                     }
                 }
