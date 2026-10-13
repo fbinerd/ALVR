@@ -1,3 +1,4 @@
+pub mod airlink_audio_device;
 pub mod array;
 pub mod boolean;
 pub mod choice;
@@ -80,6 +81,7 @@ pub struct NestingInfo {
 pub enum SettingControl {
     Section(section::Control),
     Choice(choice::Control),
+    AirLinkAudioDevice(airlink_audio_device::Control),
     Optional(optional::Control),
     Switch(switch::Control),
     Boolean(boolean::Control),
@@ -106,7 +108,13 @@ impl SettingControl {
                 default,
                 variants,
                 gui,
-            } => Self::Choice(choice::Control::new(nesting_info, default, variants, gui)),
+            } => {
+                if let Some(control) = airlink_audio_device::Control::for_setting(&nesting_info) {
+                    Self::AirLinkAudioDevice(control)
+                } else {
+                    Self::Choice(choice::Control::new(nesting_info, default, variants, gui))
+                }
+            }
             SchemaNode::Optional {
                 default_set,
                 content,
@@ -164,6 +172,9 @@ impl SettingControl {
         match self {
             Self::Section(control) => control.ui(ui, session_fragment, allow_inline),
             Self::Choice(control) => control.ui(ui, session_fragment, allow_inline),
+            Self::AirLinkAudioDevice(control) => {
+                control.ui(ui, session_fragment, allow_inline)
+            }
             Self::Optional(control) => control.ui(ui, session_fragment, allow_inline),
             Self::Switch(control) => control.ui(ui, session_fragment, allow_inline),
             Self::Boolean(control) => control.ui(ui, session_fragment, allow_inline),
