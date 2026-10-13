@@ -9,6 +9,9 @@ pub struct AirLinkPose {
 #[derive(Clone, Copy, Debug)]
 pub struct AirLinkTrackingSample {
     pub head: AirLinkPose,
+    /// When the head pose was sampled, on the headset's clock, in seconds
+    /// (f64 at 422, 34 bytes into the pose).
+    pub head_time_s: f64,
     /// Absent while the controller is asleep or out of sight: its pose is
     /// then not a rotation. The head pose of the packet is still good.
     pub left_hand: Option<AirLinkPose>,
@@ -74,7 +77,96 @@ pub fn unpack_tracking(data: &[u8]) -> Option<AirLinkTrackingSample> {
         left_hand: read_pose(data, 82),
         right_hand: read_pose(data, 184),
         head: read_pose(data, 388)?,
+        head_time_s: read_f64(data, 422)?,
     })
+}
+
+fn read_f64(data: &[u8], offset: usize) -> Option<f64> {
+    Some(f64::from_le_bytes(data.get(offset..offset + 8)?.try_into().ok()?))
+}
+
+/// Extrapolates the head pose to where it will be when the frame rendered
+/// for it is shown. Meta Horizon Link does the same: the pose in each of its
+/// video frames matches the headset's tracking samples of about 40 ms after
+/// the frame was sent. Without it the headset has to reproject every frame
+/// over the whole pipeline latency, and the picture shakes on fast moves.
+pub struct HeadPredictor {
+    // (time, pose) of the last tens of milliseconds, oldest first.
+    history: std::collections::VecDeque<(f64, AirLinkPose)>,
+    lead_s: f64,
+}
+
+impl HeadPredictor {
+    /// Velocity is measured against the sample this much older.
+    const BASELINE_S: f64 = 0.016;
+
+    pub fn new(lead_ms: f64) -> Self {
+        Self {
+            history: std::collections::VecDeque::new(),
+            lead_s: lead_ms.clamp(0.0, 100.0) / 1000.0,
+        }
+    }
+
+    pub fn predict(&mut self, pose: AirLinkPose, time_s: f64) -> AirLinkPose {
+        // A clock that went back is a new session.
+        if self.history.back().is_some_and(|(last, _)| time_s <= *last) {
+            self.history.clear();
+        }
+        self.history.push_back((time_s, pose));
+        while self
+            .history
+            .get(1)
+            .is_some_and(|(next, _)| time_s - *next >= Self::BASELINE_S)
+        {
+            self.history.pop_front();
+        }
+        let (old_time, old) = self.history[0];
+        let dt = time_s - old_time;
+        if self.lead_s == 0.0 || dt < Self::BASELINE_S / 2.0 || dt > 0.1 {
+            return pose;
+        }
+        let scale = (self.lead_s / dt) as f32;
+
+        // Rotation since the old sample, in the tracking space: q * old^-1.
+        let [x0, y0, z0, w0] = old.orientation_xyzw;
+        let delta = quat_mul(pose.orientation_xyzw, [-x0, -y0, -z0, w0]);
+        let delta = if delta[3] < 0.0 {
+            delta.map(|component| -component)
+        } else {
+            delta
+        };
+        // The same rotation again, `scale` times, on top of the pose.
+        let sine = (delta[0] * delta[0] + delta[1] * delta[1] + delta[2] * delta[2]).sqrt();
+        let orientation_xyzw = if sine < 1e-6 {
+            pose.orientation_xyzw
+        } else {
+            let half_angle = sine.atan2(delta[3]) * scale;
+            let factor = half_angle.sin() / sine;
+            quat_mul(
+                [delta[0] * factor, delta[1] * factor, delta[2] * factor, half_angle.cos()],
+                pose.orientation_xyzw,
+            )
+        };
+        let mut position_xyz = pose.position_xyz;
+        for axis in 0..3 {
+            position_xyz[axis] += (pose.position_xyz[axis] - old.position_xyz[axis]) * scale;
+        }
+        AirLinkPose {
+            orientation_xyzw,
+            position_xyz,
+        }
+    }
+}
+
+fn quat_mul(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
+    let [ax, ay, az, aw] = a;
+    let [bx, by, bz, bw] = b;
+    [
+        aw * bx + ax * bw + ay * bz - az * by,
+        aw * by - ax * bz + ay * bw + az * bx,
+        aw * bz + ax * by - ay * bx + az * bw,
+        aw * bw - ax * bx - ay * by - az * bz,
+    ]
 }
 
 fn read_u32(data: &[u8], offset: usize) -> Option<u32> {

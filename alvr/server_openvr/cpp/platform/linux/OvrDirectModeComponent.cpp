@@ -42,7 +42,29 @@ constexpr int64_t GpuWaitPollCapFrames = 2;
 // see them; this bounds how fresh such a write can be when the read starts.
 // Runs on the worker, so it costs pipeline depth, not compositor-thread
 // budget.
-constexpr int GuardSleepMs = 4;
+// An application's frame may take longer than that to finish on a loaded GPU;
+// read early, its texture still shows the frame it held before. For trials,
+// ~/.config/alvr/encoder_guard_sleep_ms overrides the 4 ms (0 to 30), read
+// once.
+static int ReadTrialValue(const char* name, int fallback, int max) {
+    int value = fallback;
+    if (const char* home = getenv("HOME")) {
+        std::string path = std::string(home) + "/.config/alvr/" + name;
+        if (FILE* file = fopen(path.c_str(), "r")) {
+            int read = 0;
+            if (fscanf(file, "%d", &read) == 1 && read >= 0 && read <= max) {
+                value = read;
+            }
+            fclose(file);
+        }
+    }
+    return value;
+}
+static const int GuardSleepMs = ReadTrialValue("encoder_guard_sleep_ms", 4, 30);
+// For trials too: 0 in ~/.config/alvr/encoder_rewarp sends each frame as it
+// was rendered, stamped with the pose it was rendered for, and leaves all
+// reprojection to the headset.
+static const bool RewarpEnabled = ReadTrialValue("encoder_rewarp", 1, 1) != 0;
 
 // The negotiated refresh rate expressed as a frame period.
 static std::chrono::nanoseconds frameInterval() {
@@ -278,7 +300,7 @@ void OvrDirectModeComponent::EncodeWorkerLoop() {
             // rather than in Present so the target is as fresh as possible.
             uint64_t stampTimestampNs = job.targetTimestampNs;
             alvr::render::WarpParams warpParams {};
-            if (enc.warpCapable()) {
+            if (RewarpEnabled && enc.warpCapable()) {
                 auto latest = m_poseHistory->GetLatestPose();
 
                 FfiViewParams viewParams[2];
