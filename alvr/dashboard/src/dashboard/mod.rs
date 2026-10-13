@@ -41,6 +41,7 @@ pub enum ServerRequest {
     UnregisterDriver(PathBuf),
     GetAirLinkDevices,
     SetAirLinkDevices(bool),
+    AnswerAirLinkPairing(bool),
     RestartSteamvr,
     ShutdownSteamvr,
 }
@@ -76,6 +77,9 @@ pub struct Dashboard {
     setup_wizard_open: bool,
     session: Option<SessionConfig>,
     airlink_streaming: bool,
+    // Address of the headset asking to pair and when the server last said so.
+    airlink_pairing: Option<(String, std::time::Instant)>,
+    airlink_pairing_answered_at: Option<std::time::Instant>,
 }
 
 impl Dashboard {
@@ -130,6 +134,8 @@ impl Dashboard {
             setup_wizard_open: false,
             session: None,
             airlink_streaming: false,
+            airlink_pairing: None,
+            airlink_pairing_answered_at: None,
             new_version_popup: None,
         }
     }
@@ -213,6 +219,16 @@ impl eframe::App for Dashboard {
                 EventType::AirLinkHeadset { address, streaming } => self
                     .connections_tab
                     .update_airlink_headset(address, streaming),
+                EventType::AirLinkPairing { address } => {
+                    // The server may repeat the request once more before it
+                    // has taken the answer.
+                    let just_answered = self
+                        .airlink_pairing_answered_at
+                        .is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(4));
+                    self.airlink_pairing = address
+                        .filter(|_| !just_answered)
+                        .map(|address| (address, std::time::Instant::now()));
+                }
                 EventType::AirLinkStreaming(true) => {
                     self.airlink_streaming = true;
                     self.select_airlink_audio_devices();
@@ -383,6 +399,38 @@ impl eframe::App for Dashboard {
                 .lock()
                 .ensure_steamvr_shutdown();
         };
+
+        // A request the server stopped repeating is over.
+        if self
+            .airlink_pairing
+            .as_ref()
+            .is_some_and(|(_, at)| at.elapsed() > std::time::Duration::from_secs(8))
+        {
+            self.airlink_pairing = None;
+        }
+        if let Some((address, _)) = &self.airlink_pairing {
+            let accept = alvr_gui_common::ModalButton::Custom("Accept".into());
+            let refuse = alvr_gui_common::ModalButton::Custom("Refuse".into());
+            let address = address.clone();
+            let answer = alvr_gui_common::modal(
+                ui,
+                "Meta Air Link pairing",
+                Some(move |ui: &mut eframe::egui::Ui| {
+                    ui.label(format!(
+                        "The headset at {address} asks to pair with this computer through \
+                         Air Link."
+                    ));
+                    ui.label("Accept only if you started the pairing on your headset.");
+                }),
+                &[accept.clone(), refuse],
+                Some(420.0),
+            );
+            if let Some(answer) = answer {
+                requests.push(ServerRequest::AnswerAirLinkPairing(answer == accept));
+                self.airlink_pairing = None;
+                self.airlink_pairing_answered_at = Some(std::time::Instant::now());
+            }
+        }
 
         if let Some(popup) = &self.new_version_popup
             && let Some(action) = popup.ui(ui, shutdown_alvr)
