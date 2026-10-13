@@ -34,6 +34,28 @@ pub fn frame_period_s() -> f64 {
     FRAME_PERIOD_NS.load(Ordering::Relaxed) as f64 / 1e9
 }
 
+static SHARPENING_LEVEL: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(2);
+static HEAD_PREDICTION_CAP_MS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(100);
+
+/// The headset's sharpening for the next stream: 1 off, 2 normal, 3 quality.
+pub fn set_sharpening_level(level: u8) {
+    SHARPENING_LEVEL.store(level.clamp(1, 3), Ordering::Relaxed);
+}
+
+pub fn sharpening_level() -> u8 {
+    SHARPENING_LEVEL.load(Ordering::Relaxed)
+}
+
+/// Upper limit of the head pose prediction, in milliseconds.
+pub fn set_head_prediction_cap_ms(cap_ms: u64) {
+    HEAD_PREDICTION_CAP_MS.store(cap_ms, Ordering::Relaxed);
+}
+
+pub fn head_prediction_cap_ms() -> u64 {
+    HEAD_PREDICTION_CAP_MS.load(Ordering::Relaxed)
+}
+
 pub fn stream_size() -> (u32, u32) {
     (STREAM_WIDTH.load(Ordering::Relaxed), STREAM_HEIGHT.load(Ordering::Relaxed))
 }

@@ -55,21 +55,29 @@ pub struct VideoPacket {
     pub payload: Vec<u8>,
 }
 
-/// Transfer curve of Air Link video. 2.2 is what Meta Horizon Link sends: a
-/// plain power curve, brighter than sRGB near black. 1 keeps the picture sRGB
-/// encoded, as Steam Link sends it: deeper blacks. Read at every stream start
-/// from `ALVR_AIRLINK_GAMMA` or `~/.config/alvr/airlink_gamma`.
-fn airlink_encoding_gamma() -> f32 {
-    std::env::var("ALVR_AIRLINK_GAMMA")
-        .ok()
-        .or_else(|| {
-            let home = std::env::var_os("HOME")?;
-            std::fs::read_to_string(std::path::Path::new(&home).join(".config/alvr/airlink_gamma"))
-                .ok()
-        })
-        .and_then(|text| text.trim().parse::<f32>().ok())
-        .filter(|gamma| (1.0..=3.0).contains(gamma))
-        .unwrap_or(2.2)
+/// Air Link takes these from the settings ALVR's own client uses, so one
+/// place rules both kinds of headset:
+/// - the transfer curve from "Encoding gamma" (unset: the picture as it is);
+/// - the headset's sharpening from the client-side post-processing switch and
+///   its "Sharpening" choice (Meta's levels: 1 off, 2 normal, 3 quality);
+/// - the head prediction's upper limit from "Maximum prediction".
+/// Before this they came from files in `~/.config/alvr` (`airlink_gamma`,
+/// `airlink_sharpening`), with 2.2 and normal as defaults.
+fn apply_shared_airlink_settings(settings: &Settings) -> f32 {
+    use alvr_session::ClientsidePostProcessingSharpeningMode as Sharpening;
+
+    let sharpening_level = match &settings.video.clientside_post_processing {
+        Switch::Enabled(config) => match config.sharpening {
+            Sharpening::Disabled => 1,
+            Sharpening::Normal => 2,
+            Sharpening::Quality => 3,
+        },
+        Switch::Disabled => 1,
+    };
+    alvr_airlink::video::set_sharpening_level(sharpening_level);
+    alvr_airlink::video::set_head_prediction_cap_ms(settings.headset.max_prediction_ms);
+
+    settings.video.encoder_config.encoding_gamma.unwrap_or(1.0)
 }
 
 pub(crate) fn airlink_streaming_config(settings: &Settings) -> ServerNegotiatedStreamingConfig {
@@ -98,7 +106,7 @@ pub(crate) fn airlink_streaming_config(settings: &Settings) -> ServerNegotiatedS
         codec: settings.video.preferred_codec,
         h264_profile: settings.video.encoder_config.h264_profile,
         use_10bit_encoder: settings.video.encoder_config.use_10bit.unwrap_or(false),
-        encoding_gamma: airlink_encoding_gamma(),
+        encoding_gamma: apply_shared_airlink_settings(settings),
         enable_hdr: settings.video.encoder_config.hdr.enable.unwrap_or(false),
     }
 }
