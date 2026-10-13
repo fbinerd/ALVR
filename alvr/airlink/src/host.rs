@@ -33,14 +33,37 @@ static ENABLED: std::sync::LazyLock<tokio::sync::watch::Sender<bool>> =
     std::sync::LazyLock::new(|| tokio::sync::watch::channel(true).0);
 static STATUS: std::sync::Mutex<Option<AirLinkHeadsetStatus>> = std::sync::Mutex::new(None);
 
-static PAIRING_REQUEST: std::sync::Mutex<Option<SocketAddr>> = std::sync::Mutex::new(None);
+static PAIRING_REQUEST: std::sync::Mutex<Option<AirLinkPairingRequest>> =
+    std::sync::Mutex::new(None);
+// DISCO endpoint ids of the headsets the user accepted.
+static KNOWN_HEADSETS: std::sync::Mutex<Vec<[u8; 16]>> = std::sync::Mutex::new(Vec::new());
+
+/// A headset that waits for the user to let it in: one that pairs for the
+/// first time, or one that remembers this host while the host does not know
+/// it (any more).
+#[derive(Clone, PartialEq)]
+pub struct AirLinkPairingRequest {
+    pub address: SocketAddr,
+    pub headset_id: [u8; 16],
+    pub headset_name: String,
+}
+
+/// The headsets that connect without a question. Any other is held until
+/// the user accepts it, and one taken off the list is dropped.
+pub fn set_known_headsets(headset_ids: Vec<[u8; 16]>) {
+    *KNOWN_HEADSETS.lock().unwrap() = headset_ids;
+}
+
+fn headset_is_known(headset_id: [u8; 16]) -> bool {
+    KNOWN_HEADSETS.lock().unwrap().contains(&headset_id)
+}
 // Counter of answers and the last one: accepted or not.
 static PAIRING_ANSWER: std::sync::LazyLock<tokio::sync::watch::Sender<(u64, bool)>> =
     std::sync::LazyLock::new(|| tokio::sync::watch::channel((0, false)).0);
 
 /// The headset that waits for the user to accept its pairing on the PC.
-pub fn pairing_request() -> Option<SocketAddr> {
-    *PAIRING_REQUEST.lock().unwrap()
+pub fn pairing_request() -> Option<AirLinkPairingRequest> {
+    PAIRING_REQUEST.lock().unwrap().clone()
 }
 
 /// The user's answer to `pairing_request`.
@@ -290,9 +313,22 @@ impl AirLinkHost {
         // Pairing waits for the user's answer in the dashboard.
         let mut pairing_answer = PAIRING_ANSWER.subscribe();
         let mut pairing_pending = false;
+        // The headset asked for the answer itself (first pairing) and waits
+        // for an acknowledgement; otherwise only its messages are held back.
+        let mut pairing_awaits_ack = false;
+        let mut headset: Option<([u8; 16], String)> = None;
+        let mut approved = false;
+        let mut approved_at: Option<std::time::Instant> = None;
+        let mut held: std::collections::VecDeque<(u32, Vec<u8>)> =
+            std::collections::VecDeque::new();
+        let peer_address = STATUS.lock().unwrap().map(|status| status.address);
         let mut channel_handshake_acked = [false; 15];
         loop {
-            let (topic, payload) = tokio::select! {
+            // What an accepted headset sent while it waited comes first.
+            let held_message = if approved { held.pop_front() } else { None };
+            let (topic, payload) = if let Some(message) = held_message {
+                message
+            } else { tokio::select! {
                 changed = pairing_answer.changed(), if pairing_pending => {
                     if changed.is_err() {
                         continue;
@@ -301,14 +337,20 @@ impl AirLinkHost {
                     pairing_pending = false;
                     *PAIRING_REQUEST.lock().unwrap() = None;
                     if accepted {
-                        log::info!("Air Link pairing accepted by the user");
-                        self.send(stream, PAIRING_TOPIC, &disco::pack_awaiting_user_ack())
-                            .await?;
+                        log::info!("Air Link headset accepted by the user");
+                        approved = true;
+                        approved_at = Some(std::time::Instant::now());
+                        if std::mem::take(&mut pairing_awaits_ack) {
+                            self.send(stream, PAIRING_TOPIC, &disco::pack_awaiting_user_ack())
+                                .await?;
+                        }
                         continue;
                     }
-                    self.send(stream, PAIRING_TOPIC, &disco::pack_awaiting_user_nack())
-                        .await?;
-                    return Err("the user refused the pairing".into());
+                    if pairing_awaits_ack {
+                        self.send(stream, PAIRING_TOPIC, &disco::pack_awaiting_user_nack())
+                            .await?;
+                    }
+                    return Err("the user refused the headset".into());
                 }
                 chunk = self.audio.speaker_receiver.recv(), if speaker_open => {
                     match chunk {
@@ -395,6 +437,14 @@ impl AirLinkHost {
                                 runtime_service.mesh_sent = true;
                                 log::info!("sent Air Link rectify mesh: {} bytes", mesh.len());
                             }
+                            // A headset the user took off the list goes, once
+                            // the list has had time to take in a new one.
+                            if next_video_frame_id % 72 == 0
+                                && approved_at.is_none_or(|at| at.elapsed().as_secs() >= 5)
+                                && headset.as_ref().is_some_and(|(id, _)| !headset_is_known(*id))
+                            {
+                                return Err("the headset was removed from the list".into());
+                            }
                             // The trial values can be changed while streaming.
                             if next_video_frame_id % 36 == 0 {
                                 head_predictor.set_lead_ms(head_prediction_ms());
@@ -469,7 +519,32 @@ impl AirLinkHost {
                     continue;
                 }
                 incoming = frame_reader.read_frame(stream) => incoming?,
-            };
+            } };
+            // Only connecting and pairing go on for a headset the user has
+            // not accepted: the rest waits for the answer in the dashboard.
+            if !approved && topic != CONTROL_TOPIC && topic != PAIRING_TOPIC {
+                if headset.as_ref().is_some_and(|(id, _)| headset_is_known(*id)) {
+                    approved = true;
+                } else {
+                    if !pairing_pending
+                        && let (Some((id, name)), Some(address)) = (&headset, peer_address)
+                    {
+                        pairing_pending = true;
+                        pairing_answer.borrow_and_update();
+                        *PAIRING_REQUEST.lock().unwrap() = Some(AirLinkPairingRequest {
+                            address,
+                            headset_id: *id,
+                            headset_name: name.clone(),
+                        });
+                        log::info!("Air Link headset {name} at {address} is not known: waiting for the user");
+                    }
+                    // A headset left waiting gives up and connects again.
+                    if held.len() < 256 {
+                        held.push_back((topic, payload));
+                    }
+                    continue;
+                }
+            }
             if topic == ripc::SERVER_TRAFFIC_TOPIC || topic == ripc::CLIENT_TRAFFIC_TOPIC {
                 trace_frame("rx", topic, &payload);
             }
@@ -484,6 +559,8 @@ impl AirLinkHost {
                     MSG_CONNECT_REQ => {
                         let request = protocol_result(disco::ConnectRequest::unpack(&payload))?;
                         quest_endpoint_uuid = Some(request.endpoint_uuid);
+                        approved = headset_is_known(request.endpoint_uuid);
+                        headset = Some((request.endpoint_uuid, request.endpoint_name.clone()));
                         let version = disco::negotiate_protocol(
                             &request,
                             disco::PROTOCOL_VERSION_RANGE,
@@ -542,12 +619,24 @@ impl AirLinkHost {
                     MSG_AWAITING_USER_REQ => {
                         // Answered when the user accepts or refuses in the
                         // dashboard, not before.
-                        if !pairing_pending {
+                        // A headset the user already accepted pairs again
+                        // without a question (it forgot this host).
+                        if approved {
+                            self.send(stream, topic, &disco::pack_awaiting_user_ack()).await?;
+                            continue;
+                        }
+                        pairing_awaits_ack = true;
+                        if !pairing_pending
+                            && let (Some((id, name)), Some(address)) = (&headset, peer_address)
+                        {
                             pairing_pending = true;
                             pairing_answer.borrow_and_update();
-                            let peer = STATUS.lock().unwrap().map(|status| status.address);
-                            *PAIRING_REQUEST.lock().unwrap() = peer;
-                            log::info!("Air Link pairing asked by {peer:?}: waiting for the user");
+                            *PAIRING_REQUEST.lock().unwrap() = Some(AirLinkPairingRequest {
+                                address,
+                                headset_id: *id,
+                                headset_name: name.clone(),
+                            });
+                            log::info!("Air Link pairing asked by {name} at {address}: waiting for the user");
                         }
                     }
                     MSG_COMMITMENT => {
