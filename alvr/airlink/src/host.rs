@@ -28,6 +28,16 @@ use tokio_rustls::server::TlsStream;
 
 /// MeshChannel is the first stream channel the headset creates.
 const MESH_TOPIC: u32 = 2;
+const AUDIO_TOPIC: u32 = 3;
+const AUDIO_CONTROL_TOPIC: u32 = 4;
+
+// What Meta Horizon Link 208 sends on the AudioControlChannel when the stream
+// channels exist and again later in the session (capture of 2026-10-12,
+// 13:05, at 16.5 s and 122.6 s). Not decoded.
+const AUDIO_CONTROL_START: [u8; 39] = [
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x24, 0x02, 0, 0, 0, 0x01, 0, 0,
+    0, 0x06, 0, 0, 0, 0xb9, 0x92, 0x43, 0x6c, 0x02, 0x01,
+];
 /// Side-by-side picture size announced in the GPU stream channel config.
 const STANDING_HEAD_HEIGHT: f32 = 1.6;
 const IDLE_POSE: AirLinkPose = AirLinkPose {
@@ -47,6 +57,7 @@ pub struct AirLinkHost {
     identity: HostIdentity,
     endpoint_name: String,
     video_receiver: broadcast::Receiver<AirLinkVideoFrame>,
+    audio: crate::audio::AirLinkAudio,
     on_streaming_started: Arc<dyn Fn() + Send + Sync>,
     on_streaming_stopped: Arc<dyn Fn() + Send + Sync>,
     on_keyframe_needed: Arc<dyn Fn() + Send + Sync>,
@@ -81,6 +92,7 @@ impl AirLinkHost {
         hostname: &str,
         endpoint_name: &str,
         video_receiver: broadcast::Receiver<AirLinkVideoFrame>,
+        audio: crate::audio::AirLinkAudio,
         on_streaming_started: Arc<dyn Fn() + Send + Sync>,
         on_streaming_stopped: Arc<dyn Fn() + Send + Sync>,
         on_tracking_update: Arc<dyn Fn(AirLinkTrackingSample) + Send + Sync>,
@@ -107,6 +119,7 @@ impl AirLinkHost {
             identity,
             endpoint_name: endpoint_name.to_owned(),
             video_receiver,
+            audio,
             on_streaming_started,
             on_streaming_stopped,
             on_tracking_update,
@@ -179,8 +192,37 @@ impl AirLinkHost {
         let mut keyframe_retry_timer =
             tokio::time::interval(std::time::Duration::from_millis(500));
         keyframe_retry_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // Game audio recorded while nobody listened is old by now.
+        while self.audio.speaker_receiver.try_recv().is_ok() {}
+        let mut speaker_open = true;
+        let mut speaker_packets = 0u64;
+        let mut channel_handshake_acked = [false; 15];
         loop {
             let (topic, payload) = tokio::select! {
+                chunk = self.audio.speaker_receiver.recv(), if speaker_open => {
+                    match chunk {
+                        // The headset plays what it gets from the first video
+                        // frame on; before that the channel may not exist.
+                        Some(samples) if next_video_frame_id > 2 => {
+                            if speaker_packets == 0 {
+                                self.send(stream, AUDIO_CONTROL_TOPIC, &AUDIO_CONTROL_START)
+                                    .await?;
+                            }
+                            let packet = crate::audio::pack_speaker_packet(
+                                &samples,
+                                monotonic_nanos(),
+                            );
+                            self.send(stream, AUDIO_TOPIC, &packet).await?;
+                            speaker_packets += 1;
+                            if speaker_packets == 1 || speaker_packets % 3000 == 0 {
+                                log::info!("Air Link game audio: {speaker_packets} packets sent");
+                            }
+                        }
+                        Some(_) => {}
+                        None => speaker_open = false,
+                    }
+                    continue;
+                }
                 _ = keyframe_retry_timer.tick(),
                     if runtime_service.gpu_stream_ready && next_video_frame_id == 2 =>
                 {
@@ -361,7 +403,17 @@ impl AirLinkHost {
                 }
             } else if (2..=14).contains(&topic) {
                 if let Some(response) = ripc::channel_buffer_handshake_ack(&payload) {
-                    self.send(stream, topic, response).await?;
+                    // The headset sends the handshake twice and Horizon
+                    // answers once. After a second answer the headset takes
+                    // nothing more from the PC on that channel: no rectify
+                    // mesh, no game audio.
+                    if !std::mem::replace(&mut channel_handshake_acked[topic as usize], true) {
+                        self.send(stream, topic, response).await?;
+                    }
+                } else if topic == AUDIO_TOPIC {
+                    if let Some(samples) = crate::audio::unpack_microphone_packet(&payload) {
+                        (self.audio.on_microphone)(samples);
+                    }
                 } else if topic == 11 {
                     if let Some(mut sample) = crate::tracking::unpack_tracking(&payload) {
                         if !tracking_received {
