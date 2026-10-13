@@ -15,6 +15,25 @@ pub fn set_stream_size(width: u32, height: u32) {
     STREAM_HEIGHT.store(height, Ordering::Relaxed);
 }
 
+/// A Quest 2 set to 72 Hz refreshes every 13.9223 ms, 71.827 times a second:
+/// the step of the display times in Meta Horizon Link's video frames, the
+/// same in two captures of 2026-10-12. Assumed to scale to the other rates.
+pub const REFRESH_RATE_FACTOR: f64 = 71.8272 / 72.0;
+
+static FRAME_PERIOD_NS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(13_922_300);
+
+/// Sets the headset's real frame period from its nominal refresh rate.
+pub fn set_refresh_rate(nominal_hz: f32) {
+    let period_ns = 1e9 / (f64::from(nominal_hz.max(1.0)) * REFRESH_RATE_FACTOR);
+    FRAME_PERIOD_NS.store(period_ns as u64, Ordering::Relaxed);
+}
+
+/// The headset's real frame period, in seconds.
+pub fn frame_period_s() -> f64 {
+    FRAME_PERIOD_NS.load(Ordering::Relaxed) as f64 / 1e9
+}
+
 pub fn stream_size() -> (u32, u32) {
     (STREAM_WIDTH.load(Ordering::Relaxed), STREAM_HEIGHT.load(Ordering::Relaxed))
 }
@@ -115,11 +134,27 @@ pub fn without_delimiters_and_sei(data: &[u8]) -> Vec<u8> {
 
 impl AirLinkVideoFrame {
     /// Build the observed Quest v209 packet header and 205-byte frame metadata.
-    pub fn pack(&self, frame_id: u32, host_now_ns: u64, headset_offset_ns: i64) -> Vec<u8> {
+    ///
+    /// `display_base_s` is this frame's place on the headset's refresh grid:
+    /// Horizon's display times advance by exactly one frame period per
+    /// frame, while its send times jitter by milliseconds.
+    pub fn pack(
+        &self,
+        frame_id: u32,
+        host_now_ns: u64,
+        headset_offset_ns: i64,
+        display_base_s: f64,
+    ) -> Vec<u8> {
         let headset_now_s = (host_now_ns as i128 + i128::from(headset_offset_ns)) as f64
             / 1_000_000_000.0;
-        let timestamp_us = ((host_now_ns as i128 / 1_000)
-            + 2 * i128::from(headset_offset_ns) / 1_000
+        // Horizon's header timestamps are as regular as its display times:
+        // 13922.5 us a frame with a few microseconds of spread. Taken from
+        // the frame's slot on the grid and not from the send time, which
+        // jitters by milliseconds. (Headset clock plus the clock offset plus
+        // a lead, see MetaHorizonLinux `analysis/windows-session-capture.md`
+        // section 6.)
+        let timestamp_us = ((display_base_s * 1e6) as i128
+            + i128::from(headset_offset_ns) / 1_000
             + 43_000)
             .max(0) as u64;
 
@@ -128,15 +163,14 @@ impl AirLinkVideoFrame {
         } else {
             FRAME_METADATA
         };
-        for (offset, lead) in [
-            (84, 0.054),
-            (148, -0.004),
-            (156, 0.040),
-            (164, 0.033),
-            (172, 0.011),
+        for (offset, base, lead) in [
+            (84, display_base_s, 0.054),
+            (148, headset_now_s, -0.004),
+            (156, display_base_s, 0.040),
+            (164, display_base_s, 0.033),
+            (172, headset_now_s, 0.011),
         ] {
-            metadata[offset..offset + 8]
-                .copy_from_slice(&(headset_now_s + lead).to_le_bytes());
+            metadata[offset..offset + 8].copy_from_slice(&(base + lead).to_le_bytes());
         }
         metadata[52..80].copy_from_slice(bytemuck_f32x7(self.head_pose).as_slice());
         metadata[124..128].copy_from_slice(&frame_id.to_le_bytes());
@@ -186,4 +220,34 @@ fn bytemuck_f32x7(values: [f32; 7]) -> [u8; 28] {
         bytes[index * 4..index * 4 + 4].copy_from_slice(&value.to_le_bytes());
     }
     bytes
+}
+
+/// The numbers of the report the headset sends back for every video frame:
+/// a header like the frame's own (flags, timestamp, frame id, body length)
+/// and a body of a u32 and a few varints. Returned are the frame id and the
+/// body's varints. **Not decoded**: in a Horizon capture they look like
+/// times in microseconds (71, 5756, 33, 33, 5788, 7326 for one frame).
+pub fn unpack_frame_report(packet: &[u8]) -> Option<(u64, Vec<u64>)> {
+    fn varints(mut data: &[u8]) -> Vec<u64> {
+        let mut values = Vec::new();
+        while !data.is_empty() {
+            let mut value = 0u64;
+            let mut used = 0;
+            for (index, byte) in data.iter().enumerate().take(10) {
+                value |= u64::from(byte & 0x7f) << (7 * index);
+                used = index + 1;
+                if byte & 0x80 == 0 {
+                    break;
+                }
+            }
+            values.push(value);
+            data = &data[used..];
+        }
+        values
+    }
+
+    let header_length = usize::from(*packet.first()?);
+    let header = varints(packet.get(1..1 + header_length)?);
+    let body = packet.get(1 + header_length..)?;
+    Some((*header.get(2)?, varints(body.get(4..)?)))
 }

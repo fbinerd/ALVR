@@ -48,7 +48,7 @@ static const bool RewarpEnabled = ReadRewarpEnabled();
 
 // The negotiated refresh rate expressed as a frame period.
 static std::chrono::nanoseconds frameInterval() {
-    return std::chrono::nanoseconds((int64_t)(1e9 / Settings_Instance()->m_refreshRate));
+    return std::chrono::nanoseconds((int64_t)(1e9 / Settings_Instance()->m_displayRefreshRate));
 }
 
 // Loose on purpose: it rejects zeroed and uninitialized poses, which miss by

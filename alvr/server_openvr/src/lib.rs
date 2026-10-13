@@ -127,7 +127,7 @@ fn make_settings(negotiated: Option<&ServerNegotiatedStreamingConfig>) -> Settin
         };
 
     // Resolution and refresh rate come from negotiation; fall back to persisted steamvr_hmd_init_config.
-    let (render_width, render_height, target_width, target_height, refresh_rate) =
+    let (render_width, render_height, target_width, target_height, refresh_rate, display_refresh_rate) =
         if let Some(n) = negotiated {
             (
                 n.transcoding_view_resolution.x * 2,
@@ -135,6 +135,7 @@ fn make_settings(negotiated: Option<&ServerNegotiatedStreamingConfig>) -> Settin
                 n.emulated_headset_view_resolution.x * 2,
                 n.emulated_headset_view_resolution.y,
                 n.refresh_rate as i32,
+                n.display_refresh_rate,
             )
         } else {
             let openvr = alvr_server_core::steamvr_hmd_init_config();
@@ -144,6 +145,7 @@ fn make_settings(negotiated: Option<&ServerNegotiatedStreamingConfig>) -> Settin
                 openvr.target_eye_resolution_width * 2,
                 openvr.target_eye_resolution_height,
                 openvr.refresh_rate as i32,
+                openvr.refresh_rate as f32,
             )
         };
 
@@ -163,6 +165,7 @@ fn make_settings(negotiated: Option<&ServerNegotiatedStreamingConfig>) -> Settin
 
     Settings {
         m_refreshRate: refresh_rate,
+        m_displayRefreshRate: display_refresh_rate,
         m_renderWidth: render_width,
         m_renderHeight: render_height,
         m_recommendedTargetWidth: target_width as i32,
