@@ -383,6 +383,7 @@ impl ServerCoreContext {
                 .send(ServerCoreEvent::LocalViewParams(airlink_view_params()))
                 .ok();
             started_sender.send(ServerCoreEvent::ProximityState(true)).ok();
+            AIRLINK_STREAMING.store(true, Ordering::Relaxed);
             alvr_events::send_event(EventType::AirLinkStreaming(true));
         });
         let keyframe_sender = self.connection_context.events_sender.clone();
@@ -402,6 +403,7 @@ impl ServerCoreContext {
         let on_streaming_stopped = Arc::new(move || {
             stopped_sender.send(ServerCoreEvent::ProximityState(false)).ok();
             stopped_sender.send(ServerCoreEvent::ClientDisconnected).ok();
+            AIRLINK_STREAMING.store(false, Ordering::Relaxed);
             alvr_events::send_event(EventType::AirLinkStreaming(false));
         });
         let tracking_context = Arc::clone(&self.connection_context);
@@ -1078,11 +1080,13 @@ impl Drop for ServerCoreContext {
 // "Headset speaker" and "Headset microphone" of the settings, for Air Link.
 static AIRLINK_GAME_AUDIO: AtomicBool = AtomicBool::new(true);
 static AIRLINK_MICROPHONE: AtomicBool = AtomicBool::new(true);
+static AIRLINK_STREAMING: AtomicBool = AtomicBool::new(false);
 
-/// Game audio and microphone for a Meta Air Link headset, through the
-/// AirLink devices the dashboard creates: what plays on "AirLink Speakers"
-/// is sent to the headset, the headset's microphone feeds "AirLink
-/// Microphone". The audio thread ends with the host.
+/// Game audio and microphone for a Meta Air Link headset, through the same
+/// "ALVR Audio" and "ALVR Microphone" devices ALVR's client gets: what plays
+/// on the first is sent to the headset, the headset's microphone feeds the
+/// second. As with the client, the devices exist while the headset streams.
+/// The audio thread ends with the host.
 #[cfg(target_os = "linux")]
 fn airlink_audio() -> alvr_airlink::audio::AirLinkAudio {
     use alvr_airlink::audio::{SAMPLE_RATE, SPEAKER_CHUNK_BYTES};
@@ -1117,28 +1121,36 @@ fn airlink_audio() -> alvr_airlink::audio::AirLinkAudio {
     thread::spawn({
         let is_running_sender = speaker_sender.clone();
         move || {
-            let mut pending = Vec::<u8>::new();
-            // Silence is sent for a second after the last sound, then nothing.
-            let mut silent_chunks = 0u32;
-            alvr_audio::linux::airlink_audio_loop(
-                move || !is_running_sender.is_closed(),
-                move |samples| {
-                    pending.extend_from_slice(samples);
-                    while pending.len() >= SPEAKER_CHUNK_BYTES {
-                        let rest = pending.split_off(SPEAKER_CHUNK_BYTES);
-                        let chunk = std::mem::replace(&mut pending, rest);
-                        if chunk.iter().all(|byte| *byte == 0) {
-                            silent_chunks = silent_chunks.saturating_add(1);
-                        } else {
-                            silent_chunks = 0;
+            while !is_running_sender.is_closed() {
+                if !AIRLINK_STREAMING.load(Ordering::Relaxed) {
+                    thread::sleep(Duration::from_millis(200));
+                    continue;
+                }
+                let speaker_sender = speaker_sender.clone();
+                let mut pending = Vec::<u8>::new();
+                // Silence is sent for a second after the last sound, then
+                // nothing.
+                let mut silent_chunks = 0u32;
+                alvr_audio::linux::airlink_audio_loop(
+                    || !is_running_sender.is_closed() && AIRLINK_STREAMING.load(Ordering::Relaxed),
+                    move |samples| {
+                        pending.extend_from_slice(samples);
+                        while pending.len() >= SPEAKER_CHUNK_BYTES {
+                            let rest = pending.split_off(SPEAKER_CHUNK_BYTES);
+                            let chunk = std::mem::replace(&mut pending, rest);
+                            if chunk.iter().all(|byte| *byte == 0) {
+                                silent_chunks = silent_chunks.saturating_add(1);
+                            } else {
+                                silent_chunks = 0;
+                            }
+                            if silent_chunks <= 100 && AIRLINK_GAME_AUDIO.load(Ordering::Relaxed) {
+                                speaker_sender.try_send(chunk).ok();
+                            }
                         }
-                        if silent_chunks <= 100 && AIRLINK_GAME_AUDIO.load(Ordering::Relaxed) {
-                            speaker_sender.try_send(chunk).ok();
-                        }
-                    }
-                },
-                microphone_queue,
-            );
+                    },
+                    Arc::clone(&microphone_queue),
+                );
+            }
         }
     });
 

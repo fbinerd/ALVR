@@ -77,8 +77,7 @@ pub struct Dashboard {
     setup_wizard_open: bool,
     session: Option<SessionConfig>,
     airlink_streaming: bool,
-    #[cfg(target_os = "linux")]
-    streaming_audio_headset: Option<alvr_audio::linux::StreamingHeadset>,
+    streaming_audio_active: bool,
     streaming_audio_applied: bool,
     streaming_audio_tried_at: Option<std::time::Instant>,
     // Address of the headset asking to pair and when the server last said so.
@@ -92,7 +91,7 @@ impl Dashboard {
     /// choice changed meanwhile does not leave an earlier one behind. False
     /// while a device is not there yet.
     #[cfg(target_os = "linux")]
-    fn select_streaming_audio_devices(&self, headset: alvr_audio::linux::StreamingHeadset) -> bool {
+    fn select_streaming_audio_devices(&self) -> bool {
         let Some(session) = &self.session else {
             return false;
         };
@@ -100,46 +99,38 @@ impl Dashboard {
         let speakers = audio.game_audio.as_option().map(|config| &config.streaming_device);
         let microphone = audio.microphone.as_option().map(|config| &config.streaming_device);
         alvr_audio::linux::streaming_restore_default_devices();
-        alvr_audio::linux::streaming_select_default_devices(headset, speakers, microphone).is_ok()
+        alvr_audio::linux::streaming_select_default_devices(speakers, microphone).is_ok()
     }
 
-    /// Follows which headset streams and keeps the system's default audio
-    /// devices on the user's choice meanwhile. Called once per frame: the
-    /// devices of ALVR's own client appear a moment after streaming starts.
+    /// Follows whether a headset streams, by Air Link or with ALVR's
+    /// client, and keeps the system's default audio devices on the user's
+    /// choice meanwhile. Called once per frame: ALVR's devices appear a
+    /// moment after streaming starts.
     #[cfg(target_os = "linux")]
     fn update_streaming_audio(&mut self) {
-        use alvr_audio::linux::StreamingHeadset;
+        let streaming = self.airlink_streaming
+            || self.session.as_ref().is_some_and(|session| {
+                session.client_connections.values().any(|client| {
+                    client.connection_state == alvr_common::ConnectionState::Streaming
+                })
+            });
 
-        let alvr_client_streaming = self.session.as_ref().is_some_and(|session| {
-            session
-                .client_connections
-                .values()
-                .any(|client| client.connection_state == alvr_common::ConnectionState::Streaming)
-        });
-        let headset = if self.airlink_streaming {
-            Some(StreamingHeadset::AirLink)
-        } else if alvr_client_streaming {
-            Some(StreamingHeadset::AlvrClient)
-        } else {
-            None
-        };
-
-        if headset != self.streaming_audio_headset {
-            self.streaming_audio_headset = headset;
+        if streaming != self.streaming_audio_active {
+            self.streaming_audio_active = streaming;
             self.streaming_audio_applied = false;
             self.streaming_audio_tried_at = None;
-            if headset.is_none() {
+            if !streaming {
                 alvr_audio::linux::streaming_restore_default_devices();
             }
         }
-        if let Some(headset) = headset
+        if streaming
             && !self.streaming_audio_applied
             && self
                 .streaming_audio_tried_at
                 .is_none_or(|at| at.elapsed() > std::time::Duration::from_secs(1))
         {
             self.streaming_audio_tried_at = Some(std::time::Instant::now());
-            self.streaming_audio_applied = self.select_streaming_audio_devices(headset);
+            self.streaming_audio_applied = self.select_streaming_audio_devices();
         }
     }
 
@@ -177,8 +168,7 @@ impl Dashboard {
             setup_wizard_open: false,
             session: None,
             airlink_streaming: false,
-            #[cfg(target_os = "linux")]
-            streaming_audio_headset: None,
+            streaming_audio_active: false,
             streaming_audio_applied: false,
             streaming_audio_tried_at: None,
             airlink_pairing: None,

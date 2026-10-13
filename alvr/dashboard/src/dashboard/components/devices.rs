@@ -228,8 +228,7 @@ impl DevicesTab {
     }
 }
 
-/// The Meta Air Link host: its switch, which also makes and removes the
-/// AirLink audio devices, and the headset connected to it.
+/// The Meta Air Link host: its switch and the headset connected to it.
 fn airlink_section(
     ui: &mut Ui,
     enabled: Option<bool>,
@@ -262,7 +261,6 @@ fn airlink_section(
                                         value: serde_json::Value::Bool(enabled),
                                     },
                                 ]));
-                                requests.push(ServerRequest::SetAirLinkDevices(enabled));
                             }
                         } else {
                             ui.spinner();
