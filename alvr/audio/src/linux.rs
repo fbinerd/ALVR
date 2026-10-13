@@ -19,7 +19,7 @@ use std::{
 const AIRLINK_SPEAKERS_SINK: &str = "mhl_airlink_speakers";
 const AIRLINK_MICROPHONE_SINK: &str = "mhl_airlink_microphone_bus";
 const AIRLINK_MICROPHONE_SOURCE: &str = "mhl_airlink_microphone";
-// Node names of the streams ALVR makes for its own client (see below).
+// Node names of the streams ALVR makes while a headset streams (see below).
 const ALVR_CLIENT_SINK: &str = "ALVR Audio";
 const ALVR_CLIENT_SOURCE: &str = "ALVR Microphone";
 
@@ -155,33 +155,18 @@ fn select_default_device(
     Ok(())
 }
 
-/// Which kind of headset streams: each has its own audio devices.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum StreamingHeadset {
-    /// Meta Air Link: the AirLink devices the dashboard makes.
-    AirLink,
-    /// ALVR's client: the "ALVR Audio" and "ALVR Microphone" nodes the server
-    /// makes while it streams.
-    AlvrClient,
-}
-
 /// Makes the chosen devices the system's default output and input for the
 /// time a headset streams. `None` leaves that side alone (its switch is off).
-/// Fails while a device is not there yet, as ALVR's nodes are for a moment
+/// Fails while ALVR's devices are not there yet, as they are for a moment
 /// after streaming starts: call again.
 pub fn streaming_select_default_devices(
-    headset: StreamingHeadset,
     speakers: Option<&StreamingAudioDevice>,
     microphone: Option<&StreamingAudioDevice>,
 ) -> Result<()> {
-    let headset_device = |kind: &str, airlink: &str, alvr: &str| match headset {
-        StreamingHeadset::AirLink => Ok(airlink.to_owned()),
-        StreamingHeadset::AlvrClient => find_named_device(kind, alvr),
-    };
     let mut previous = AIRLINK_PREVIOUS_DEFAULTS.lock();
     let mut result = Ok(());
     if let Some(speakers) = speakers {
-        result = headset_device("sinks", AIRLINK_SPEAKERS_SINK, ALVR_CLIENT_SINK).and_then(|device| {
+        result = find_named_device("sinks", ALVR_CLIENT_SINK).and_then(|device| {
             select_default_device(
                 speakers,
                 "sinks",
@@ -194,18 +179,16 @@ pub fn streaming_select_default_devices(
     }
     if let Some(microphone) = microphone {
         let microphone_result =
-            headset_device("sources", AIRLINK_MICROPHONE_SOURCE, ALVR_CLIENT_SOURCE).and_then(
-                |device| {
-                    select_default_device(
-                        microphone,
-                        "sources",
-                        &device,
-                        "get-default-source",
-                        "set-default-source",
-                        &mut previous.1,
-                    )
-                },
-            );
+            find_named_device("sources", ALVR_CLIENT_SOURCE).and_then(|device| {
+                select_default_device(
+                    microphone,
+                    "sources",
+                    &device,
+                    "get-default-source",
+                    "set-default-source",
+                    &mut previous.1,
+                )
+            });
         result = result.and(microphone_result);
     }
     result
@@ -486,9 +469,13 @@ fn pw_main_loop(
 
     let _speaker = if let Some(info) = speaker_info {
         debug!("Creating pw output audio stream");
+        let mut audio_sender = audio_sender;
         Some(create_speaker_stream(
             &pw_core,
-            audio_sender,
+            move |samples| {
+                audio_sender.send_header_with_payload(&(), samples).ok();
+            },
+            AudioFormat::S16LE,
             info.sample_rate,
             info.channel_count,
         )?)
@@ -528,9 +515,12 @@ fn audio_info_to_vec(audio_info: AudioInfoRaw) -> Vec<u8> {
     .into_inner()
 }
 
+/// The "ALVR Audio" output that applications play on. What they play is
+/// handed to `on_samples` in the format asked for.
 fn create_speaker_stream(
     pw_core: &CoreRc,
-    mut sender: StreamSender<()>,
+    mut on_samples: impl FnMut(&[u8]) + 'static,
+    format: AudioFormat,
     sample_rate: u32,
     channel_count: u32,
 ) -> Result<(StreamRc, StreamListener<i16>), pipewire::Error> {
@@ -555,17 +545,19 @@ fn create_speaker_stream(
             {
                 let size = pw_buf.chunk_mut().size() as usize;
 
-                if let Some(data) = pw_buf.data() {
-                    // Data is given as s16le in the correct layout by pipewire already,
-                    // no need to do conversions
-                    sender.send_header_with_payload(&(), &data[0..size]).ok();
+                if let Some(data) = pw_buf.data()
+                    && let Some(samples) = data.get(..size)
+                {
+                    // Data is given in the asked format and layout by pipewire
+                    // already, no need to do conversions
+                    on_samples(samples);
                 }
             }
         })
         .register()?;
 
     let mut audio_info = AudioInfoRaw::new();
-    audio_info.set_format(AudioFormat::S16LE);
+    audio_info.set_format(format);
     audio_info.set_rate(sample_rate);
     audio_info.set_channels(channel_count);
 
@@ -669,11 +661,11 @@ fn fill_pw_buf(
     }
 }
 
-/// Carries sound for a Meta Air Link headset through the AirLink devices
-/// until `is_running` says no: what applications play on the AirLink
-/// speakers goes to `on_speaker_samples` (f32 little endian, stereo, 48 kHz),
-/// and `microphone_queue` (mono, 48 kHz) is played into the device behind
-/// the AirLink microphone.
+/// Carries sound for a Meta Air Link headset, through the same "ALVR Audio"
+/// and "ALVR Microphone" devices ALVR's own client gets, until `is_running`
+/// says no: what applications play goes to `on_speaker_samples` (f32 little
+/// endian, stereo, 48 kHz), and `microphone_queue` (mono, 48 kHz) feeds the
+/// microphone.
 pub fn airlink_audio_loop(
     is_running: impl Fn() -> bool,
     on_speaker_samples: impl FnMut(&[u8]) + Send + 'static,
@@ -683,12 +675,12 @@ pub fn airlink_audio_loop(
 
     let pw_thread = thread::spawn(move || {
         if let Err(e) = airlink_pw_main_loop(pw_receiver, on_speaker_samples, microphone_queue) {
-            error!("AirLink audio stopped on a PipeWire error: {e}");
+            error!("Air Link audio stopped on a PipeWire error: {e}");
         }
     });
 
     while is_running() && !pw_thread.is_finished() {
-        sleep(Duration::from_millis(500));
+        sleep(Duration::from_millis(200));
     }
 
     pw_sender.send(Terminate).ok();
@@ -697,7 +689,7 @@ pub fn airlink_audio_loop(
 
 fn airlink_pw_main_loop(
     pw_receiver: Receiver<Terminate>,
-    mut on_speaker_samples: impl FnMut(&[u8]) + 'static,
+    on_speaker_samples: impl FnMut(&[u8]) + 'static,
     microphone_queue: Arc<Mutex<VecDeque<f32>>>,
 ) -> Result<(), pipewire::Error> {
     const SAMPLE_RATE: u32 = 48_000;
@@ -710,75 +702,14 @@ fn airlink_pw_main_loop(
     let context = ContextRc::new(&mainloop, None)?;
     let pw_core = context.connect_rc(None)?;
 
-    // Both streams name their device and refuse any other: without the
-    // AirLink devices they stay unlinked instead of taking the default ones.
-    let speakers = StreamRc::new(
-        pw_core.clone(),
-        "alvr-airlink-speakers",
-        properties::properties! {
-            *keys::NODE_NAME => "ALVR AirLink Speakers Capture",
-            *keys::MEDIA_TYPE => "Audio",
-            *keys::MEDIA_CATEGORY => "Capture",
-            *keys::MEDIA_ROLE => "Game",
-            "target.object" => AIRLINK_SPEAKERS_SINK,
-            "stream.capture.sink" => "true",
-            "node.dont-fallback" => "true",
-        },
+    let _speaker = create_speaker_stream(
+        &pw_core,
+        on_speaker_samples,
+        AudioFormat::F32LE,
+        SAMPLE_RATE,
+        2,
     )?;
-    let _speakers_listener: StreamListener<()> = speakers
-        .add_local_listener()
-        .process(move |stream, _| {
-            if let Some(mut pw_buf) = stream.dequeue_buffer()
-                && let Some(pw_data) = pw_buf.datas_mut().first_mut()
-            {
-                let size = pw_data.chunk_mut().size() as usize;
-                if let Some(data) = pw_data.data()
-                    && let Some(samples) = data.get(..size)
-                {
-                    on_speaker_samples(samples);
-                }
-            }
-        })
-        .register()?;
-    let mut speakers_info = AudioInfoRaw::new();
-    speakers_info.set_format(AudioFormat::F32LE);
-    speakers_info.set_rate(SAMPLE_RATE);
-    speakers_info.set_channels(2);
-    speakers.connect(
-        Direction::Input,
-        None,
-        StreamFlags::AUTOCONNECT | StreamFlags::MAP_BUFFERS,
-        &mut [Pod::from_bytes(&audio_info_to_vec(speakers_info)).unwrap()],
-    )?;
-
-    let microphone = StreamRc::new(
-        pw_core.clone(),
-        "alvr-airlink-microphone",
-        properties::properties! {
-            *keys::NODE_NAME => "ALVR AirLink Microphone Playback",
-            *keys::MEDIA_TYPE => "Audio",
-            *keys::MEDIA_CATEGORY => "Playback",
-            *keys::MEDIA_ROLE => "Communication",
-            "target.object" => AIRLINK_MICROPHONE_SINK,
-            "node.dont-fallback" => "true",
-        },
-    )?;
-    let _microphone_listener: StreamListener<()> = microphone
-        .add_local_listener()
-        .process(move |stream, _| {
-            fill_pw_buf(microphone_queue.clone(), std::mem::size_of::<f32>(), 1, stream);
-        })
-        .register()?;
-    let mut microphone_info = AudioInfoRaw::new();
-    microphone_info.set_format(AudioFormat::F32LE);
-    microphone_info.set_rate(SAMPLE_RATE);
-    microphone_info.set_channels(1);
-    microphone.connect(
-        Direction::Output,
-        None,
-        StreamFlags::AUTOCONNECT | StreamFlags::MAP_BUFFERS,
-        &mut [Pod::from_bytes(&audio_info_to_vec(microphone_info)).unwrap()],
-    )?;
+    let _microphone = create_mic_stream(&pw_core, microphone_queue, SAMPLE_RATE, 1)?;
 
     mainloop.run();
 
