@@ -119,6 +119,8 @@ fn main() {
     )
     ;
 
+    #[cfg(target_os = "linux")]
+    alvr_audio::linux::airlink_restore_default_devices();
     alvr_audio::set_airlink_devices_enabled(false).ok();
 
     result.unwrap();
