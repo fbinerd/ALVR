@@ -268,6 +268,14 @@ pub fn pack_awaiting_user_ack() -> [u8; 8] {
     payload
 }
 
+/// The user refused the pairing on the PC.
+pub fn pack_awaiting_user_nack() -> [u8; 8] {
+    let mut payload = [0; 8];
+    payload[..4].copy_from_slice(&1u32.to_le_bytes());
+    payload[4..].copy_from_slice(&MSG_AWAITING_USER_NACK.to_le_bytes());
+    payload
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TopicCreateRequest {
     pub token: [u8; 16],

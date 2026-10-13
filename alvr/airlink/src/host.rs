@@ -33,6 +33,21 @@ static ENABLED: std::sync::LazyLock<tokio::sync::watch::Sender<bool>> =
     std::sync::LazyLock::new(|| tokio::sync::watch::channel(true).0);
 static STATUS: std::sync::Mutex<Option<AirLinkHeadsetStatus>> = std::sync::Mutex::new(None);
 
+static PAIRING_REQUEST: std::sync::Mutex<Option<SocketAddr>> = std::sync::Mutex::new(None);
+// Counter of answers and the last one: accepted or not.
+static PAIRING_ANSWER: std::sync::LazyLock<tokio::sync::watch::Sender<(u64, bool)>> =
+    std::sync::LazyLock::new(|| tokio::sync::watch::channel((0, false)).0);
+
+/// The headset that waits for the user to accept its pairing on the PC.
+pub fn pairing_request() -> Option<SocketAddr> {
+    *PAIRING_REQUEST.lock().unwrap()
+}
+
+/// The user's answer to `pairing_request`.
+pub fn answer_pairing(accept: bool) {
+    PAIRING_ANSWER.send_modify(|answer| *answer = (answer.0 + 1, accept));
+}
+
 /// The headset connected to the host.
 #[derive(Clone, Copy, PartialEq)]
 pub struct AirLinkHeadsetStatus {
@@ -214,6 +229,7 @@ impl AirLinkHost {
                 result = self.serve_connection(&mut stream) => result,
             };
             *STATUS.lock().unwrap() = None;
+            *PAIRING_REQUEST.lock().unwrap() = None;
             if let Err(error) = result {
                 log::warn!("Meta Air Link connection from {peer} ended: {error}");
             }
@@ -260,9 +276,29 @@ impl AirLinkHost {
         while self.audio.speaker_receiver.try_recv().is_ok() {}
         let mut speaker_open = true;
         let mut speaker_packets = 0u64;
+        // Pairing waits for the user's answer in the dashboard.
+        let mut pairing_answer = PAIRING_ANSWER.subscribe();
+        let mut pairing_pending = false;
         let mut channel_handshake_acked = [false; 15];
         loop {
             let (topic, payload) = tokio::select! {
+                changed = pairing_answer.changed(), if pairing_pending => {
+                    if changed.is_err() {
+                        continue;
+                    }
+                    let accepted = pairing_answer.borrow_and_update().1;
+                    pairing_pending = false;
+                    *PAIRING_REQUEST.lock().unwrap() = None;
+                    if accepted {
+                        log::info!("Air Link pairing accepted by the user");
+                        self.send(stream, PAIRING_TOPIC, &disco::pack_awaiting_user_ack())
+                            .await?;
+                        continue;
+                    }
+                    self.send(stream, PAIRING_TOPIC, &disco::pack_awaiting_user_nack())
+                        .await?;
+                    return Err("the user refused the pairing".into());
+                }
                 chunk = self.audio.speaker_receiver.recv(), if speaker_open => {
                     match chunk {
                         // The headset plays what it gets from the first video
@@ -457,7 +493,15 @@ impl AirLinkHost {
                         self.send(stream, topic, &response).await?;
                     }
                     MSG_AWAITING_USER_REQ => {
-                        self.send(stream, topic, &disco::pack_awaiting_user_ack()).await?;
+                        // Answered when the user accepts or refuses in the
+                        // dashboard, not before.
+                        if !pairing_pending {
+                            pairing_pending = true;
+                            pairing_answer.borrow_and_update();
+                            let peer = STATUS.lock().unwrap().map(|status| status.address);
+                            *PAIRING_REQUEST.lock().unwrap() = peer;
+                            log::info!("Air Link pairing asked by {peer:?}: waiting for the user");
+                        }
                     }
                     MSG_COMMITMENT => {
                         log::debug!("Air Link pairing commitment received");
