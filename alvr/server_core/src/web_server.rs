@@ -94,6 +94,10 @@ pub async fn web_server(connection_context: Arc<ConnectionContext>) -> Result<()
                     "/airlink-devices",
                     routing::get(get_airlink_devices).post(set_airlink_devices),
                 )
+                .route(
+                    "/airlink-pairing",
+                    routing::post(answer_airlink_pairing),
+                )
                 .route("/insert-idr", routing::post(insert_idr))
                 .nest(
                     "/recording",
@@ -299,6 +303,11 @@ async fn get_airlink_devices() -> Result<Json<bool>, (StatusCode, String)> {
     alvr_audio::airlink_devices_enabled()
         .map(Json)
         .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))
+}
+
+/// The user accepted or refused the pairing a headset waits for.
+async fn answer_airlink_pairing(Json(accept): Json<bool>) {
+    alvr_airlink::host::answer_pairing(accept);
 }
 
 async fn set_airlink_devices(

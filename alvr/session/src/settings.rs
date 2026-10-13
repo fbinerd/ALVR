@@ -1440,6 +1440,12 @@ TCP: Slower than UDP, but more stable. Pick this if you experience video or audi
     pub airlink_host: bool,
 
     #[schema(strings(
+        display_name = "Meta Air Link host name",
+        help = "The name the headset lists this computer under for Air Link. Empty: the computer's own name. Applies when SteamVR starts again."
+    ))]
+    pub airlink_host_name: String,
+
+    #[schema(strings(
         help = r#"Wether ALVR should try to automatically launch the client when establishing a wired connection."#
     ))]
     pub wired_client_autolaunch: Switch<WiredClientAutoLaunchConfig>,
@@ -2228,6 +2234,7 @@ pub fn session_settings_default() -> SettingsDefault {
                 },
             },
             airlink_host: true,
+            airlink_host_name: "".into(),
             wired_client_autolaunch: SwitchDefault {
                 enabled: true,
                 content: WiredClientAutoLaunchConfigDefault { boot_delay: 0 },

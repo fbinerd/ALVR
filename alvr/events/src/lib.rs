@@ -96,6 +96,11 @@ pub enum EventType {
         address: Option<String>,
         streaming: bool,
     },
+    /// A headset waits for its Meta Air Link pairing to be accepted here,
+    /// repeated while it waits.
+    AirLinkPairing {
+        address: Option<String>,
+    },
     ServerRequestsSelfRestart,
     Adb(AdbEvent),
     NewVersionFound { version: String, message: String },
@@ -127,6 +132,7 @@ impl Event {
             EventType::AirLinkDevices(_) => "AIRLINK DEVICES".to_string(),
             EventType::AirLinkStreaming(_) => "AIRLINK STREAMING".to_string(),
             EventType::AirLinkHeadset { .. } => "AIRLINK HEADSET".to_string(),
+            EventType::AirLinkPairing { .. } => "AIRLINK PAIRING".to_string(),
             EventType::ServerRequestsSelfRestart => "RESTART".to_string(),
             EventType::Adb(_) => "ADB".to_string(),
             EventType::NewVersionFound { .. } => "NEW VER".to_string(),
@@ -148,6 +154,7 @@ impl Event {
             EventType::AirLinkHeadset { address, streaming } => {
                 format!("{} streaming: {streaming}", address.as_deref().unwrap_or("none"))
             }
+            EventType::AirLinkPairing { address } => address.clone().unwrap_or_else(|| "none".into()),
             EventType::ServerRequestsSelfRestart => "Request for server restart".into(),
             EventType::Adb(adb) => serde_json::to_string(adb).unwrap(),
             EventType::NewVersionFound { version, .. } => version.clone(),

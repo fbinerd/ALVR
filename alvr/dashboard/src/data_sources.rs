@@ -292,6 +292,8 @@ impl DataSources {
                                         Err(error) => error!("Failed to read AirLink devices: {error}"),
                                     }
                                 }
+                                // Pairing is the running server's business.
+                                ServerRequest::AnswerAirLinkPairing(_) => {}
                                 ServerRequest::SetAirLinkDevices(enabled) => {
                                     match alvr_audio::set_airlink_devices_enabled(enabled) {
                                         Ok(enabled) => report_event_local(
@@ -378,6 +380,9 @@ impl DataSources {
                                             );
                                         }
                                     }
+                                }
+                                ServerRequest::AnswerAirLinkPairing(accept) => {
+                                    post_body(&rq, &base_uri, "airlink-pairing", Some(accept))
                                 }
                                 ServerRequest::SetAirLinkDevices(enabled) => {
                                     if let Ok(response) = rq
