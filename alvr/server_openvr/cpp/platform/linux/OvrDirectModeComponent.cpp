@@ -44,8 +44,7 @@ constexpr int64_t GpuWaitPollCapFrames = 2;
 // budget.
 // An application's frame may take longer than that to finish on a loaded GPU;
 // read early, its texture still shows the frame it held before. For trials,
-// ~/.config/alvr/encoder_guard_sleep_ms overrides the 4 ms (0 to 30), read
-// once.
+// ~/.config/alvr/encoder_guard_sleep_ms overrides the default (0 to 30).
 static int ReadTrialValue(const char* name, int fallback, int max) {
     int value = fallback;
     if (const char* home = getenv("HOME")) {
@@ -60,11 +59,37 @@ static int ReadTrialValue(const char* name, int fallback, int max) {
     }
     return value;
 }
-static const int GuardSleepMs = ReadTrialValue("encoder_guard_sleep_ms", 4, 30);
-// For trials too: 0 in ~/.config/alvr/encoder_rewarp sends each frame as it
-// was rendered, stamped with the pose it was rendered for, and leaves all
-// reprojection to the headset.
-static const bool RewarpEnabled = ReadTrialValue("encoder_rewarp", 1, 1) != 0;
+// Trial values are read again twice a second, so they can be changed while a
+// stream runs. Both are only used on the encode worker's thread.
+static int LiveTrialValue(const char* name, int fallback, int max, int& cached, int64_t& readAtMs) {
+    auto const nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                           std::chrono::steady_clock::now().time_since_epoch()
+    )
+                           .count();
+    if (readAtMs == 0 || nowMs - readAtMs > 500) {
+        cached = ReadTrialValue(name, fallback, max);
+        readAtMs = nowMs;
+    }
+    return cached;
+}
+// 10 ms by measurement. A game draws into a ring of three textures, and one
+// read too early still holds the frame of three presents ago. In VRChat with
+// its menu open, of the frames in which the picture moved, that was 16.4 %
+// with a 4 ms guard, 0.4 % with 7 ms and none in 1262 with 10 ms
+// (MetaHorizonLinux scripts/stale_frames.py on the stream's dump).
+static int GuardSleepMsNow() {
+    static int cached = 10;
+    static int64_t readAtMs = 0;
+    return LiveTrialValue("encoder_guard_sleep_ms", 10, 30, cached, readAtMs);
+}
+// 0 in ~/.config/alvr/encoder_rewarp sends each frame as it was rendered,
+// stamped with the pose it was rendered for, and leaves all reprojection to
+// the headset.
+static bool RewarpEnabledNow() {
+    static int cached = 1;
+    static int64_t readAtMs = 0;
+    return LiveTrialValue("encoder_rewarp", 1, 1, cached, readAtMs) != 0;
+}
 
 // The negotiated refresh rate expressed as a frame period.
 static std::chrono::nanoseconds frameInterval() {
@@ -280,8 +305,13 @@ void OvrDirectModeComponent::EncodeWorkerLoop() {
             }
         }
 
-        if (GuardSleepMs > 0) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(GuardSleepMs));
+        // Counted from the moment the frame was handed over, not from when
+        // the worker got to it: time the worker spent encoding the previous
+        // frame is time the writer had as well. A sleep added on top of the
+        // encode made the worker's period longer than a frame for any guard
+        // over about 6 ms.
+        if (int guardMs = GuardSleepMsNow(); guardMs > 0) {
+            std::this_thread::sleep_until(job.enqueueTime + std::chrono::milliseconds(guardMs));
         }
 
         try {
@@ -300,7 +330,7 @@ void OvrDirectModeComponent::EncodeWorkerLoop() {
             // rather than in Present so the target is as fresh as possible.
             uint64_t stampTimestampNs = job.targetTimestampNs;
             alvr::render::WarpParams warpParams {};
-            if (RewarpEnabled && enc.warpCapable()) {
+            if (RewarpEnabledNow() && enc.warpCapable()) {
                 auto latest = m_poseHistory->GetLatestPose();
 
                 FfiViewParams viewParams[2];
