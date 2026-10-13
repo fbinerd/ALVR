@@ -617,6 +617,12 @@ impl ServerCoreContext {
                     let mut pairing_reported = None;
                     let mut ticks_since_pairing_report = 0u32;
                     loop {
+                        {
+                            let session_manager = SESSION_MANAGER.read();
+                            let audio = &session_manager.settings().audio;
+                            AIRLINK_GAME_AUDIO.store(audio.game_audio.enabled(), Ordering::Relaxed);
+                            AIRLINK_MICROPHONE.store(audio.microphone.enabled(), Ordering::Relaxed);
+                        }
                         let pairing = alvr_airlink::host::pairing_request();
                         ticks_since_pairing_report += 1;
                         if pairing != pairing_reported
@@ -1069,6 +1075,10 @@ impl Drop for ServerCoreContext {
     }
 }
 
+// "Headset speaker" and "Headset microphone" of the settings, for Air Link.
+static AIRLINK_GAME_AUDIO: AtomicBool = AtomicBool::new(true);
+static AIRLINK_MICROPHONE: AtomicBool = AtomicBool::new(true);
+
 /// Game audio and microphone for a Meta Air Link headset, through the
 /// AirLink devices the dashboard creates: what plays on "AirLink Speakers"
 /// is sent to the headset, the headset's microphone feeds "AirLink
@@ -1085,6 +1095,9 @@ fn airlink_audio() -> alvr_airlink::audio::AirLinkAudio {
     let on_microphone = Arc::new({
         let queue = Arc::clone(&microphone_queue);
         move |samples: &[u8]| {
+            if !AIRLINK_MICROPHONE.load(Ordering::Relaxed) {
+                return;
+            }
             let mut queue = queue.lock();
             queue.extend(
                 samples
@@ -1119,7 +1132,7 @@ fn airlink_audio() -> alvr_airlink::audio::AirLinkAudio {
                         } else {
                             silent_chunks = 0;
                         }
-                        if silent_chunks <= 100 {
+                        if silent_chunks <= 100 && AIRLINK_GAME_AUDIO.load(Ordering::Relaxed) {
                             speaker_sender.try_send(chunk).ok();
                         }
                     }

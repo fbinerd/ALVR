@@ -366,11 +366,23 @@ pub fn compute_restart_settings_hash(
 pub fn handshake_loop(ctx: Arc<ConnectionContext>, lifecycle_state: Arc<RwLock<LifecycleState>>) {
     dbg_connection!("handshake_loop: Begin");
 
-    let welcome_socket = match WelcomeSocket::new() {
-        Ok(socket) => socket,
-        Err(e) => {
-            error!("Failed to create discovery socket: {e:?}");
-            return;
+    // SteamVR restarted by ALVR itself (a first connection does that) starts
+    // this while the server before it still holds the port for a moment.
+    // Giving up here left the new server deaf to every client for good.
+    let mut failure_reported = false;
+    let welcome_socket = loop {
+        match WelcomeSocket::new() {
+            Ok(socket) => break socket,
+            Err(e) => {
+                if !failure_reported {
+                    error!("Failed to create discovery socket, trying again: {e:?}");
+                    failure_reported = true;
+                }
+                if *lifecycle_state.read() == LifecycleState::ShuttingDown {
+                    return;
+                }
+                thread::sleep(Duration::from_secs(1));
+            }
         }
     };
 

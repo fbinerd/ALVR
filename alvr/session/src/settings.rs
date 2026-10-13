@@ -793,9 +793,30 @@ pub struct AudioBufferingConfig {
     pub batch_ms: u64,
 }
 
+/// The device that becomes the system's default while a headset streams.
+#[derive(SettingsSchema, Serialize, Deserialize, Clone, PartialEq)]
+#[schema(gui = "button_group")]
+pub enum StreamingAudioDevice {
+    #[schema(strings(display_name = "Headset"))]
+    Headset,
+    #[schema(strings(display_name = "System default"))]
+    SystemDefault,
+    #[schema(strings(display_name = "Other device"))]
+    Custom(String),
+}
+
 #[derive(SettingsSchema, Serialize, Deserialize, Clone)]
 #[schema(collapsible)]
 pub struct GameAudioConfig {
+    #[cfg_attr(not(target_os = "linux"), schema(flag = "hidden"))]
+    #[schema(strings(
+        display_name = "Sound output while streaming",
+        help = r"Where the computer's sound goes while a headset is streaming, for ALVR's client and for Meta Air Link alike.
+Headset: the headset's speakers. System default: left as it is. Other device: any output of the system, a speaker box for instance.
+The choice becomes the system's default output when streaming starts; the previous one comes back when it ends."
+    ))]
+    pub streaming_device: StreamingAudioDevice,
+
     #[cfg_attr(target_os = "linux", schema(flag = "hidden"))]
     pub device: Option<CustomAudioDeviceConfig>,
 
@@ -832,41 +853,23 @@ pub enum MicrophoneDevicesConfig {
 #[derive(SettingsSchema, Serialize, Deserialize, Clone)]
 #[schema(collapsible)]
 pub struct MicrophoneConfig {
+    #[cfg_attr(not(target_os = "linux"), schema(flag = "hidden"))]
+    #[schema(strings(
+        display_name = "Microphone while streaming",
+        help = r"Which microphone applications get while a headset is streaming, for ALVR's client and for Meta Air Link alike.
+Headset: the headset's microphone. System default: left as it is. Other device: any input of the system.
+The choice becomes the system's default input when streaming starts; the previous one comes back when it ends."
+    ))]
+    pub streaming_device: StreamingAudioDevice,
+
     #[cfg_attr(target_os = "linux", schema(flag = "hidden"))]
     pub devices: MicrophoneDevicesConfig,
 
     pub buffering: AudioBufferingConfig,
 }
 
-#[derive(SettingsSchema, Serialize, Deserialize, Clone, PartialEq)]
-#[schema(gui = "button_group")]
-pub enum AirLinkAudioDevice {
-    #[schema(strings(display_name = "Headset"))]
-    Headset,
-    #[schema(strings(display_name = "System default"))]
-    SystemDefault,
-    #[schema(strings(display_name = "Other device"))]
-    Custom(String),
-}
-
 #[derive(SettingsSchema, Serialize, Deserialize, Clone)]
 pub struct AudioConfig {
-    #[schema(strings(
-        display_name = "Air Link sound output",
-        help = r"Where the computer's sound goes while a Meta Air Link headset is streaming.
-Headset: the headset's speakers. System default: left as it is. Other device: any output, by its name or part of it as the system's sound settings show it (a speaker box, for instance).
-The choice becomes the system's default output when streaming starts; the previous one comes back when it ends."
-    ))]
-    pub airlink_speakers: AirLinkAudioDevice,
-
-    #[schema(strings(
-        display_name = "Air Link microphone",
-        help = r"Which microphone applications get while a Meta Air Link headset is streaming.
-Headset: the headset's microphone. System default: left as it is. Other device: any input, by its name or part of it as the system's sound settings show it.
-The choice becomes the system's default input when streaming starts; the previous one comes back when it ends."
-    ))]
-    pub airlink_microphone: AirLinkAudioDevice,
-
     #[schema(strings(display_name = "Headset speaker"))]
     pub game_audio: Switch<GameAudioConfig>,
 
@@ -1958,18 +1961,14 @@ pub fn session_settings_default() -> SettingsDefault {
             },
         },
         audio: AudioConfigDefault {
-            airlink_speakers: AirLinkAudioDeviceDefault {
-                Custom: "".into(),
-                variant: AirLinkAudioDeviceDefaultVariant::Headset,
-            },
-            airlink_microphone: AirLinkAudioDeviceDefault {
-                Custom: "".into(),
-                variant: AirLinkAudioDeviceDefaultVariant::Headset,
-            },
             game_audio: SwitchDefault {
                 enabled: true,
                 content: GameAudioConfigDefault {
                     gui_collapsed: true,
+                    streaming_device: StreamingAudioDeviceDefault {
+                        Custom: "".into(),
+                        variant: StreamingAudioDeviceDefaultVariant::Headset,
+                    },
                     device: OptionalDefault {
                         set: false,
                         content: default_custom_audio_device.clone(),
@@ -1986,6 +1985,10 @@ pub fn session_settings_default() -> SettingsDefault {
                 enabled: cfg!(target_os = "linux"),
                 content: MicrophoneConfigDefault {
                     gui_collapsed: true,
+                    streaming_device: StreamingAudioDeviceDefault {
+                        Custom: "".into(),
+                        variant: StreamingAudioDeviceDefaultVariant::Headset,
+                    },
                     devices: MicrophoneDevicesConfigDefault {
                         Custom: MicrophoneDevicesConfigCustomDefault {
                             source: default_custom_audio_device.clone(),
