@@ -1,6 +1,6 @@
-//! Drop-down for the device a Meta Air Link stream uses: the headset, the
+//! Drop-down for the device used while a headset streams: the headset, the
 //! system default or one of the system's outputs or inputs, listed by their
-//! description. Stands in for the generic control of `AirLinkAudioDevice`.
+//! description. Stands in for the generic control of `StreamingAudioDevice`.
 
 use super::{NestingInfo, reset};
 use alvr_packets::{PathSegment, PathValuePair};
@@ -27,11 +27,15 @@ pub struct Control {
 impl Control {
     /// The control for this setting, if it is one of the Air Link devices.
     pub fn for_setting(nesting_info: &NestingInfo) -> Option<Self> {
-        let is_output = match nesting_info.path.last()? {
-            PathSegment::Name(name) if name == "airlink_speakers" => true,
-            PathSegment::Name(name) if name == "airlink_microphone" => false,
-            _ => return None,
-        };
+        if !matches!(nesting_info.path.last()?, PathSegment::Name(name) if name == "streaming_device")
+        {
+            return None;
+        }
+        // The same field sits under the speaker and under the microphone.
+        let is_output = nesting_info
+            .path
+            .iter()
+            .any(|segment| matches!(segment, PathSegment::Name(name) if name == "game_audio"));
 
         Some(Self {
             nesting_info: nesting_info.clone(),
