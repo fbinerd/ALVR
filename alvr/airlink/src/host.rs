@@ -83,6 +83,7 @@ const IDLE_POSE: AirLinkPose = AirLinkPose {
 /// Head pose reported until the headset's own tracking arrives.
 const IDLE_TRACKING_SAMPLE: AirLinkTrackingSample = AirLinkTrackingSample {
     head: IDLE_POSE,
+    head_time_s: 0.0,
     left_hand: None,
     right_hand: None,
 };
@@ -262,6 +263,7 @@ impl AirLinkHost {
         // polygon's height is no use: it is in another space (the user,
         // seated, came out 0.5 m above the floor).
         let mut reported_floor_y: Option<f32> = None;
+        let mut head_predictor = crate::tracking::HeadPredictor::new(head_prediction_ms());
         let mut floor_y: Option<f32> = None;
         let mut floor_logged_at = None;
         let mut idle_pose_timer = tokio::time::interval(std::time::Duration::from_micros(13_889));
@@ -523,6 +525,7 @@ impl AirLinkHost {
                     }
                 } else if topic == 11 {
                     if let Some(mut sample) = crate::tracking::unpack_tracking(&payload) {
+                        sample.head = head_predictor.predict(sample.head, sample.head_time_s);
                         if !tracking_received {
                             tracking_received = true;
                             log::info!("Air Link tracking starts");
@@ -976,6 +979,23 @@ fn unix_timestamp_ms() -> u128 {
 }
 
 #[cfg(unix)]
+/// How far ahead the head pose is predicted, in milliseconds: 40, or what
+/// `ALVR_AIRLINK_PREDICT_MS` or `~/.config/alvr/airlink_predict_ms` says
+/// (0 turns prediction off).
+fn head_prediction_ms() -> f64 {
+    std::env::var("ALVR_AIRLINK_PREDICT_MS")
+        .ok()
+        .or_else(|| {
+            let home = std::env::var_os("HOME")?;
+            std::fs::read_to_string(
+                std::path::Path::new(&home).join(".config/alvr/airlink_predict_ms"),
+            )
+            .ok()
+        })
+        .and_then(|text| text.trim().parse().ok())
+        .unwrap_or(40.0)
+}
+
 fn monotonic_nanos() -> u64 {
     let mut value = std::mem::MaybeUninit::<libc::timespec>::uninit();
     // SAFETY: clock_gettime initializes the supplied timespec on success.

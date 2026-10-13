@@ -27,6 +27,25 @@
 // slot is close to its next writer.
 constexpr double JobAgeLimitFrames = 1.5;
 
+// For trials: 0 in ~/.config/alvr/encoder_rewarp sends each frame as it was
+// rendered, stamped with the pose it was rendered for, and leaves all
+// reprojection to the headset. Read once.
+static bool ReadRewarpEnabled() {
+    int value = 1;
+    if (const char* home = getenv("HOME")) {
+        std::string path = std::string(home) + "/.config/alvr/encoder_rewarp";
+        if (FILE* file = fopen(path.c_str(), "r")) {
+            int read = 1;
+            if (fscanf(file, "%d", &read) == 1 && (read == 0 || read == 1)) {
+                value = read;
+            }
+            fclose(file);
+        }
+    }
+    return value != 0;
+}
+static const bool RewarpEnabled = ReadRewarpEnabled();
+
 // The negotiated refresh rate expressed as a frame period.
 static std::chrono::nanoseconds frameInterval() {
     return std::chrono::nanoseconds((int64_t)(1e9 / Settings_Instance()->m_refreshRate));
@@ -250,7 +269,7 @@ void OvrDirectModeComponent::EncodeWorkerLoop() {
             // rather than in Present so the target is as fresh as possible.
             uint64_t stampTimestampNs = job.targetTimestampNs;
             alvr::render::WarpParams warpParams {};
-            if (enc.warpCapable()) {
+            if (RewarpEnabled && enc.warpCapable()) {
                 auto latest = m_poseHistory->GetLatestPose();
 
                 FfiViewParams viewParams[2];
