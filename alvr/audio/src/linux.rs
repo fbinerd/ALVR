@@ -1,5 +1,5 @@
 use alvr_common::{ConnectionError, anyhow::{Result, bail}, debug, error, parking_lot::Mutex};
-use alvr_session::AudioBufferingConfig;
+use alvr_session::{AirLinkAudioDevice, AudioBufferingConfig};
 use alvr_sockets::{StreamReceiver, StreamSender};
 
 use std::os::unix::fs::FileTypeExt;
@@ -22,7 +22,8 @@ const AIRLINK_MICROPHONE_SOURCE: &str = "mhl_airlink_microphone";
 
 fn pactl(args: &[&str]) -> Result<String> {
     let executable = std::env::var_os("MHL_PACTL").unwrap_or_else(|| "pactl".into());
-    let output = Command::new(executable).args(args).output()?;
+    // Parsed output: not in the user's language.
+    let output = Command::new(executable).args(args).env("LC_ALL", "C").output()?;
     if !output.status.success() {
         let error = String::from_utf8_lossy(&output.stderr);
         bail!("pactl {} failed: {}", args.join(" "), error.trim());
@@ -58,6 +59,113 @@ fn airlink_module_ids() -> Result<Vec<u32>> {
             .then_some(id)
         })
         .collect())
+}
+
+/// The system's default output and input from before an Air Link stream
+/// changed them, each only if it was changed.
+static AIRLINK_PREVIOUS_DEFAULTS: Mutex<(Option<String>, Option<String>)> =
+    Mutex::new((None, None));
+
+/// Name and description of the system's outputs (`kind` "sinks") or inputs
+/// ("sources"), without monitors and without the AirLink devices themselves.
+pub fn list_audio_devices(kind: &str) -> Result<Vec<(String, String)>> {
+    let listing = pactl(&["list", kind])?;
+    let mut devices = Vec::new();
+    let mut name = None;
+    for line in listing.lines().map(str::trim) {
+        if let Some(value) = line.strip_prefix("Name: ") {
+            name = Some(value.to_owned());
+        } else if let Some(description) = line.strip_prefix("Description: ")
+            && let Some(name) = name.take()
+            && !name.ends_with(".monitor")
+            && ![
+                AIRLINK_SPEAKERS_SINK,
+                AIRLINK_MICROPHONE_SINK,
+                AIRLINK_MICROPHONE_SOURCE,
+            ]
+            .contains(&name.as_str())
+        {
+            devices.push((name, description.to_owned()));
+        }
+    }
+    Ok(devices)
+}
+
+/// Name of the sink or source whose name or description contains `wanted`,
+/// ignoring case.
+fn find_audio_device(kind: &str, wanted: &str) -> Result<String> {
+    let wanted = wanted.trim().to_lowercase();
+    if wanted.is_empty() {
+        bail!("no device name given");
+    }
+    list_audio_devices(kind)?
+        .into_iter()
+        .find(|(name, description)| {
+            name.to_lowercase().contains(&wanted) || description.to_lowercase().contains(&wanted)
+        })
+        .map(|(name, _)| name)
+        .ok_or_else(|| {
+            alvr_common::anyhow::anyhow!("no audio device named like \"{wanted}\" among the {kind}")
+        })
+}
+
+fn select_default_device(
+    selection: &AirLinkAudioDevice,
+    kind: &str,
+    headset_device: &str,
+    get: &str,
+    set: &str,
+    previous: &mut Option<String>,
+) -> Result<()> {
+    let target = match selection {
+        AirLinkAudioDevice::SystemDefault => return Ok(()),
+        AirLinkAudioDevice::Headset => headset_device.to_owned(),
+        AirLinkAudioDevice::Custom(wanted) => find_audio_device(kind, wanted)?,
+    };
+    let current = pactl(&[get])?;
+    if current != target {
+        pactl(&[set, &target])?;
+        // A second start without a stop in between keeps the first answer.
+        previous.get_or_insert(current);
+    }
+    Ok(())
+}
+
+/// Makes the chosen devices the system's default output and input for the
+/// time a Meta Air Link headset streams.
+pub fn airlink_select_default_devices(
+    speakers: &AirLinkAudioDevice,
+    microphone: &AirLinkAudioDevice,
+) -> Result<()> {
+    let mut previous = AIRLINK_PREVIOUS_DEFAULTS.lock();
+    let speakers_result = select_default_device(
+        speakers,
+        "sinks",
+        AIRLINK_SPEAKERS_SINK,
+        "get-default-sink",
+        "set-default-sink",
+        &mut previous.0,
+    );
+    let microphone_result = select_default_device(
+        microphone,
+        "sources",
+        AIRLINK_MICROPHONE_SOURCE,
+        "get-default-source",
+        "set-default-source",
+        &mut previous.1,
+    );
+    speakers_result.and(microphone_result)
+}
+
+/// Puts back the defaults `airlink_select_default_devices` replaced.
+pub fn airlink_restore_default_devices() {
+    let (sink, source) = std::mem::take(&mut *AIRLINK_PREVIOUS_DEFAULTS.lock());
+    if let Some(sink) = sink {
+        pactl(&["set-default-sink", &sink]).ok();
+    }
+    if let Some(source) = source {
+        pactl(&["set-default-source", &source]).ok();
+    }
 }
 
 pub struct AirLinkDevices;
