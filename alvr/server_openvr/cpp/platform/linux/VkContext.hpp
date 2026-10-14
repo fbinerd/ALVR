@@ -134,7 +134,10 @@ public:
             bool isGraphics = static_cast<bool>(props.queueFlags & vk::QueueFlagBits::eGraphics);
             bool isCompute = static_cast<bool>(props.queueFlags & vk::QueueFlagBits::eCompute);
 
-            if (isCompute && (!wantedQueueFamily.has_value() || !isGraphics)) {
+            // Texture-bound normalization uses vkCmdBlitImage, which requires
+            // a graphics-capable command pool even though the other passes
+            // are compute shaders. A dedicated compute queue is not legal.
+            if (isCompute && isGraphics && !wantedQueueFamily.has_value()) {
                 wantedQueueFamily = i;
             }
         }
