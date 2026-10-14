@@ -74,11 +74,38 @@ pub fn unpack_tracking(data: &[u8]) -> Option<AirLinkTrackingSample> {
         return None;
     }
     Some(AirLinkTrackingSample {
-        left_hand: read_pose(data, 82),
-        right_hand: read_pose(data, 184),
+        left_hand: read_pose(data, 82).map(controller_pose),
+        right_hand: read_pose(data, 184).map(controller_pose),
         head: read_pose(data, 388)?,
         head_time_s: read_f64(data, 422)?,
     })
+}
+
+/// Air Link's controller pose is pitched 30 degrees against the one ALVR's
+/// own client sends, which is what the rest of ALVR and its controller offset
+/// settings expect. The shift keeps the controller where the rotation alone,
+/// set as ALVR's rotation offset with the default position offset of
+/// (0, 0, -0.11), had put it: offset - rotation * offset.
+fn controller_pose(pose: AirLinkPose) -> AirLinkPose {
+    const HALF_PITCH: f32 = 15.0 * std::f32::consts::PI / 180.0;
+    const SHIFT: [f32; 3] = [0.0, -0.055, -0.014_737];
+
+    let rotation = [HALF_PITCH.sin(), 0.0, 0.0, HALF_PITCH.cos()];
+    let [x, y, z, w] = pose.orientation_xyzw;
+    // The shift is given in the controller's frame: q * shift * q^-1.
+    let turned = quat_mul(
+        quat_mul(pose.orientation_xyzw, [SHIFT[0], SHIFT[1], SHIFT[2], 0.0]),
+        [-x, -y, -z, w],
+    );
+
+    AirLinkPose {
+        orientation_xyzw: quat_mul(pose.orientation_xyzw, rotation),
+        position_xyz: [
+            pose.position_xyz[0] + turned[0],
+            pose.position_xyz[1] + turned[1],
+            pose.position_xyz[2] + turned[2],
+        ],
+    }
 }
 
 fn read_f64(data: &[u8], offset: usize) -> Option<f64> {
