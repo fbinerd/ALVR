@@ -92,6 +92,14 @@ static bool RewarpEnabledNow() {
     return LiveTrialValue("encoder_rewarp", 1, 1, cached, readAtMs) != 0;
 }
 
+// Live A/B control: 1 respects the valid submitted rectangle, 0 reproduces
+// the whole-texture read. It does not rebuild images or restart the stream.
+static bool TextureBoundsEnabledNow() {
+    static int cached = 1;
+    static int64_t readAtMs = 0;
+    return LiveTrialValue("encoder_texture_bounds", 1, 1, cached, readAtMs) != 0;
+}
+
 // The negotiated refresh rate expressed as a frame period.
 static std::chrono::nanoseconds frameInterval() {
     return std::chrono::nanoseconds((int64_t)(1e9 / Settings_Instance()->m_displayRefreshRate));
@@ -355,7 +363,28 @@ void OvrDirectModeComponent::EncodeWorkerLoop() {
                 }
             }
 
-            enc.present(job.leftIdx, job.rightIdx, stampTimestampNs, warpParams, job.waitFds);
+            bool const useBounds = TextureBoundsEnabledNow();
+            alvr::render::TextureBounds bounds {};
+            if (useBounds) {
+                for (int eye = 0; eye < 2; ++eye) {
+                    auto const& b = job.textureBounds[eye];
+                    bounds.eyes[eye] = { b.uMin, b.vMin, b.uMax, b.vMax };
+                }
+            }
+            static int lastBoundsEnabled = -1;
+            static vr::VRTextureBounds_t lastBounds[2] {};
+            if (lastBoundsEnabled != int(useBounds)
+                || memcmp(lastBounds, job.textureBounds, sizeof(lastBounds)) != 0) {
+                Info("Texture bounds: enabled=%d left u %.6f..%.6f v %.6f..%.6f "
+                     "right u %.6f..%.6f v %.6f..%.6f\n", int(useBounds),
+                     job.textureBounds[0].uMin, job.textureBounds[0].uMax,
+                     job.textureBounds[0].vMin, job.textureBounds[0].vMax,
+                     job.textureBounds[1].uMin, job.textureBounds[1].uMax,
+                     job.textureBounds[1].vMin, job.textureBounds[1].vMax);
+                lastBoundsEnabled = int(useBounds);
+                memcpy(lastBounds, job.textureBounds, sizeof(lastBounds));
+            }
+            enc.present(job.leftIdx, job.rightIdx, stampTimestampNs, warpParams, bounds, job.waitFds);
         } catch (std::exception const& e) {
             // An exception escaping a thread's start function is
             // std::terminate, which takes vrserver with it. Same recovery as
@@ -753,6 +782,18 @@ void OvrDirectModeComponent::Present(vr::SharedTextureHandle_t syncTexture) {
     job.rightIdx = rightIdx.value();
     job.targetTimestampNs = m_targetTimestampNs;
     job.renderOrientation = m_framePoseRotation;
+    for (int eye = 0; eye < 2; ++eye) {
+        auto const& b = m_submitLayers[0][eye].bounds;
+        if (!std::isfinite(b.uMin) || !std::isfinite(b.uMax)
+            || !std::isfinite(b.vMin) || !std::isfinite(b.vMax)
+            || b.uMin < 0.f || b.uMin > 1.f || b.uMax < 0.f || b.uMax > 1.f
+            || b.vMin < 0.f || b.vMin > 1.f || b.vMax < 0.f || b.vMax > 1.f
+            || b.uMin == b.uMax || b.vMin == b.vMax) {
+            Warn("Invalid submitted texture bounds for eye %d; skipping frame\n", eye);
+            return;
+        }
+        job.textureBounds[eye] = b;
+    }
     job.generation = m_encGeneration;
     job.enqueueTime = std::chrono::steady_clock::now();
 

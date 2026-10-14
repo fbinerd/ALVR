@@ -1,6 +1,7 @@
 #include "Renderer.hpp"
 
 #include <optional>
+#include <cmath>
 #include <unistd.h>
 #include <vulkan/vulkan_structs.hpp>
 
@@ -734,6 +735,49 @@ void Renderer::render(VkContext& vkCtx, u32 leftIdx, u32 rightIdx, int const wai
 
     prev = stageOut;
 
+    bool crop = false;
+    for (auto const& b : textureBounds.eyes) {
+        crop = crop || b.uMin != 0.f || b.vMin != 0.f || b.uMax != 1.f || b.vMax != 1.f;
+    }
+    if (crop) {
+        // Copy first to UNORM staging, then crop/normalize there. Blitting an
+        // imported sRGB image directly to UNORM would decode its transfer
+        // curve and change the encoded colours. These two images have the
+        // same UNORM format, so the blit preserves the existing colour path.
+        Image& cropped = stagingImgs[1];
+        transitionImage(*prev, vk::ImageLayout::eTransferSrcOptimal,
+                        vk::AccessFlagBits::eTransferWrite,
+                        vk::AccessFlagBits::eTransferRead, barriers);
+        transitionImage(cropped, vk::ImageLayout::eTransferDstOptimal,
+                        vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eShaderWrite,
+                        vk::AccessFlagBits::eTransferWrite, barriers);
+        flushBarriers(barriers, vk::PipelineStageFlagBits::eAllCommands,
+                      vk::PipelineStageFlagBits::eTransfer);
+        for (int eye = 0; eye < 2; ++eye) {
+            auto const& b = textureBounds.eyes[eye];
+            int32_t const width = static_cast<int32_t>(eyeExtent.width);
+            int32_t const height = static_cast<int32_t>(eyeExtent.height);
+            int32_t const x0 = std::lround(b.uMin * width);
+            int32_t const x1 = std::lround(b.uMax * width);
+            int32_t const y0 = std::lround(b.vMin * height);
+            int32_t const y1 = std::lround(b.vMax * height);
+            if (x0 == x1 || y0 == y1) {
+                throw std::runtime_error("Submitted texture bounds have zero pixel extent");
+            }
+            vk::ImageBlit region {
+                .srcSubresource = subresLayout,
+                .srcOffsets = std::array<vk::Offset3D, 2> { vk::Offset3D { eye * width + x0, y0, 0 },
+                                vk::Offset3D { eye * width + x1, y1, 1 } },
+                .dstSubresource = subresLayout,
+                .dstOffsets = std::array<vk::Offset3D, 2> { vk::Offset3D { eye * width, 0, 0 },
+                                vk::Offset3D { (eye + 1) * width, height, 1 } },
+            };
+            cmdBuf.blitImage(prev->image, prev->layout, cropped.image, cropped.layout,
+                             region, vk::Filter::eLinear);
+        }
+        prev = &cropped;
+    }
+
     PushConstants const pushConstants {
         .warp = warpParams,
         .centerShifts = foveationCenterShifts,
@@ -742,7 +786,7 @@ void Renderer::render(VkContext& vkCtx, u32 leftIdx, u32 rightIdx, int const wai
     for (usize pipeIdx = 0; pipeIdx < pipes.size(); ++pipeIdx) {
         Image* nextOut = pipeIdx + 1 == pipes.size()
             ? &output.image
-            : &stagingImgs[(pipeIdx + 1) % StagingImgCount];
+            : &stagingImgs[(pipeIdx + 1 + usize(crop)) % StagingImgCount];
         vk::Extent2D targetExtent = pipeIdx + 1 == pipes.size() ? outExtent
                                                                 : vk::Extent2D {
                                                                       .width = eyeExtent.width * 2,

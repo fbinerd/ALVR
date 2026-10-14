@@ -124,6 +124,7 @@ private:
         // m_framePoseRotation itself because the compositor thread has
         // overwritten it by then.
         vr::HmdQuaternion_t renderOrientation;
+        vr::VRTextureBounds_t textureBounds[2];
         // Encoder-state generation this job was built against. The worker
         // discards the job if the generation moved (rebuild, shutdown, set
         // switch) between enqueue and processing.

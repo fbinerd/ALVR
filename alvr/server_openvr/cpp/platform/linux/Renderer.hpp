@@ -60,6 +60,18 @@ struct PipelineCreateInfo {
     std::vector<u8> specData;
 };
 
+// Normalized valid subrectangle submitted for each eye. Full bounds preserve
+// the original whole-texture path; reversed endpoints preserve image flips.
+struct EyeTextureBounds {
+    float uMin = 0.f;
+    float vMin = 0.f;
+    float uMax = 1.f;
+    float vMax = 1.f;
+};
+struct TextureBounds {
+    EyeTextureBounds eyes[2];
+};
+
 struct RendererCreateInfo {
     // The input images hold linear values, not sRGB-encoded ones.
     bool linearInput = false;
@@ -166,6 +178,8 @@ public:
     // this call: a successful import hands the fd to Vulkan, a failed one is
     // closed here.
     void render(VkContext& vkCtx, u32 leftIdx, u32 rightIdx, int const waitFds[2] = nullptr);
+
+    TextureBounds textureBounds {};
 
     WarpParams warpParams {};
 
