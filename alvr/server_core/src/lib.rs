@@ -825,6 +825,32 @@ impl ServerCoreContext {
                     position[1], position[2],
                 ],
             };
+            // Debugging aid: `~/.config/alvr/airlink_video_dump` names a file
+            // that receives the stream exactly as it is handed to the host.
+            // Next to it, `<file>.times` gets one line per frame: the wall
+            // clock in milliseconds, to find a moment in the dump.
+            static DUMP: LazyLock<Option<Mutex<(std::fs::File, std::fs::File)>>> =
+                LazyLock::new(|| {
+                    let home = std::env::var_os("HOME")?;
+                    let path = std::fs::read_to_string(
+                        std::path::Path::new(&home).join(".config/alvr/airlink_video_dump"),
+                    )
+                    .ok()?;
+                    let path = path.trim();
+                    Some(Mutex::new((
+                        std::fs::File::create(path).ok()?,
+                        std::fs::File::create(format!("{path}.times")).ok()?,
+                    )))
+                });
+            if let Some(files) = &*DUMP {
+                use std::io::Write;
+                let mut files = files.lock();
+                files.0.write_all(&frame.nal).ok();
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |elapsed| elapsed.as_millis());
+                writeln!(files.1, "{now_ms}").ok();
+            }
             self.connection_context.airlink_video_sender.send(frame).ok();
 
             // An Air Link headset sends no statistics of its own, and the
