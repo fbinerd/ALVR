@@ -107,6 +107,10 @@ impl HeadPredictor {
         }
     }
 
+    pub fn set_lead_ms(&mut self, lead_ms: f64) {
+        self.lead_s = lead_ms.clamp(0.0, 100.0) / 1000.0;
+    }
+
     pub fn predict(&mut self, pose: AirLinkPose, time_s: f64) -> AirLinkPose {
         // A clock that went back is a new session.
         if self.history.back().is_some_and(|(last, _)| time_s <= *last) {
