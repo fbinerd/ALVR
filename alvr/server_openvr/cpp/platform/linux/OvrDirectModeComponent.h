@@ -126,7 +126,7 @@ private:
     // faster than frames arrive, and if it falls behind, the newest frame
     // replaces the stale pending one.
     struct FrameJob {
-        // The layers to draw; layer 0 only for now.
+        // Layer 0 first, then the overlays to blend over it.
         std::vector<alvr::render::Layer> layers;
         uint64_t targetTimestampNs;
         // Orientation the layer was rendered with, captured in Present. The
