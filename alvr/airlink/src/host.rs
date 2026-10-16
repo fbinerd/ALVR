@@ -279,7 +279,7 @@ impl AirLinkHost {
         let mut speaker_open = true;
         let mut speaker_packets = 0u64;
         let mut display_grid_s: Option<f64> = None;
-        let display_lead_s = display_lead_ms() / 1000.0;
+        let mut display_lead_s = display_lead_ms() / 1000.0;
         let frame_report_trace = std::env::var_os("HOME").is_some_and(|home| {
             std::path::Path::new(&home)
                 .join(".config/alvr/airlink_frame_reports")
@@ -394,6 +394,11 @@ impl AirLinkHost {
                                 self.send(stream, MESH_TOPIC, &mesh).await?;
                                 runtime_service.mesh_sent = true;
                                 log::info!("sent Air Link rectify mesh: {} bytes", mesh.len());
+                            }
+                            // The trial values can be changed while streaming.
+                            if next_video_frame_id % 36 == 0 {
+                                head_predictor.set_lead_ms(head_prediction_ms());
+                                display_lead_s = display_lead_ms() / 1000.0;
                             }
                             let host_now_ns = monotonic_nanos();
                             // One refresh period after the previous frame's
