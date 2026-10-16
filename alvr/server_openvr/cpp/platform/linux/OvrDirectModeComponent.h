@@ -107,7 +107,7 @@ private:
     // textures is not one of ours or its bounds are invalid.
     std::optional<alvr::render::Layer> SubmittedLayer(int i);
 
-    static const int MAX_LAYERS = 10;
+    static constexpr int MAX_LAYERS = 10;
     int m_submitLayer;
     SubmitLayerPerEye_t m_submitLayers[MAX_LAYERS][2];
     vr::HmdQuaternion_t m_prevFramePoseRotation;
