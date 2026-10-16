@@ -287,10 +287,11 @@ void OvrDirectModeComponent::EncodeWorkerLoop() {
             // finished here; on NVIDIA the waits measured reach ~4 ms in
             // SteamVR Home and ~6 ms when a heavy application's frame ends
             // late.
-            auto const timelineCapNs = (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                           frameInterval() * TimelineWaitCapFrames
-            )
-                                           .count();
+            auto const timelineCapNs
+                = (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(
+                      frameInterval() * TimelineWaitCapFrames
+                )
+                      .count();
             for (auto const& wait : job.waits) {
                 if (wait.semaphore == 0) {
                     continue;
@@ -302,9 +303,11 @@ void OvrDirectModeComponent::EncodeWorkerLoop() {
                         wait.value,
                         timelineCapNs
                     )) {
-                    Warn("SteamVR texture semaphore %llx not reached or not importable; "
-                         "reading the frame anyway\n",
-                         (unsigned long long)semaphore);
+                    Warn(
+                        "SteamVR texture semaphore %llx not reached or not importable; "
+                        "reading the frame anyway\n",
+                        (unsigned long long)semaphore
+                    );
                 }
             }
 
@@ -503,7 +506,8 @@ void OvrDirectModeComponent::DestroyAllSwapTextureSets(uint32_t unPid) {
     m_presentMutex.unlock();
 }
 
-void OvrDirectModeComponent::ForgetTextures(std::vector<vr::SharedTextureHandle_t> const& textures) {
+void OvrDirectModeComponent::ForgetTextures(std::vector<vr::SharedTextureHandle_t> const& textures
+) {
     // A pending or in-flight job may still name these textures. Drop the
     // pending one, then take the encoder lock (waits for a frame being read)
     // and move the generation so a job the worker already holds is dropped
@@ -729,9 +733,12 @@ void OvrDirectModeComponent::Present(vr::SharedTextureHandle_t syncTexture) {
                 wait.semaphore = 0;
                 wait.fenceFd = exportReadSyncFile(eye.fd);
                 if (m_noSemaphoreLogged.insert(eye.handle).second) {
-                    Info("SteamVR texture %llx has no timeline semaphore; using its implicit "
-                         "fences and a %d ms guard\n",
-                         (unsigned long long)eye.handle, GuardSleepMs);
+                    Info(
+                        "SteamVR texture %llx has no timeline semaphore; using its implicit "
+                        "fences and a %d ms guard\n",
+                        (unsigned long long)eye.handle,
+                        GuardSleepMs
+                    );
                 }
             }
             job.waits.push_back(wait);

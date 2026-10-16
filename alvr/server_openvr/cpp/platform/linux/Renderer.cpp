@@ -674,14 +674,25 @@ void Renderer::render(VkContext& vkCtx, std::vector<Layer> const& layers) {
     Image* stageOut = &stagingImgs[0];
     for (auto const& eyes : sources) {
         for (Image* source : eyes) {
-            transitionImage(*source, vk::ImageLayout::eGeneral, vk::AccessFlagBits::eNone,
-                            vk::AccessFlagBits::eShaderRead, barriers);
+            transitionImage(
+                *source,
+                vk::ImageLayout::eGeneral,
+                vk::AccessFlagBits::eNone,
+                vk::AccessFlagBits::eShaderRead,
+                barriers
+            );
         }
     }
-    transitionImage(*stageOut, vk::ImageLayout::eGeneral, vk::AccessFlagBits::eNone,
-                    vk::AccessFlagBits::eShaderWrite, barriers);
-    flushBarriers(barriers, vk::PipelineStageFlagBits::eAllCommands,
-                  vk::PipelineStageFlagBits::eComputeShader);
+    transitionImage(
+        *stageOut,
+        vk::ImageLayout::eGeneral,
+        vk::AccessFlagBits::eNone,
+        vk::AccessFlagBits::eShaderWrite,
+        barriers
+    );
+    flushBarriers(
+        barriers, vk::PipelineStageFlagBits::eAllCommands, vk::PipelineStageFlagBits::eComputeShader
+    );
 
     cmdBuf.bindPipeline(vk::PipelineBindPoint::eCompute, layerPipe);
     for (usize layerIdx = 0; layerIdx < layers.size(); ++layerIdx) {
@@ -691,13 +702,19 @@ void Renderer::render(VkContext& vkCtx, std::vector<Layer> const& layers) {
                 .srcAccessMask = vk::AccessFlagBits::eShaderWrite,
                 .dstAccessMask = vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eShaderWrite,
             };
-            cmdBuf.pipelineBarrier(vk::PipelineStageFlagBits::eComputeShader,
-                                   vk::PipelineStageFlagBits::eComputeShader, {}, memBarrier, {},
-                                   {});
+            cmdBuf.pipelineBarrier(
+                vk::PipelineStageFlagBits::eComputeShader,
+                vk::PipelineStageFlagBits::eComputeShader,
+                {},
+                memBarrier,
+                {},
+                {}
+            );
         }
         for (int eye = 0; eye < 2; ++eye) {
-            drawLayerEye(vkCtx, *sources[layerIdx][eye], eye, layers[layerIdx].eyes[eye],
-                         layerIdx == 0);
+            drawLayerEye(
+                vkCtx, *sources[layerIdx][eye], eye, layers[layerIdx].eyes[eye], layerIdx == 0
+            );
         }
     }
     Image* prev = stageOut;
