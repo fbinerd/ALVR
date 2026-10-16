@@ -189,11 +189,15 @@ private:
         // UNDOCUMENTED (items 1 and 2): the state's name and file. Read only;
         // ALVR never writes SteamVR's state.
         char name[96];
-        snprintf(name, sizeof(name), "VR_CompositorResourceState_%llx_0_%u",
-                 (unsigned long long)handle, (unsigned)getpid());
+        snprintf(
+            name,
+            sizeof(name),
+            "VR_CompositorResourceState_%llx_0_%u",
+            (unsigned long long)handle,
+            (unsigned)getpid()
+        );
         char path[64];
-        snprintf(path, sizeof(path), "/u%u-Shm_%x", (unsigned)getuid(),
-                 Crc32(name, strlen(name)));
+        snprintf(path, sizeof(path), "/u%u-Shm_%x", (unsigned)getuid(), Crc32(name, strlen(name)));
         int fd = shm_open(path, O_RDONLY, 0);
         if (fd < 0) {
             return nullptr; // not created yet; retried on the next call
