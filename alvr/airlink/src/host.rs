@@ -46,6 +46,7 @@ pub struct AirLinkPairingRequest {
     pub address: SocketAddr,
     pub headset_id: [u8; 16],
     pub headset_name: String,
+    pub pairing_code: Option<u32>,
 }
 
 /// The headsets that connect without a question. Any other is held until
@@ -242,6 +243,7 @@ impl AirLinkHost {
                     continue;
                 }
             };
+            let headset_certificate = transport::peer_certificate(&stream);
             log::info!("Meta Air Link TLS session established from {peer}");
             *STATUS.lock().unwrap() = Some(AirLinkHeadsetStatus {
                 address: peer,
@@ -250,7 +252,7 @@ impl AirLinkHost {
             let result = tokio::select! {
                 _ = &mut shutdown => return Ok(()),
                 _ = enabled.changed() => Err("the host was switched off".into()),
-                result = self.serve_connection(&mut stream) => result,
+                result = self.serve_connection(&mut stream, headset_certificate.as_deref()) => result,
             };
             *STATUS.lock().unwrap() = None;
             *PAIRING_REQUEST.lock().unwrap() = None;
@@ -267,6 +269,7 @@ impl AirLinkHost {
     async fn serve_connection(
         &mut self,
         stream: &mut TlsStream<TcpStream>,
+        headset_certificate: Option<&[u8]>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let mut gpu_buffer_handshake_ack_sent = false;
         let mut gpu_initial_frame_sent = false;
@@ -313,6 +316,7 @@ impl AirLinkHost {
         // Pairing waits for the user's answer in the dashboard.
         let mut pairing_answer = PAIRING_ANSWER.subscribe();
         let mut pairing_pending = false;
+        let mut pairing_code = None;
         // The headset asked for the answer itself (first pairing) and waits
         // for an acknowledgement; otherwise only its messages are held back.
         let mut pairing_awaits_ack = false;
@@ -535,6 +539,7 @@ impl AirLinkHost {
                             address,
                             headset_id: *id,
                             headset_name: name.clone(),
+                            pairing_code,
                         });
                         log::info!("Air Link headset {name} at {address} is not known: waiting for the user");
                     }
@@ -611,6 +616,23 @@ impl AirLinkHost {
                         let peer = protocol_result(CertExchange::unpack(&payload))?;
                         let signature_size = peer.signature.len().max(256);
                         let response = unsigned_cert_exchange(signature_size)?;
+                        if let Some(certificate) = headset_certificate {
+                            let code = disco::pairing_code(
+                                certificate,
+                                &peer.random,
+                                self.identity.certificate_der(),
+                                &response.random,
+                            );
+                            pairing_code = Some((code % 1_000_000) as u32);
+                            log::info!("Air Link pairing code {:06} (0x{code:016x})", code % 1_000_000);
+                            // A request may already be visible from the earlier
+                            // connection message. Publish the computed code too.
+                            if let Some(request) = PAIRING_REQUEST.lock().unwrap().as_mut() {
+                                request.pairing_code = pairing_code;
+                            }
+                        } else {
+                            log::warn!("Air Link headset sent no TLS client certificate; cannot show a pairing code");
+                        }
                         let response = protocol_result(
                             response.pack(disco::MSG_EXCHANGING_CERT_ACK),
                         )?;
@@ -635,6 +657,7 @@ impl AirLinkHost {
                                 address,
                                 headset_id: *id,
                                 headset_name: name.clone(),
+                                pairing_code,
                             });
                             log::info!("Air Link pairing asked by {name} at {address}: waiting for the user");
                         }

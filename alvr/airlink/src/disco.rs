@@ -1,5 +1,59 @@
 //! Meta DISCO/commlib framing and basic control-message encoders.
 
+use ring::digest::{SHA256, digest};
+
+/// The normal Meta pairing path hashes each TLS certificate followed by its
+/// certificate-exchange random, then XORs the four little-endian words of
+/// both hashes. The order of the two peers is immaterial.
+pub fn pairing_code(
+    headset_cert: &[u8],
+    headset_random: &[u8; 32],
+    host_cert: &[u8],
+    host_random: &[u8; 32],
+) -> u64 {
+    fn hash_pair(certificate: &[u8], random: &[u8; 32]) -> ring::digest::Digest {
+        let mut input = Vec::with_capacity(certificate.len() + random.len());
+        input.extend_from_slice(certificate);
+        input.extend_from_slice(random);
+        digest(&SHA256, &input)
+    }
+
+    let headset = hash_pair(headset_cert, headset_random);
+    let host = hash_pair(host_cert, host_random);
+    headset
+        .as_ref()
+        .chunks_exact(8)
+        .zip(host.as_ref().chunks_exact(8))
+        .fold(0, |code, (headset_word, host_word)| {
+            code ^ u64::from_le_bytes(headset_word.try_into().unwrap())
+                ^ u64::from_le_bytes(host_word.try_into().unwrap())
+        })
+}
+
+#[cfg(test)]
+mod pairing_code_tests {
+    use super::pairing_code;
+
+    #[test]
+    fn matches_independent_sha256_vector_and_is_symmetric() {
+        let headset_cert: Vec<_> = (1u8..=32).collect();
+        let headset_random: [u8; 32] = std::array::from_fn(|index| index as u8);
+        let host_cert: Vec<_> = (41u8..=72).collect();
+        let host_random: [u8; 32] = std::array::from_fn(|index| index as u8 + 32);
+        let expected = 0x9810_a701_6a5f_2895;
+        assert_eq!(
+            pairing_code(&headset_cert, &headset_random, &host_cert, &host_random),
+            expected
+        );
+        assert_eq!(
+            pairing_code(&host_cert, &host_random, &headset_cert, &headset_random),
+            expected
+        );
+        assert_eq!(expected % 1_000_000, 843_861);
+        assert_eq!(0x3ccc_846a_ba27_f7ec_u64 % 1_000_000, 231_340);
+    }
+}
+
 pub const CONTROL_TOPIC: u32 = 0xcd;
 pub const PAIRING_TOPIC: u32 = 0xce;
 
