@@ -1,6 +1,7 @@
 //! Persistent TLS and endpoint identity for the Meta Air Link host.
 
 use rcgen::generate_simple_self_signed;
+use ring::digest::{SHA256, digest};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use std::{
     fs::{self, OpenOptions},
@@ -12,6 +13,7 @@ use uuid::Uuid;
 const CERT_FILE: &str = "host-cert.der";
 const KEY_FILE: &str = "host-key.der";
 const ENDPOINT_FILE: &str = "endpoint-uuid";
+const TRUST_DIR: &str = "trusted-headsets";
 
 pub struct HostIdentity {
     state_dir: PathBuf,
@@ -80,6 +82,50 @@ impl HostIdentity {
         &self.certificate
     }
 
+    fn trust_path(&self, headset_id: [u8; 16]) -> PathBuf {
+        let id: String = headset_id.iter().map(|byte| format!("{byte:02x}")).collect();
+        self.state_dir.join(TRUST_DIR).join(id)
+    }
+
+    fn certificate_fingerprint(certificate: &[u8]) -> String {
+        digest(&SHA256, certificate)
+            .as_ref()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
+    }
+
+    /// A trusted ALVR client id alone is insufficient: the TLS peer must
+    /// present the same certificate that was approved for that id.
+    pub fn matches_trusted_headset_certificate(
+        &self,
+        headset_id: [u8; 16],
+        certificate: &[u8],
+    ) -> bool {
+        fs::read_to_string(self.trust_path(headset_id))
+            .is_ok_and(|stored| stored.trim_end() == Self::certificate_fingerprint(certificate))
+    }
+
+    /// Store only the public certificate's SHA-256 fingerprint after the
+    /// user accepts the pairing. A new certificate for the same endpoint id
+    /// replaces the old binding only after another explicit acceptance.
+    pub fn trust_headset_certificate(
+        &self,
+        headset_id: [u8; 16],
+        certificate: &[u8],
+    ) -> std::io::Result<()> {
+        let directory = self.state_dir.join(TRUST_DIR);
+        fs::create_dir_all(&directory)?;
+        set_private_dir_permissions(&directory)?;
+        let temporary = directory.join(format!(".{}", Uuid::new_v4()));
+        write_private_file(
+            &temporary,
+            format!("{}\n", Self::certificate_fingerprint(certificate)).as_bytes(),
+            0o600,
+        )?;
+        fs::rename(temporary, self.trust_path(headset_id))
+    }
+
     pub fn rustls_identity(
         &self,
     ) -> (Vec<CertificateDer<'static>>, PrivateKeyDer<'static>) {
@@ -87,6 +133,28 @@ impl HostIdentity {
             vec![CertificateDer::from(self.certificate.clone())],
             PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(self.private_key.clone())),
         )
+    }
+}
+
+#[cfg(test)]
+mod trust_tests {
+    use super::HostIdentity;
+    use uuid::Uuid;
+
+    #[test]
+    fn accepted_certificate_is_bound_to_endpoint_id() {
+        let directory = std::env::temp_dir().join(format!("alvr-airlink-trust-{}", Uuid::new_v4()));
+        let identity = HostIdentity::load_or_create(&directory).unwrap();
+        let id = [7u8; 16];
+        assert!(!identity.matches_trusted_headset_certificate(id, b"first"));
+        identity.trust_headset_certificate(id, b"first").unwrap();
+        assert!(identity.matches_trusted_headset_certificate(id, b"first"));
+        assert!(!identity.matches_trusted_headset_certificate(id, b"other"));
+        assert!(!identity.matches_trusted_headset_certificate([8u8; 16], b"first"));
+        identity.trust_headset_certificate(id, b"other").unwrap();
+        assert!(!identity.matches_trusted_headset_certificate(id, b"first"));
+        assert!(identity.matches_trusted_headset_certificate(id, b"other"));
+        std::fs::remove_dir_all(directory).unwrap();
     }
 }
 

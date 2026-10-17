@@ -35,7 +35,8 @@ static STATUS: std::sync::Mutex<Option<AirLinkHeadsetStatus>> = std::sync::Mutex
 
 static PAIRING_REQUEST: std::sync::Mutex<Option<AirLinkPairingRequest>> =
     std::sync::Mutex::new(None);
-// DISCO endpoint ids of the headsets the user accepted.
+// DISCO endpoint ids of the headsets the user accepted. The certificate
+// binding is checked separately against persistent state before auto trust.
 static KNOWN_HEADSETS: std::sync::Mutex<Vec<[u8; 16]>> = std::sync::Mutex::new(Vec::new());
 
 /// A headset that waits for the user to let it in: one that pairs for the
@@ -55,9 +56,6 @@ pub fn set_known_headsets(headset_ids: Vec<[u8; 16]>) {
     *KNOWN_HEADSETS.lock().unwrap() = headset_ids;
 }
 
-fn headset_is_known(headset_id: [u8; 16]) -> bool {
-    KNOWN_HEADSETS.lock().unwrap().contains(&headset_id)
-}
 // Counter of answers and the last one: accepted or not.
 static PAIRING_ANSWER: std::sync::LazyLock<tokio::sync::watch::Sender<(u64, bool)>> =
     std::sync::LazyLock::new(|| tokio::sync::watch::channel((0, false)).0);
@@ -148,6 +146,14 @@ struct RuntimeServiceState {
 }
 
 impl AirLinkHost {
+    fn headset_is_known(&self, headset_id: [u8; 16], certificate: Option<&[u8]>) -> bool {
+        KNOWN_HEADSETS.lock().unwrap().contains(&headset_id)
+            && certificate.is_some_and(|certificate| {
+                self.identity
+                    .matches_trusted_headset_certificate(headset_id, certificate)
+            })
+    }
+
     pub async fn bind(
         state_dir: impl AsRef<Path>,
         address: SocketAddr,
@@ -341,6 +347,19 @@ impl AirLinkHost {
                     pairing_pending = false;
                     *PAIRING_REQUEST.lock().unwrap() = None;
                     if accepted {
+                        let headset_id = headset
+                            .as_ref()
+                            .map(|(id, _)| *id)
+                            .ok_or("cannot trust a headset without a DISCO endpoint id")?;
+                        let certificate = headset_certificate
+                            .ok_or("cannot trust a headset without a TLS client certificate")?;
+                        if pairing_code.is_none() {
+                            return Err("cannot trust a headset before its pairing code is available".into());
+                        }
+                        // Bind the self-declared endpoint id to the certificate
+                        // proven by TLS before acknowledging the pairing.
+                        self.identity
+                            .trust_headset_certificate(headset_id, certificate)?;
                         log::info!("Air Link headset accepted by the user");
                         approved = true;
                         approved_at = Some(std::time::Instant::now());
@@ -445,7 +464,7 @@ impl AirLinkHost {
                             // the list has had time to take in a new one.
                             if next_video_frame_id % 72 == 0
                                 && approved_at.is_none_or(|at| at.elapsed().as_secs() >= 5)
-                                && headset.as_ref().is_some_and(|(id, _)| !headset_is_known(*id))
+                                && headset.as_ref().is_some_and(|(id, _)| !self.headset_is_known(*id, headset_certificate))
                             {
                                 return Err("the headset was removed from the list".into());
                             }
@@ -527,7 +546,7 @@ impl AirLinkHost {
             // Only connecting and pairing go on for a headset the user has
             // not accepted: the rest waits for the answer in the dashboard.
             if !approved && topic != CONTROL_TOPIC && topic != PAIRING_TOPIC {
-                if headset.as_ref().is_some_and(|(id, _)| headset_is_known(*id)) {
+                if headset.as_ref().is_some_and(|(id, _)| self.headset_is_known(*id, headset_certificate)) {
                     approved = true;
                 } else {
                     if !pairing_pending
@@ -564,7 +583,7 @@ impl AirLinkHost {
                     MSG_CONNECT_REQ => {
                         let request = protocol_result(disco::ConnectRequest::unpack(&payload))?;
                         quest_endpoint_uuid = Some(request.endpoint_uuid);
-                        approved = headset_is_known(request.endpoint_uuid);
+                        approved = self.headset_is_known(request.endpoint_uuid, headset_certificate);
                         headset = Some((request.endpoint_uuid, request.endpoint_name.clone()));
                         let version = disco::negotiate_protocol(
                             &request,
