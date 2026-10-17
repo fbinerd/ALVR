@@ -22,8 +22,6 @@ pub struct DevicesTab {
     edit_popup_state: Option<EditPopupState>,
     adb_download_progress: Option<f32>,
     launch_steamvr_requested: bool,
-    airlink_devices_enabled: Option<bool>,
-    airlink_devices_status_requested: bool,
     airlink_host_enabled: Option<bool>,
     // Address, streaming, and when the server last reported it.
     airlink_headset: Option<(String, bool, std::time::Instant)>,
@@ -37,8 +35,6 @@ impl DevicesTab {
             edit_popup_state: None,
             adb_download_progress: None,
             launch_steamvr_requested: false,
-            airlink_devices_enabled: None,
-            airlink_devices_status_requested: false,
             airlink_host_enabled: None,
             airlink_headset: None,
         }
@@ -65,10 +61,6 @@ impl DevicesTab {
         std::mem::take(&mut self.launch_steamvr_requested)
     }
 
-    pub fn update_airlink_devices(&mut self, enabled: bool) {
-        self.airlink_devices_enabled = Some(enabled);
-    }
-
     pub fn update_airlink_headset(&mut self, address: Option<String>, streaming: bool) {
         self.airlink_headset =
             address.map(|address| (address, streaming, std::time::Instant::now()));
@@ -79,10 +71,6 @@ impl DevicesTab {
 
         if self.new_devices.is_none() {
             requests.push(ServerRequest::GetSession);
-        }
-        if !self.airlink_devices_status_requested {
-            requests.push(ServerRequest::GetAirLinkDevices);
-            self.airlink_devices_status_requested = true;
         }
 
         if !connected_to_server {

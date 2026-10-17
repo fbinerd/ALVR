@@ -24,26 +24,6 @@ use std::{collections::VecDeque, sync::Arc, thread, time::Duration};
 
 pub use cpal::Device;
 
-pub fn airlink_devices_enabled() -> Result<bool> {
-    #[cfg(target_os = "linux")]
-    {
-        return linux::AirLinkDevices::is_enabled();
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    bail!("AirLink Devices are currently supported on Linux only")
-}
-
-pub fn set_airlink_devices_enabled(enabled: bool) -> Result<bool> {
-    #[cfg(target_os = "linux")]
-    {
-        return linux::AirLinkDevices::set_enabled(enabled);
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    bail!("AirLink Devices are currently supported on Linux only")
-}
-
 fn device_from_custom_config(
     host: &Host,
     config: &CustomAudioDeviceConfig,

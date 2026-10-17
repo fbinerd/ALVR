@@ -91,10 +91,6 @@ pub async fn web_server(connection_context: Arc<ConnectionContext>) -> Result<()
                 )
                 .route("/buttons", routing::post(set_buttons))
                 .route(
-                    "/airlink-devices",
-                    routing::get(get_airlink_devices).post(set_airlink_devices),
-                )
-                .route(
                     "/airlink-pairing",
                     routing::post(answer_airlink_pairing),
                 )
@@ -299,12 +295,6 @@ async fn set_buttons(
         .ok();
 }
 
-async fn get_airlink_devices() -> Result<Json<bool>, (StatusCode, String)> {
-    alvr_audio::airlink_devices_enabled()
-        .map(Json)
-        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))
-}
-
 /// The user accepted or refused the pairing a headset waits for.
 async fn answer_airlink_pairing(Json(accept): Json<bool>) {
     // An accepted headset joins the trusted clients, where it stays until the
@@ -333,12 +323,4 @@ async fn answer_airlink_pairing(Json(accept): Json<bool>) {
         }
     }
     alvr_airlink::host::answer_pairing(accept);
-}
-
-async fn set_airlink_devices(
-    Json(enabled): Json<bool>,
-) -> Result<Json<bool>, (StatusCode, String)> {
-    alvr_audio::set_airlink_devices_enabled(enabled)
-        .map(Json)
-        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))
 }
