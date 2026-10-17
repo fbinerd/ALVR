@@ -1,9 +1,11 @@
 //! TLS 1.3 TCP transport and length-prefixed DISCO frames.
 
 use rustls::{
-    ServerConfig,
-    crypto::ring::default_provider,
-    pki_types::CertificateDer,
+    DigitallySignedStruct, DistinguishedName, ServerConfig, SignatureScheme,
+    client::danger::HandshakeSignatureValid,
+    crypto::{CryptoProvider, ring::default_provider, verify_tls12_signature, verify_tls13_signature},
+    pki_types::{CertificateDer, UnixTime},
+    server::danger::{ClientCertVerified, ClientCertVerifier},
     version::TLS13,
 };
 use std::{net::SocketAddr, sync::Arc};
@@ -14,6 +16,69 @@ use tokio::{
 use tokio_rustls::{TlsAcceptor, server::TlsStream};
 
 const MAX_FRAME_SIZE: usize = 16 * 1024 * 1024;
+
+/// Asks the headset for its certificate and takes any, as Meta's host does:
+/// the pairing code, which both sides derive from the two certificates, is
+/// what the user checks (see `disco::pairing_code`). The handshake signature
+/// is still verified, so the headset proves it holds the certificate's key.
+/// Optional, so a headset that sends none still connects (without a code).
+#[derive(Debug)]
+struct AnyClientCertificate {
+    provider: Arc<CryptoProvider>,
+}
+
+impl ClientCertVerifier for AnyClientCertificate {
+    fn root_hint_subjects(&self) -> &[DistinguishedName] {
+        &[]
+    }
+
+    fn client_auth_mandatory(&self) -> bool {
+        false
+    }
+
+    fn verify_client_cert(
+        &self,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _now: UnixTime,
+    ) -> Result<ClientCertVerified, rustls::Error> {
+        Ok(ClientCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &self.provider.signature_verification_algorithms,
+        )
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &self.provider.signature_verification_algorithms,
+        )
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.provider
+            .signature_verification_algorithms
+            .supported_schemes()
+    }
+}
 
 pub struct AirLinkListener {
     listener: TcpListener,
@@ -27,9 +92,9 @@ impl AirLinkListener {
         private_key: rustls::pki_types::PrivateKeyDer<'static>,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let provider = Arc::new(default_provider());
-        let config = ServerConfig::builder_with_provider(provider)
+        let config = ServerConfig::builder_with_provider(provider.clone())
             .with_protocol_versions(&[&TLS13])?
-            .with_no_client_auth()
+            .with_client_cert_verifier(Arc::new(AnyClientCertificate { provider }))
             .with_single_cert(certificate, private_key)?;
         let listener = TcpListener::bind(address).await?;
         Ok(Self {
@@ -50,6 +115,16 @@ impl AirLinkListener {
         let tls_stream = self.tls_acceptor.accept(stream).await?;
         Ok((tls_stream, peer))
     }
+}
+
+/// The certificate the headset presented in the TLS handshake, DER encoded.
+pub fn peer_certificate(stream: &TlsStream<TcpStream>) -> Option<Vec<u8>> {
+    stream
+        .get_ref()
+        .1
+        .peer_certificates()
+        .and_then(|certificates| certificates.first())
+        .map(|certificate| certificate.to_vec())
 }
 
 /// Reads DISCO frames and survives being dropped half way.
