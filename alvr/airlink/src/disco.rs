@@ -336,11 +336,27 @@ pub fn pack_awaiting_user_ack() -> [u8; 8] {
 }
 
 /// The user refused the pairing on the PC.
-pub fn pack_awaiting_user_nack() -> [u8; 8] {
-    let mut payload = [0; 8];
+pub fn pack_awaiting_user_nack() -> [u8; 16] {
+    // The Windows host sends its default refusal result (14) after a local
+    // refusal. A header-only Nack is malformed to the Quest's DISCO parser.
+    let mut payload = [0; 16];
     payload[..4].copy_from_slice(&1u32.to_le_bytes());
-    payload[4..].copy_from_slice(&MSG_AWAITING_USER_NACK.to_le_bytes());
+    payload[4..8].copy_from_slice(&MSG_AWAITING_USER_NACK.to_le_bytes());
+    payload[8..16].copy_from_slice(&14u64.to_le_bytes());
     payload
+}
+
+#[cfg(test)]
+mod pairing_refusal_tests {
+    use super::pack_awaiting_user_nack;
+
+    #[test]
+    fn sends_user_rejected_reason_in_full_nack() {
+        assert_eq!(
+            pack_awaiting_user_nack(),
+            [1, 0, 0, 0, 0x32, 0, 0, 0, 14, 0, 0, 0, 0, 0, 0, 0]
+        );
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
