@@ -88,6 +88,7 @@ pub fn headset_status() -> Option<AirLinkHeadsetStatus> {
 }
 const AUDIO_TOPIC: u32 = 3;
 const AUDIO_CONTROL_TOPIC: u32 = 4;
+const HAPTIC_TOPIC: u32 = 5;
 
 // What Meta Horizon Link 208 sends on the AudioControlChannel when the stream
 // channels exist and again later in the session (capture of 2026-10-12,
@@ -309,6 +310,12 @@ impl AirLinkHost {
         while self.audio.speaker_receiver.try_recv().is_ok() {}
         let mut speaker_open = true;
         let mut speaker_packets = 0u64;
+        // Vibrations from the game; each one is stopped when its time is up.
+        let mut haptic_receiver = crate::haptics::open_queue();
+        let _haptic_queue = HapticQueueGuard;
+        let mut haptics_open = true;
+        let mut haptic_stop_at: [Option<tokio::time::Instant>; 2] = [None; 2];
+        let mut haptic_packets = 0u64;
         let mut display_grid_s: Option<f64> = None;
         let mut display_lead_s = display_lead_ms() / 1000.0;
         let frame_report_trace = std::env::var_os("HOME").is_some_and(|home| {
@@ -335,10 +342,52 @@ impl AirLinkHost {
         loop {
             // What an accepted headset sent while it waited comes first.
             let held_message = if approved { held.pop_front() } else { None };
+            let next_haptic_stop = haptic_stop_at.iter().flatten().min().copied();
             let (topic, payload) = if let Some(message) = held_message {
                 message
             } else {
                 tokio::select! {
+                    haptic = haptic_receiver.recv(), if haptics_open => {
+                        match haptic {
+                            Some(haptic) if next_video_frame_id > 2 => {
+                                let hand = haptic.hand as usize;
+                                let packet = crate::haptics::pack_haptic_packet(
+                                    hand as u32,
+                                    haptic.amplitude,
+                                    monotonic_nanos() as f64 / 1e9,
+                                );
+                                self.send(stream, HAPTIC_TOPIC, &packet).await?;
+                                haptic_stop_at[hand] = (haptic.amplitude > 0.0).then(|| {
+                                    tokio::time::Instant::now()
+                                        + haptic.duration.max(std::time::Duration::from_millis(10))
+                                });
+                                haptic_packets += 1;
+                                if haptic_packets == 1 || haptic_packets % 1000 == 0 {
+                                    log::info!("Air Link haptics: {haptic_packets} vibrations sent");
+                                }
+                            }
+                            Some(_) => {}
+                            None => haptics_open = false,
+                        }
+                        continue;
+                    }
+                    _ = tokio::time::sleep_until(next_haptic_stop.unwrap_or_else(tokio::time::Instant::now)),
+                        if next_haptic_stop.is_some() =>
+                    {
+                        let now = tokio::time::Instant::now();
+                        for (hand, stop_at) in haptic_stop_at.iter_mut().enumerate() {
+                            if stop_at.is_some_and(|stop_at| stop_at <= now) {
+                                *stop_at = None;
+                                let packet = crate::haptics::pack_haptic_packet(
+                                    hand as u32,
+                                    0.0,
+                                    monotonic_nanos() as f64 / 1e9,
+                                );
+                                self.send(stream, HAPTIC_TOPIC, &packet).await?;
+                            }
+                        }
+                        continue;
+                    }
                     changed = pairing_answer.changed(), if pairing_pending => {
                         if changed.is_err() {
                             continue;
@@ -1258,6 +1307,15 @@ fn uncapped_head_prediction_ms() -> f64 {
         })
         .and_then(|text| text.trim().parse().ok())
         .unwrap_or(40.0)
+}
+
+/// Closes the vibration queue when its connection ends.
+struct HapticQueueGuard;
+
+impl Drop for HapticQueueGuard {
+    fn drop(&mut self) {
+        crate::haptics::close_queue();
+    }
 }
 
 fn monotonic_nanos() -> u64 {

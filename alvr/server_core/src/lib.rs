@@ -785,13 +785,29 @@ impl ServerCoreContext {
                 .and_then(|c| c.haptics.as_option().cloned())
         };
 
-        if let (Some(config), Some(sender)) = (
-            haptics_config,
-            &mut *self.connection_context.haptics_sender.lock(),
-        ) {
-            sender
-                .send_header(&haptics::map_haptics(&config, haptics))
-                .ok();
+        let Some(config) = haptics_config else {
+            return;
+        };
+        let haptics = haptics::map_haptics(&config, haptics);
+
+        // An Air Link headset takes them through its own host.
+        let airlink_hand = if haptics.device_id == *HAND_LEFT_ID {
+            Some(alvr_airlink::haptics::AirLinkHand::Left)
+        } else if haptics.device_id == *HAND_RIGHT_ID {
+            Some(alvr_airlink::haptics::AirLinkHand::Right)
+        } else {
+            None
+        };
+        if let Some(hand) = airlink_hand {
+            alvr_airlink::haptics::send_haptic(alvr_airlink::haptics::AirLinkHaptic {
+                hand,
+                amplitude: haptics.amplitude,
+                duration: haptics.duration,
+            });
+        }
+
+        if let Some(sender) = &mut *self.connection_context.haptics_sender.lock() {
+            sender.send_header(&haptics).ok();
         }
     }
 
