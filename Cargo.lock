@@ -204,6 +204,7 @@ dependencies = [
 name = "alvr_airlink"
 version = "21.0.0-dev14"
 dependencies = [
+ "base64",
  "libc",
  "log",
  "mdns-sd",

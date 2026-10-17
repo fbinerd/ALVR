@@ -1,10 +1,24 @@
 //! Meta DISCO/commlib framing and basic control-message encoders.
 
+use base64::{Engine, engine::general_purpose::STANDARD};
 use ring::digest::{SHA256, digest};
 
-/// The normal Meta pairing path hashes each TLS certificate followed by its
-/// certificate-exchange random, then XORs the four little-endian words of
-/// both hashes. The order of the two peers is immaterial.
+/// The normal Meta pairing path writes each X.509 certificate to a memory
+/// BIO as PEM, hashes that PEM followed by its certificate-exchange random,
+/// then XORs the four little-endian words of both hashes. The order of the
+/// two peers is immaterial. Keep the PEM encoding identical to OpenSSL's
+/// PEM_write_bio_X509, including the final newline.
+fn certificate_pem(der: &[u8]) -> Vec<u8> {
+    let encoded = STANDARD.encode(der);
+    let mut pem = b"-----BEGIN CERTIFICATE-----\n".to_vec();
+    for line in encoded.as_bytes().chunks(64) {
+        pem.extend_from_slice(line);
+        pem.push(b'\n');
+    }
+    pem.extend_from_slice(b"-----END CERTIFICATE-----\n");
+    pem
+}
+
 pub fn pairing_code(
     headset_cert: &[u8],
     headset_random: &[u8; 32],
@@ -12,8 +26,7 @@ pub fn pairing_code(
     host_random: &[u8; 32],
 ) -> u64 {
     fn hash_pair(certificate: &[u8], random: &[u8; 32]) -> ring::digest::Digest {
-        let mut input = Vec::with_capacity(certificate.len() + random.len());
-        input.extend_from_slice(certificate);
+        let mut input = certificate_pem(certificate);
         input.extend_from_slice(random);
         digest(&SHA256, &input)
     }
@@ -40,7 +53,7 @@ mod pairing_code_tests {
         let headset_random: [u8; 32] = std::array::from_fn(|index| index as u8);
         let host_cert: Vec<_> = (41u8..=72).collect();
         let host_random: [u8; 32] = std::array::from_fn(|index| index as u8 + 32);
-        let expected = 0x9810_a701_6a5f_2895;
+        let expected = 0x2fe9_d71a_8430_c914;
         assert_eq!(
             pairing_code(&headset_cert, &headset_random, &host_cert, &host_random),
             expected
@@ -49,7 +62,7 @@ mod pairing_code_tests {
             pairing_code(&host_cert, &host_random, &headset_cert, &headset_random),
             expected
         );
-        assert_eq!(expected % 1_000_000, 843_861);
+        assert_eq!(expected % 1_000_000, 107_092);
         assert_eq!(0x3ccc_846a_ba27_f7ec_u64 % 1_000_000, 231_340);
     }
 }
