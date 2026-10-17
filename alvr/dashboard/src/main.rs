@@ -84,7 +84,11 @@ fn main() {
         unsafe { env::set_var("WINIT_X11_SCALE_FACTOR", "1") };
     }
 
-    eframe::run_native(
+    // Default audio devices a crashed or killed dashboard left switched.
+    #[cfg(target_os = "linux")]
+    alvr_audio::linux::recover_default_devices(&dashboard::audio_recovery_file());
+
+    let result = eframe::run_native(
         &format!("ALVR Dashboard (streamer v{})", *ALVR_VERSION),
         NativeOptions {
             viewport: ViewportBuilder::default()
@@ -109,8 +113,13 @@ fn main() {
                 Ok(Box::new(Dashboard::new(creation_context, data_source)))
             })
         },
-    )
-    .unwrap();
+    );
+
+    // The defaults of before streaming come back when the dashboard closes
+    // during a stream.
+    #[cfg(target_os = "linux")]
+    alvr_audio::linux::streaming_restore_default_devices(&dashboard::audio_recovery_file());
+    result.unwrap();
 }
 
 #[cfg(target_arch = "wasm32")]

@@ -73,9 +73,102 @@ pub struct Dashboard {
     new_version_popup: Option<components::NewVersionPopup>,
     setup_wizard_open: bool,
     session: Option<SessionConfig>,
+    // Linux: the system's default audio devices while a headset streams.
+    #[cfg(target_os = "linux")]
+    streaming_audio_active: bool,
+    #[cfg(target_os = "linux")]
+    streaming_audio_since: std::time::Instant,
+    #[cfg(target_os = "linux")]
+    streaming_audio_applied: bool,
+    #[cfg(target_os = "linux")]
+    streaming_audio_tried_at: Option<std::time::Instant>,
+}
+
+/// Where the system's default audio devices of before streaming are kept
+/// while a headset streams, for a dashboard that did not get to put them
+/// back (see alvr_audio::linux::recover_default_devices).
+#[cfg(target_os = "linux")]
+pub fn audio_recovery_file() -> std::path::PathBuf {
+    crate::get_filesystem_layout()
+        .config_dir
+        .join("audio_defaults_before_streaming")
 }
 
 impl Dashboard {
+    /// Makes the output and input chosen for streaming the system's
+    /// defaults. Starts from the defaults of before streaming, so that a
+    /// choice changed meanwhile does not leave an earlier one behind. False
+    /// while a device is not there yet.
+    #[cfg(target_os = "linux")]
+    fn select_streaming_audio_devices(&self) -> bool {
+        let Some(session) = &self.session else {
+            return false;
+        };
+        let audio = session.to_settings().audio;
+        let speakers = audio
+            .game_audio
+            .as_option()
+            .map(|config| &config.streaming_device);
+        let microphone = audio
+            .microphone
+            .as_option()
+            .map(|config| &config.streaming_device);
+        alvr_audio::linux::streaming_select_default_devices(
+            speakers,
+            microphone,
+            &audio_recovery_file(),
+        )
+        .is_ok()
+    }
+
+    /// Follows whether a headset streams and keeps the system's default
+    /// audio devices on the user's choice meanwhile. Called once per frame:
+    /// ALVR's devices appear a moment after streaming starts. The dashboard
+    /// does it because the server runs in SteamVR's container, without pactl.
+    #[cfg(target_os = "linux")]
+    fn update_streaming_audio(&mut self) {
+        let streaming = self.session.as_ref().is_some_and(|session| {
+            session
+                .client_connections
+                .values()
+                .any(|client| client.connection_state == alvr_common::ConnectionState::Streaming)
+        });
+
+        let now = std::time::Instant::now();
+        let due = |every_s: u64| {
+            self.streaming_audio_tried_at
+                .is_none_or(|at| now.duration_since(at) >= std::time::Duration::from_secs(every_s))
+        };
+
+        if streaming != self.streaming_audio_active {
+            self.streaming_audio_applied = false;
+            self.streaming_audio_active = streaming;
+            self.streaming_audio_since = now;
+            self.streaming_audio_tried_at = None;
+            if !streaming {
+                alvr_audio::linux::streaming_restore_default_devices(&audio_recovery_file());
+            }
+            return;
+        }
+
+        if !streaming {
+            // What "System default" means, and what comes back afterwards.
+            // Not right after a stream: its devices take a moment to go.
+            if now.duration_since(self.streaming_audio_since).as_secs() >= 3 && due(3) {
+                self.streaming_audio_tried_at = Some(now);
+                alvr_audio::linux::remember_idle_default_devices();
+            }
+        } else if !self.streaming_audio_applied && due(1) {
+            self.streaming_audio_tried_at = Some(now);
+            // The session manager makes ALVR's devices the default when they
+            // appear, whatever the user chose, and they appear a moment after
+            // streaming starts: keep at it for the first seconds.
+            let done = self.select_streaming_audio_devices();
+            self.streaming_audio_applied =
+                done && now.duration_since(self.streaming_audio_since).as_secs() >= 8;
+        }
+    }
+
     pub fn new(creation_context: &eframe::CreationContext<'_>, data_sources: DataSources) -> Self {
         alvr_gui_common::theme::set_theme(&creation_context.egui_ctx);
 
@@ -109,6 +202,14 @@ impl Dashboard {
             setup_wizard: SetupWizard::new(),
             setup_wizard_open: false,
             session: None,
+            #[cfg(target_os = "linux")]
+            streaming_audio_active: false,
+            #[cfg(target_os = "linux")]
+            streaming_audio_since: std::time::Instant::now(),
+            #[cfg(target_os = "linux")]
+            streaming_audio_applied: false,
+            #[cfg(target_os = "linux")]
+            streaming_audio_tried_at: None,
             new_version_popup: None,
         }
     }
@@ -176,6 +277,11 @@ impl eframe::App for Dashboard {
                     }
 
                     self.session = Some(*session);
+                    // A choice changed while the headset streams applies now.
+                    #[cfg(target_os = "linux")]
+                    {
+                        self.streaming_audio_applied = false;
+                    }
                 }
                 EventType::ServerRequestsSelfRestart => self.restart_steamvr(&mut requests),
                 #[cfg(not(target_arch = "wasm32"))]
@@ -333,6 +439,9 @@ impl eframe::App for Dashboard {
                     })
                 });
         }
+
+        #[cfg(target_os = "linux")]
+        self.update_streaming_audio();
 
         let shutdown_alvr = || {
             self.data_sources.request(ServerRequest::ShutdownSteamvr);
