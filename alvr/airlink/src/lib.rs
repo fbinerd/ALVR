@@ -7,6 +7,7 @@ pub mod audio;
 pub mod disco;
 pub mod discovery;
 pub mod guardian;
+pub mod haptics;
 pub mod host;
 pub mod identity;
 pub mod mesh;
