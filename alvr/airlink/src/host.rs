@@ -1,20 +1,20 @@
 //! Runtime owner for the Meta Air Link DISCO listener.
 
+use crate::guardian::AirLinkGuardian;
+use crate::tracking::{AirLinkControllerInput, AirLinkPose, AirLinkTrackingSample};
+use crate::video::AirLinkVideoFrame;
 use crate::{
     disco::{
-        self, CertExchange, PairingRequest, TopicCreateRequest, CONTROL_TOPIC,
-        MSG_AWAITING_USER_REQ, MSG_CLOCK_SYNC_FINISH, MSG_CLOCK_SYNC_INIT, MSG_COMMITMENT,
-        MSG_CONNECT_REQ, MSG_DISCONNECT_REQ, MSG_EXCHANGING_CERT_REQ, MSG_PAIRING_REQ,
-        MSG_TOPIC_CREATE_REQ, PAIRING_TOPIC,
+        self, CONTROL_TOPIC, CertExchange, MSG_AWAITING_USER_REQ, MSG_CLOCK_SYNC_FINISH,
+        MSG_CLOCK_SYNC_INIT, MSG_COMMITMENT, MSG_CONNECT_REQ, MSG_DISCONNECT_REQ,
+        MSG_EXCHANGING_CERT_REQ, MSG_PAIRING_REQ, MSG_TOPIC_CREATE_REQ, PAIRING_TOPIC,
+        PairingRequest, TopicCreateRequest,
     },
     discovery::AirLinkAdvertiser,
     identity::HostIdentity,
     ripc,
     transport::{self, AirLinkListener},
 };
-use crate::guardian::AirLinkGuardian;
-use crate::video::AirLinkVideoFrame;
-use crate::tracking::{AirLinkControllerInput, AirLinkPose, AirLinkTrackingSample};
 use ring::rand::{SecureRandom, SystemRandom};
 use std::{
     io::{Error, ErrorKind},
@@ -93,8 +93,8 @@ const AUDIO_CONTROL_TOPIC: u32 = 4;
 // channels exist and again later in the session (capture of 2026-10-12,
 // 13:05, at 16.5 s and 122.6 s). Not decoded.
 const AUDIO_CONTROL_START: [u8; 39] = [
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x24, 0x02, 0, 0, 0, 0x01, 0, 0,
-    0, 0x06, 0, 0, 0, 0xb9, 0x92, 0x43, 0x6c, 0x02, 0x01,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x24, 0x02, 0, 0, 0, 0x01, 0, 0, 0,
+    0x06, 0, 0, 0, 0xb9, 0x92, 0x43, 0x6c, 0x02, 0x01,
 ];
 /// Side-by-side picture size announced in the GPU stream channel config.
 const STANDING_HEAD_HEIGHT: f32 = 1.6;
@@ -303,8 +303,7 @@ impl AirLinkHost {
         // The keyframe asked for when the stream becomes ready can be lost:
         // ALVR drops a frame whose head pose it does not have yet, and then
         // forwards nothing until it has seen a keyframe. Keep asking.
-        let mut keyframe_retry_timer =
-            tokio::time::interval(std::time::Duration::from_millis(500));
+        let mut keyframe_retry_timer = tokio::time::interval(std::time::Duration::from_millis(500));
         keyframe_retry_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         // Game audio recorded while nobody listened is old by now.
         while self.audio.speaker_receiver.try_recv().is_ok() {}
@@ -338,215 +337,220 @@ impl AirLinkHost {
             let held_message = if approved { held.pop_front() } else { None };
             let (topic, payload) = if let Some(message) = held_message {
                 message
-            } else { tokio::select! {
-                changed = pairing_answer.changed(), if pairing_pending => {
-                    if changed.is_err() {
-                        continue;
-                    }
-                    let accepted = pairing_answer.borrow_and_update().1;
-                    pairing_pending = false;
-                    *PAIRING_REQUEST.lock().unwrap() = None;
-                    if accepted {
-                        let headset_id = headset
-                            .as_ref()
-                            .map(|(id, _)| *id)
-                            .ok_or("cannot trust a headset without a DISCO endpoint id")?;
-                        let certificate = headset_certificate
-                            .ok_or("cannot trust a headset without a TLS client certificate")?;
-                        if pairing_code.is_none() {
-                            return Err("cannot trust a headset before its pairing code is available".into());
+            } else {
+                tokio::select! {
+                    changed = pairing_answer.changed(), if pairing_pending => {
+                        if changed.is_err() {
+                            continue;
                         }
-                        // Bind the self-declared endpoint id to the certificate
-                        // proven by TLS before acknowledging the pairing.
-                        self.identity
-                            .trust_headset_certificate(headset_id, certificate)?;
-                        log::info!("Air Link headset accepted by the user");
-                        approved = true;
-                        approved_at = Some(std::time::Instant::now());
-                        if std::mem::take(&mut pairing_awaits_ack) {
-                            self.send(stream, PAIRING_TOPIC, &disco::pack_awaiting_user_ack())
-                                .await?;
-                        }
-                        continue;
-                    }
-                    if pairing_awaits_ack {
-                        self.send(stream, PAIRING_TOPIC, &disco::pack_awaiting_user_nack())
-                            .await?;
-                    }
-                    return Err("the user refused the headset".into());
-                }
-                chunk = self.audio.speaker_receiver.recv(), if speaker_open => {
-                    match chunk {
-                        // The headset plays what it gets from the first video
-                        // frame on; before that the channel may not exist.
-                        Some(samples) if next_video_frame_id > 2 => {
-                            if speaker_packets == 0 {
-                                self.send(stream, AUDIO_CONTROL_TOPIC, &AUDIO_CONTROL_START)
+                        let accepted = pairing_answer.borrow_and_update().1;
+                        pairing_pending = false;
+                        *PAIRING_REQUEST.lock().unwrap() = None;
+                        if accepted {
+                            let headset_id = headset
+                                .as_ref()
+                                .map(|(id, _)| *id)
+                                .ok_or("cannot trust a headset without a DISCO endpoint id")?;
+                            let certificate = headset_certificate
+                                .ok_or("cannot trust a headset without a TLS client certificate")?;
+                            if pairing_code.is_none() {
+                                return Err("cannot trust a headset before its pairing code is available".into());
+                            }
+                            // Bind the self-declared endpoint id to the certificate
+                            // proven by TLS before acknowledging the pairing.
+                            self.identity
+                                .trust_headset_certificate(headset_id, certificate)?;
+                            log::info!("Air Link headset accepted by the user");
+                            approved = true;
+                            approved_at = Some(std::time::Instant::now());
+                            if std::mem::take(&mut pairing_awaits_ack) {
+                                self.send(stream, PAIRING_TOPIC, &disco::pack_awaiting_user_ack())
                                     .await?;
                             }
-                            let packet = crate::audio::pack_speaker_packet(
-                                &samples,
-                                monotonic_nanos(),
-                            );
-                            self.send(stream, AUDIO_TOPIC, &packet).await?;
-                            speaker_packets += 1;
-                            if speaker_packets == 1 || speaker_packets % 3000 == 0 {
-                                log::info!("Air Link game audio: {speaker_packets} packets sent");
-                            }
+                            continue;
                         }
-                        Some(_) => {}
-                        None => speaker_open = false,
+                        if pairing_awaits_ack {
+                            self.send(stream, PAIRING_TOPIC, &disco::pack_awaiting_user_nack())
+                                .await?;
+                        }
+                        return Err("the user refused the headset".into());
                     }
-                    continue;
-                }
-                _ = keyframe_retry_timer.tick(),
-                    if runtime_service.gpu_stream_ready && next_video_frame_id == 2 =>
-                {
-                    if last_keyframe_request.elapsed().as_millis() >= 500 {
-                        log::info!("Air Link video has not started: asking for a keyframe");
-                        (self.on_keyframe_needed)();
-                        last_keyframe_request = std::time::Instant::now();
-                    }
-                    continue;
-                }
-                _ = idle_pose_timer.tick(),
-                    if runtime_service.gpu_stream_ready && !tracking_received =>
-                {
-                    (self.on_tracking_update)(IDLE_TRACKING_SAMPLE);
-                    continue;
-                }
-                received = self.video_receiver.recv() => {
-                    match received {
-                        Ok(mut frame) if runtime_service.gpu_stream_ready => {
-                            frame.head_pose[5] += reported_floor_y.or(floor_y).unwrap_or(0.0);
-                            if !runtime_service.screen_is_on_sent {
-                                if let Some(route) = runtime_service.oaf_client_route {
-                                    let event = protocol_result(ripc::pack_oaf_broadcast_event(
-                                        route,
-                                        "SCREEN_IS_ON_UPDATE",
-                                        "\t\t\"on\" : true",
-                                        unix_timestamp_ms(),
-                                    ))?;
-                                    self.send(stream, ripc::CLIENT_TRAFFIC_TOPIC, &event).await?;
-                                    runtime_service.screen_is_on_sent = true;
-                                    log::info!("sent Air Link SCREEN_IS_ON_UPDATE");
+                    chunk = self.audio.speaker_receiver.recv(), if speaker_open => {
+                        match chunk {
+                            // The headset plays what it gets from the first video
+                            // frame on; before that the channel may not exist.
+                            Some(samples) if next_video_frame_id > 2 => {
+                                if speaker_packets == 0 {
+                                    self.send(stream, AUDIO_CONTROL_TOPIC, &AUDIO_CONTROL_START)
+                                        .await?;
                                 }
-                            }
-                            // The headset's decoder has to start on a keyframe.
-                            if next_video_frame_id == 2 && !frame.is_idr {
-                                skipped_before_keyframe += 1;
-                                if last_keyframe_request.elapsed().as_millis() > 500 {
-                                    log::info!(
-                                        "Air Link video waiting for a keyframe: \
-                                         {skipped_before_keyframe} frames skipped"
-                                    );
-                                    (self.on_keyframe_needed)();
-                                    last_keyframe_request = std::time::Instant::now();
-                                }
-                                continue;
-                            }
-                            if next_video_frame_id == 2 {
-                                log::info!(
-                                    "Air Link video starts: keyframe of {} bytes after \
-                                     {skipped_before_keyframe} skipped frames",
-                                    frame.nal.len()
+                                let packet = crate::audio::pack_speaker_packet(
+                                    &samples,
+                                    monotonic_nanos(),
                                 );
+                                self.send(stream, AUDIO_TOPIC, &packet).await?;
+                                speaker_packets += 1;
+                                if speaker_packets == 1 || speaker_packets % 3000 == 0 {
+                                    log::info!("Air Link game audio: {speaker_packets} packets sent");
+                                }
                             }
-                            if !runtime_service.mesh_sent {
-                                // Without the rectify mesh the headset decodes every
-                                // frame and keeps showing its loading environment.
-                                let mesh = crate::mesh::pack(crate::video::stream_size());
-                                self.send(stream, MESH_TOPIC, &mesh).await?;
-                                runtime_service.mesh_sent = true;
-                                log::info!("sent Air Link rectify mesh: {} bytes", mesh.len());
-                            }
-                            // A headset the user took off the list goes, once
-                            // the list has had time to take in a new one.
-                            if next_video_frame_id % 72 == 0
-                                && approved_at.is_none_or(|at| at.elapsed().as_secs() >= 5)
-                                && headset.as_ref().is_some_and(|(id, _)| !self.headset_is_known(*id, headset_certificate))
-                            {
-                                return Err("the headset was removed from the list".into());
-                            }
-                            // The trial values can be changed while streaming.
-                            if next_video_frame_id % 36 == 0 {
-                                head_predictor.set_lead_ms(head_prediction_ms());
-                                display_lead_s = display_lead_ms() / 1000.0;
-                            }
-                            let host_now_ns = monotonic_nanos();
-                            // One refresh period after the previous frame's
-                            // slot; whole periods are skipped or repeated
-                            // when the PC missed frames or drifted away.
-                            let headset_now_s =
-                                (host_now_ns as i128 + i128::from(headset_offset_ns)) as f64 / 1e9;
-                            let period_s = crate::video::frame_period_s();
-                            let display_base_s = match display_grid_s {
-                                Some(previous) => {
-                                    let next = previous + period_s;
-                                    // Positive: the frame left later than
-                                    // its slot.
-                                    let error = headset_now_s - next;
-                                    if error.abs() > 4.0 * period_s {
-                                        // A stall or a clock step: start over.
-                                        headset_now_s
-                                    } else if error > 0.75 * period_s {
-                                        // The PC missed frames: their slots
-                                        // pass unused.
-                                        next + (error / period_s).round() * period_s
-                                    } else {
-                                        // Follow the PC's clock slowly, so
-                                        // send jitter does not reach the
-                                        // display times.
-                                        next + 0.01 * error
+                            Some(_) => {}
+                            None => speaker_open = false,
+                        }
+                        continue;
+                    }
+                    _ = keyframe_retry_timer.tick(),
+                        if runtime_service.gpu_stream_ready && next_video_frame_id == 2 =>
+                    {
+                        if last_keyframe_request.elapsed().as_millis() >= 500 {
+                            log::info!("Air Link video has not started: asking for a keyframe");
+                            (self.on_keyframe_needed)();
+                            last_keyframe_request = std::time::Instant::now();
+                        }
+                        continue;
+                    }
+                    _ = idle_pose_timer.tick(),
+                        if runtime_service.gpu_stream_ready && !tracking_received =>
+                    {
+                        (self.on_tracking_update)(IDLE_TRACKING_SAMPLE);
+                        continue;
+                    }
+                    received = self.video_receiver.recv() => {
+                        match received {
+                            Ok(mut frame) if runtime_service.gpu_stream_ready => {
+                                frame.head_pose[5] += reported_floor_y.or(floor_y).unwrap_or(0.0);
+                                if !runtime_service.screen_is_on_sent {
+                                    if let Some(route) = runtime_service.oaf_client_route {
+                                        let event = protocol_result(ripc::pack_oaf_broadcast_event(
+                                            route,
+                                            "SCREEN_IS_ON_UPDATE",
+                                            "\t\t\"on\" : true",
+                                            unix_timestamp_ms(),
+                                        ))?;
+                                        self.send(stream, ripc::CLIENT_TRAFFIC_TOPIC, &event).await?;
+                                        runtime_service.screen_is_on_sent = true;
+                                        log::info!("sent Air Link SCREEN_IS_ON_UPDATE");
                                     }
                                 }
-                                None => headset_now_s,
-                            };
-                            display_grid_s = Some(display_base_s);
-                            let packet = frame.pack(
-                                next_video_frame_id,
-                                host_now_ns,
-                                headset_offset_ns,
-                                display_base_s + display_lead_s,
-                            );
-                            self.send(stream, ripc::GPU_BUFFER_STREAM_TOPIC, &packet).await?;
-                            if next_video_frame_id >= 110 && !runtime_service.openxr_runtime_sent {
-                                if let Some(route) = runtime_service.oaf_client_route {
-                                    let event = protocol_result(ripc::pack_oaf_broadcast_event(
-                                        route,
-                                        "OPENXR_RUNTIME_UPDATE",
-                                        "\t\t\"isOculus\" : true,\n\t\t\"runtimeName\" : \"Oculus OpenXR\"",
-                                        unix_timestamp_ms(),
-                                    ))?;
-                                    self.send(stream, ripc::CLIENT_TRAFFIC_TOPIC, &event).await?;
-                                    runtime_service.openxr_runtime_sent = true;
-                                    log::info!("sent Air Link OPENXR_RUNTIME_UPDATE");
+                                // The headset's decoder has to start on a keyframe.
+                                if next_video_frame_id == 2 && !frame.is_idr {
+                                    skipped_before_keyframe += 1;
+                                    if last_keyframe_request.elapsed().as_millis() > 500 {
+                                        log::info!(
+                                            "Air Link video waiting for a keyframe: \
+                                             {skipped_before_keyframe} frames skipped"
+                                        );
+                                        (self.on_keyframe_needed)();
+                                        last_keyframe_request = std::time::Instant::now();
+                                    }
+                                    continue;
                                 }
+                                if next_video_frame_id == 2 {
+                                    log::info!(
+                                        "Air Link video starts: keyframe of {} bytes after \
+                                         {skipped_before_keyframe} skipped frames",
+                                        frame.nal.len()
+                                    );
+                                }
+                                if !runtime_service.mesh_sent {
+                                    // Without the rectify mesh the headset decodes every
+                                    // frame and keeps showing its loading environment.
+                                    let mesh = crate::mesh::pack(crate::video::stream_size());
+                                    self.send(stream, MESH_TOPIC, &mesh).await?;
+                                    runtime_service.mesh_sent = true;
+                                    log::info!("sent Air Link rectify mesh: {} bytes", mesh.len());
+                                }
+                                // A headset the user took off the list goes, once
+                                // the list has had time to take in a new one.
+                                if next_video_frame_id % 72 == 0
+                                    && approved_at.is_none_or(|at| at.elapsed().as_secs() >= 5)
+                                    && headset.as_ref().is_some_and(|(id, _)| !self.headset_is_known(*id, headset_certificate))
+                                {
+                                    return Err("the headset was removed from the list".into());
+                                }
+                                // The trial values can be changed while streaming.
+                                if next_video_frame_id % 36 == 0 {
+                                    head_predictor.set_lead_ms(head_prediction_ms());
+                                    display_lead_s = display_lead_ms() / 1000.0;
+                                }
+                                let host_now_ns = monotonic_nanos();
+                                // One refresh period after the previous frame's
+                                // slot; whole periods are skipped or repeated
+                                // when the PC missed frames or drifted away.
+                                let headset_now_s =
+                                    (host_now_ns as i128 + i128::from(headset_offset_ns)) as f64 / 1e9;
+                                let period_s = crate::video::frame_period_s();
+                                let display_base_s = match display_grid_s {
+                                    Some(previous) => {
+                                        let next = previous + period_s;
+                                        // Positive: the frame left later than
+                                        // its slot.
+                                        let error = headset_now_s - next;
+                                        if error.abs() > 4.0 * period_s {
+                                            // A stall or a clock step: start over.
+                                            headset_now_s
+                                        } else if error > 0.75 * period_s {
+                                            // The PC missed frames: their slots
+                                            // pass unused.
+                                            next + (error / period_s).round() * period_s
+                                        } else {
+                                            // Follow the PC's clock slowly, so
+                                            // send jitter does not reach the
+                                            // display times.
+                                            next + 0.01 * error
+                                        }
+                                    }
+                                    None => headset_now_s,
+                                };
+                                display_grid_s = Some(display_base_s);
+                                let packet = frame.pack(
+                                    next_video_frame_id,
+                                    host_now_ns,
+                                    headset_offset_ns,
+                                    display_base_s + display_lead_s,
+                                );
+                                self.send(stream, ripc::GPU_BUFFER_STREAM_TOPIC, &packet).await?;
+                                if next_video_frame_id >= 110 && !runtime_service.openxr_runtime_sent {
+                                    if let Some(route) = runtime_service.oaf_client_route {
+                                        let event = protocol_result(ripc::pack_oaf_broadcast_event(
+                                            route,
+                                            "OPENXR_RUNTIME_UPDATE",
+                                            "\t\t\"isOculus\" : true,\n\t\t\"runtimeName\" : \"Oculus OpenXR\"",
+                                            unix_timestamp_ms(),
+                                        ))?;
+                                        self.send(stream, ripc::CLIENT_TRAFFIC_TOPIC, &event).await?;
+                                        runtime_service.openxr_runtime_sent = true;
+                                        log::info!("sent Air Link OPENXR_RUNTIME_UPDATE");
+                                    }
+                                }
+                                // Windows numbers frames 2, 4, 5, ...; frame 3 never appears.
+                                next_video_frame_id = if next_video_frame_id == 2 {
+                                    4
+                                } else {
+                                    next_video_frame_id.saturating_add(1)
+                                };
                             }
-                            // Windows numbers frames 2, 4, 5, ...; frame 3 never appears.
-                            next_video_frame_id = if next_video_frame_id == 2 {
-                                4
-                            } else {
-                                next_video_frame_id.saturating_add(1)
-                            };
+                            Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                            Err(broadcast::error::RecvError::Closed) => {
+                                return Err(Error::new(
+                                    ErrorKind::BrokenPipe,
+                                    "ALVR video source closed",
+                                )
+                                .into());
+                            }
                         }
-                        Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
-                        Err(broadcast::error::RecvError::Closed) => {
-                            return Err(Error::new(
-                                ErrorKind::BrokenPipe,
-                                "ALVR video source closed",
-                            )
-                            .into());
-                        }
+                        continue;
                     }
-                    continue;
+                    incoming = frame_reader.read_frame(stream) => incoming?,
                 }
-                incoming = frame_reader.read_frame(stream) => incoming?,
-            } };
+            };
             // Only connecting and pairing go on for a headset the user has
             // not accepted: the rest waits for the answer in the dashboard.
             if !approved && topic != CONTROL_TOPIC && topic != PAIRING_TOPIC {
-                if headset.as_ref().is_some_and(|(id, _)| self.headset_is_known(*id, headset_certificate)) {
+                if headset
+                    .as_ref()
+                    .is_some_and(|(id, _)| self.headset_is_known(*id, headset_certificate))
+                {
                     approved = true;
                 } else {
                     if !pairing_pending
@@ -560,7 +564,9 @@ impl AirLinkHost {
                             headset_name: name.clone(),
                             pairing_code,
                         });
-                        log::info!("Air Link headset {name} at {address} is not known: waiting for the user");
+                        log::info!(
+                            "Air Link headset {name} at {address} is not known: waiting for the user"
+                        );
                     }
                     // A headset left waiting gives up and connects again.
                     if held.len() < 256 {
@@ -583,15 +589,17 @@ impl AirLinkHost {
                     MSG_CONNECT_REQ => {
                         let request = protocol_result(disco::ConnectRequest::unpack(&payload))?;
                         quest_endpoint_uuid = Some(request.endpoint_uuid);
-                        approved = self.headset_is_known(request.endpoint_uuid, headset_certificate);
+                        approved =
+                            self.headset_is_known(request.endpoint_uuid, headset_certificate);
                         headset = Some((request.endpoint_uuid, request.endpoint_name.clone()));
-                        let version = disco::negotiate_protocol(
-                            &request,
-                            disco::PROTOCOL_VERSION_RANGE,
-                        )
-                        .ok_or_else(|| {
-                            Error::new(ErrorKind::InvalidData, "no common DISCO protocol version")
-                        })?;
+                        let version =
+                            disco::negotiate_protocol(&request, disco::PROTOCOL_VERSION_RANGE)
+                                .ok_or_else(|| {
+                                    Error::new(
+                                        ErrorKind::InvalidData,
+                                        "no common DISCO protocol version",
+                                    )
+                                })?;
                         let response = protocol_result(disco::pack_connect_ack(
                             version,
                             parse_uuid_bytes(self.identity.endpoint_uuid())?,
@@ -606,16 +614,14 @@ impl AirLinkHost {
                         let receive_time = monotonic_nanos();
                         headset_offset_ns = client_time as i64 - receive_time as i64;
                         let send_time = monotonic_nanos();
-                        let response = disco::pack_clock_sync_reply(
-                            client_time,
-                            receive_time,
-                            send_time,
-                        );
+                        let response =
+                            disco::pack_clock_sync_reply(client_time, receive_time, send_time);
                         self.send(stream, topic, &response).await?;
                     }
                     MSG_CLOCK_SYNC_FINISH => {}
                     MSG_DISCONNECT_REQ => {
-                        self.send(stream, topic, &disco::pack_disconnect_ack()).await?;
+                        self.send(stream, topic, &disco::pack_disconnect_ack())
+                            .await?;
                         return Ok(());
                     }
                     MSG_TOPIC_CREATE_REQ => {
@@ -643,18 +649,22 @@ impl AirLinkHost {
                                 &response.random,
                             );
                             pairing_code = Some((code % 1_000_000) as u32);
-                            log::info!("Air Link pairing code {:06} (0x{code:016x})", code % 1_000_000);
+                            log::info!(
+                                "Air Link pairing code {:06} (0x{code:016x})",
+                                code % 1_000_000
+                            );
                             // A request may already be visible from the earlier
                             // connection message. Publish the computed code too.
                             if let Some(request) = PAIRING_REQUEST.lock().unwrap().as_mut() {
                                 request.pairing_code = pairing_code;
                             }
                         } else {
-                            log::warn!("Air Link headset sent no TLS client certificate; cannot show a pairing code");
+                            log::warn!(
+                                "Air Link headset sent no TLS client certificate; cannot show a pairing code"
+                            );
                         }
-                        let response = protocol_result(
-                            response.pack(disco::MSG_EXCHANGING_CERT_ACK),
-                        )?;
+                        let response =
+                            protocol_result(response.pack(disco::MSG_EXCHANGING_CERT_ACK))?;
                         self.send(stream, topic, &response).await?;
                     }
                     MSG_AWAITING_USER_REQ => {
@@ -663,7 +673,8 @@ impl AirLinkHost {
                         // A headset the user already accepted pairs again
                         // without a question (it forgot this host).
                         if approved {
-                            self.send(stream, topic, &disco::pack_awaiting_user_ack()).await?;
+                            self.send(stream, topic, &disco::pack_awaiting_user_ack())
+                                .await?;
                             continue;
                         }
                         pairing_awaits_ack = true;
@@ -678,7 +689,9 @@ impl AirLinkHost {
                                 headset_name: name.clone(),
                                 pairing_code,
                             });
-                            log::info!("Air Link pairing asked by {name} at {address}: waiting for the user");
+                            log::info!(
+                                "Air Link pairing asked by {name} at {address}: waiting for the user"
+                            );
                         }
                     }
                     MSG_COMMITMENT => {
@@ -746,9 +759,9 @@ impl AirLinkHost {
                             })
                         });
                         sample.head.position_xyz[1] -= floor;
-                        if floor_logged_at.is_none_or(|at: std::time::Instant| {
-                            at.elapsed().as_secs() >= 30
-                        }) {
+                        if floor_logged_at
+                            .is_none_or(|at: std::time::Instant| at.elapsed().as_secs() >= 30)
+                        {
                             floor_logged_at = Some(std::time::Instant::now());
                             log::info!(
                                 "Air Link head {:.2} m above the floor (floor y={floor:.3}, {})",
@@ -775,8 +788,7 @@ impl AirLinkHost {
                         (self.on_controller_input)(input);
                     }
                 }
-            } else if (topic == ripc::SERVER_TRAFFIC_TOPIC
-                || topic == ripc::CLIENT_TRAFFIC_TOPIC)
+            } else if (topic == ripc::SERVER_TRAFFIC_TOPIC || topic == ripc::CLIENT_TRAFFIC_TOPIC)
                 && ripc::is_handshake(&payload)
             {
                 let handshake = protocol_result(ripc::HandshakeMessage::unpack(&payload))?;
@@ -795,7 +807,8 @@ impl AirLinkHost {
                             payload: handshake.payload,
                         };
                         let response = protocol_result(reverse_client_capabilities.pack())?;
-                        self.send(stream, ripc::SERVER_TRAFFIC_TOPIC, &response).await?;
+                        self.send(stream, ripc::SERVER_TRAFFIC_TOPIC, &response)
+                            .await?;
                     }
                     (ripc::SERVER_TRAFFIC_TOPIC, ripc::PASS_SERVER_CAPABILITIES) => {
                         let agreed_capabilities = ripc::HandshakeMessage {
@@ -804,16 +817,15 @@ impl AirLinkHost {
                             payload: handshake.payload,
                         };
                         let response = protocol_result(agreed_capabilities.pack())?;
-                        self.send(stream, ripc::SERVER_TRAFFIC_TOPIC, &response).await?;
+                        self.send(stream, ripc::SERVER_TRAFFIC_TOPIC, &response)
+                            .await?;
                     }
                     _ => log::debug!(
                         "Unhandled Air Link RIPC handshake topic={topic} pass={}",
                         handshake.handshake_pass
                     ),
                 }
-            } else if topic == ripc::SERVER_TRAFFIC_TOPIC
-                || topic == ripc::CLIENT_TRAFFIC_TOPIC
-            {
+            } else if topic == ripc::SERVER_TRAFFIC_TOPIC || topic == ripc::CLIENT_TRAFFIC_TOPIC {
                 if let Some(response) = ripc::gpu_buffer_handshake_ack(&payload) {
                     if !gpu_buffer_handshake_ack_sent {
                         if !gpu_initial_frame_sent {
@@ -828,9 +840,9 @@ impl AirLinkHost {
                         self.send(stream, topic, &response).await?;
                         gpu_buffer_handshake_ack_sent = true;
                         runtime_service.buffer_pool_acked = true;
-                        if let Some(pending) = runtime_service.pending_gpu_connect_response.take()
-                        {
-                            self.send(stream, ripc::CLIENT_TRAFFIC_TOPIC, &pending).await?;
+                        if let Some(pending) = runtime_service.pending_gpu_connect_response.take() {
+                            self.send(stream, ripc::CLIENT_TRAFFIC_TOPIC, &pending)
+                                .await?;
                             runtime_service.gpu_stream_ready = true;
                             log::info!("Air Link GPU stream ready");
                             // Frames encoded so far were dropped; start on a
@@ -840,8 +852,13 @@ impl AirLinkHost {
                     }
                 } else if let Ok(message) = ripc::RuntimeIpcMessage::unpack(&payload) {
                     self.handle_runtime_ipc(
-                        stream, topic, message, &mut runtime_service, quest_endpoint_uuid,
-                    ).await?;
+                        stream,
+                        topic,
+                        message,
+                        &mut runtime_service,
+                        quest_endpoint_uuid,
+                    )
+                    .await?;
                 }
             }
         }
@@ -868,9 +885,12 @@ impl AirLinkHost {
                     Error::new(ErrorKind::InvalidData, "Quest endpoint UUID is unavailable")
                 })?;
                 let request = protocol_result(ripc::pack_runtime_service_reverse_connect(
-                    &endpoint_uuid, client_id, 2,
+                    &endpoint_uuid,
+                    client_id,
+                    2,
                 ))?;
-                self.send(stream, ripc::SERVER_TRAFFIC_TOPIC, &request).await?;
+                self.send(stream, ripc::SERVER_TRAFFIC_TOPIC, &request)
+                    .await?;
             } else if topic == ripc::SERVER_TRAFFIC_TOPIC
                 && header.message_type == ripc::MESSAGE_TYPE_CONNECT_TO_REMOTE_SERVER
                 && header.request_id == 2
@@ -880,9 +900,13 @@ impl AirLinkHost {
                 let client_id = runtime_service.reverse_client_id.unwrap();
                 let method = ripc::RUNTIME_SERVICE_BOOTSTRAP_METHODS[0];
                 let request = protocol_result(ripc::pack_runtime_service_bootstrap(
-                    client_id, 3, method, &[],
+                    client_id,
+                    3,
+                    method,
+                    &[],
                 ))?;
-                self.send(stream, ripc::SERVER_TRAFFIC_TOPIC, &request).await?;
+                self.send(stream, ripc::SERVER_TRAFFIC_TOPIC, &request)
+                    .await?;
                 runtime_service.bootstrap_index = 1;
             } else if topic == ripc::SERVER_TRAFFIC_TOPIC
                 && header.message_type == ripc::MESSAGE_TYPE_CLIENT_EVENT
@@ -904,11 +928,14 @@ impl AirLinkHost {
                 let next_method = ripc::RUNTIME_SERVICE_BOOTSTRAP_METHODS[index];
                 if index == 6 {
                     if let Some(route) = runtime_service.streaming_route {
-                        let event = protocol_result(ripc::pack_gpu_stream_channel_config_event(route))?;
-                        self.send(stream, ripc::CLIENT_TRAFFIC_TOPIC, &event).await?;
+                        let event =
+                            protocol_result(ripc::pack_gpu_stream_channel_config_event(route))?;
+                        self.send(stream, ripc::CLIENT_TRAFFIC_TOPIC, &event)
+                            .await?;
                         let level = crate::video::sharpening_level();
                         let event = protocol_result(ripc::pack_sharpening_event(route, level))?;
-                        self.send(stream, ripc::CLIENT_TRAFFIC_TOPIC, &event).await?;
+                        self.send(stream, ripc::CLIENT_TRAFFIC_TOPIC, &event)
+                            .await?;
                         log::info!("sent Air Link sharpening level {level}");
                     } else {
                         log::warn!("Air Link GPU config event skipped: no streaming invite route");
@@ -918,9 +945,14 @@ impl AirLinkHost {
                     header.client_id,
                     header.request_id + 1,
                     next_method,
-                    if index == 6 { &ripc::RUNTIME_SERVICE_GPU_PREPARE_REQUEST } else { &[] },
+                    if index == 6 {
+                        &ripc::RUNTIME_SERVICE_GPU_PREPARE_REQUEST
+                    } else {
+                        &[]
+                    },
                 ))?;
-                self.send(stream, ripc::SERVER_TRAFFIC_TOPIC, &request).await?;
+                self.send(stream, ripc::SERVER_TRAFFIC_TOPIC, &request)
+                    .await?;
                 runtime_service.bootstrap_index += 1;
             }
             return Ok(());
@@ -932,7 +964,10 @@ impl AirLinkHost {
         match header.message_type {
             ripc::MESSAGE_TYPE_CONNECT_TO_REMOTE_SERVER => {
                 if topic == ripc::CLIENT_TRAFFIC_TOPIC
-                    && message.payload.windows(b"OafRipcServer".len()).any(|w| w == b"OafRipcServer")
+                    && message
+                        .payload
+                        .windows(b"OafRipcServer".len())
+                        .any(|w| w == b"OafRipcServer")
                 {
                     runtime_service.oaf_client_route = Some(header);
                 }
@@ -947,13 +982,15 @@ impl AirLinkHost {
                         && !runtime_service.reverse_connect_started
                     {
                         self.start_reverse_runtime_service(
-                            stream, runtime_service, quest_endpoint_uuid,
-                        ).await?;
+                            stream,
+                            runtime_service,
+                            quest_endpoint_uuid,
+                        )
+                        .await?;
                     }
                 } else {
-                    let response = protocol_result(
-                        ripc::pack_connect_to_remote_server_response(header),
-                    )?;
+                    let response =
+                        protocol_result(ripc::pack_connect_to_remote_server_response(header))?;
                     self.send(stream, topic, &response).await?;
                 }
             }
@@ -962,13 +999,17 @@ impl AirLinkHost {
                     if rpc.method_hash == ripc::RPC_METHOD_SESSION_INVITE_OK_ACK
                         || rpc.method_hash == ripc::RPC_METHOD_SESSION_INVITE_OK_ACK_LEGACY
                     {
-                        self.respond_session_invite_ok(stream, topic, header, rpc).await?;
+                        self.respond_session_invite_ok(stream, topic, header, rpc)
+                            .await?;
                         if runtime_service.streaming_invite_accepted
                             && !runtime_service.reverse_connect_started
                         {
                             self.start_reverse_runtime_service(
-                                stream, runtime_service, quest_endpoint_uuid,
-                            ).await?;
+                                stream,
+                                runtime_service,
+                                quest_endpoint_uuid,
+                            )
+                            .await?;
                         }
                         return Ok(());
                     }
@@ -976,7 +1017,9 @@ impl AirLinkHost {
                         || rpc.method_hash == 0xc1ae_5831
                     {
                         let response = protocol_result(ripc::pack_runtime_rpc_success_response(
-                            header, rpc, ripc::GPU_STREAM_CHANNEL_DID_CONNECT_RESPONSE,
+                            header,
+                            rpc,
+                            ripc::GPU_STREAM_CHANNEL_DID_CONNECT_RESPONSE,
                         ))?;
                         if runtime_service.buffer_pool_acked {
                             self.send(stream, topic, &response).await?;
@@ -1056,7 +1099,8 @@ impl AirLinkHost {
             ripc::MESSAGE_TYPE_CHANNEL_CREATE => {
                 let channel =
                     protocol_result(ripc::ChannelCreateRequest::unpack(&message.payload))?;
-                let response = protocol_result(ripc::pack_channel_create_response(header, &channel))?;
+                let response =
+                    protocol_result(ripc::pack_channel_create_response(header, &channel))?;
                 self.send(stream, topic, &response).await?;
             }
             _ => log::debug!(
@@ -1093,17 +1137,25 @@ impl AirLinkHost {
         })?;
         let random = SystemRandom::new();
         let mut create_bytes = [0; 4];
-        random.fill(&mut create_bytes).map_err(|_| Error::other("system random generator failed"))?;
+        random
+            .fill(&mut create_bytes)
+            .map_err(|_| Error::other("system random generator failed"))?;
         let create_client_id = u32::from_le_bytes(create_bytes).max(1);
         let mut reverse_bytes = [0; 4];
-        random.fill(&mut reverse_bytes).map_err(|_| Error::other("system random generator failed"))?;
+        random
+            .fill(&mut reverse_bytes)
+            .map_err(|_| Error::other("system random generator failed"))?;
         let reverse_client_id = u32::from_le_bytes(reverse_bytes).max(1);
         let create = protocol_result(ripc::pack_runtime_service_client_create(create_client_id))?;
-        self.send(stream, ripc::SERVER_TRAFFIC_TOPIC, &create).await?;
+        self.send(stream, ripc::SERVER_TRAFFIC_TOPIC, &create)
+            .await?;
         let connect = protocol_result(ripc::pack_runtime_service_reverse_connect(
-            &endpoint_uuid, 0xf000_000c, 1,
+            &endpoint_uuid,
+            0xf000_000c,
+            1,
         ))?;
-        self.send(stream, ripc::SERVER_TRAFFIC_TOPIC, &connect).await?;
+        self.send(stream, ripc::SERVER_TRAFFIC_TOPIC, &connect)
+            .await?;
         state.reverse_client_id = Some(reverse_client_id);
         state.reverse_connect_started = true;
         log::info!("Started native Air Link RuntimeServiceServer reverse connection");
@@ -1129,15 +1181,13 @@ impl AirLinkHost {
 /// One line per RuntimeIPC frame while tracing is enabled: enough to
 /// follow a session next to the headset's log and to the reference host.
 fn trace_frame(direction: &str, topic: u32, payload: &[u8]) {
-    static ENABLED: std::sync::LazyLock<bool> =
-        std::sync::LazyLock::new(|| {
-            // SteamVR starts the driver, so a marker file is easier than an
-            // environment variable: touch ~/.config/alvr/airlink_trace.
-            std::env::var_os("ALVR_AIRLINK_TRACE").is_some()
-                || std::env::var_os("HOME").is_some_and(|home| {
-                    Path::new(&home).join(".config/alvr/airlink_trace").exists()
-                })
-        });
+    static ENABLED: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
+        // SteamVR starts the driver, so a marker file is easier than an
+        // environment variable: touch ~/.config/alvr/airlink_trace.
+        std::env::var_os("ALVR_AIRLINK_TRACE").is_some()
+            || std::env::var_os("HOME")
+                .is_some_and(|home| Path::new(&home).join(".config/alvr/airlink_trace").exists())
+    });
     if !*ENABLED {
         return;
     }
@@ -1147,7 +1197,10 @@ fn trace_frame(direction: &str, topic: u32, payload: &[u8]) {
         .take(40)
         .map(|byte| format!("{byte:02x}"))
         .collect();
-    log::info!("airlink {direction} topic={topic} size={} {head}", payload.len());
+    log::info!(
+        "airlink {direction} topic={topic} size={} {head}",
+        payload.len()
+    );
 }
 
 fn parse_uuid_bytes(value: &str) -> Result<[u8; 16], Box<dyn std::error::Error + Send + Sync>> {

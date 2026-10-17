@@ -27,9 +27,8 @@ impl AirLinkGuardian {
         if payload.len() < 8 || payload[..3] != RESPONSE_PREFIX {
             return false;
         }
-        let float = |offset: usize| {
-            f32::from_le_bytes(payload[offset..offset + 4].try_into().unwrap())
-        };
+        let float =
+            |offset: usize| f32::from_le_bytes(payload[offset..offset + 4].try_into().unwrap());
         let before = self.clone();
         match u32::from_le_bytes(payload[3..7].try_into().unwrap()) {
             RESPONSE_TYPE_BOUNDS if payload.len() >= BOUNDS_OFFSET + 8 => {
@@ -96,11 +95,16 @@ mod tests {
         let payload = response(
             RESPONSE_TYPE_POLYGON,
             POLYGON_POINTS_OFFSET,
-            &[-1.0, -1.5, -2.0, 1.0, -1.5, -2.0, 1.0, -1.5, 2.0, -1.0, -1.5, 2.0],
+            &[
+                -1.0, -1.5, -2.0, 1.0, -1.5, -2.0, 1.0, -1.5, 2.0, -1.0, -1.5, 2.0,
+            ],
         );
         assert!(guardian.update(&payload));
         assert_eq!(guardian.floor_y, Some(-1.5));
-        assert_eq!(guardian.perimeter, [[-1.0, -2.0], [1.0, -2.0], [1.0, 2.0], [-1.0, 2.0]]);
+        assert_eq!(
+            guardian.perimeter,
+            [[-1.0, -2.0], [1.0, -2.0], [1.0, 2.0], [-1.0, 2.0]]
+        );
         assert_eq!(guardian.play_area_or_extent(), Some([2.0, 4.0]));
         assert!(!guardian.update(&payload));
     }

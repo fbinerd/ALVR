@@ -1,16 +1,17 @@
 //! TLS 1.3 TCP transport and length-prefixed DISCO frames.
 
+use ring::signature::{
+    RSA_PSS_2048_8192_SHA256, RSA_PSS_2048_8192_SHA384, RSA_PSS_2048_8192_SHA512, UnparsedPublicKey,
+};
 use rustls::{
     DigitallySignedStruct, DistinguishedName, ServerConfig, SignatureScheme,
     client::danger::HandshakeSignatureValid,
-    crypto::{CryptoProvider, ring::default_provider, verify_tls12_signature, verify_tls13_signature},
+    crypto::{
+        CryptoProvider, ring::default_provider, verify_tls12_signature, verify_tls13_signature,
+    },
     pki_types::{CertificateDer, UnixTime},
     server::danger::{ClientCertVerified, ClientCertVerifier},
     version::TLS13,
-};
-use ring::signature::{
-    RSA_PSS_2048_8192_SHA256, RSA_PSS_2048_8192_SHA384, RSA_PSS_2048_8192_SHA512,
-    UnparsedPublicKey,
 };
 use std::{net::SocketAddr, sync::Arc};
 use tokio::{
@@ -122,14 +123,23 @@ mod v1_certificate_tests {
             ]
             .concat(),
         );
-        let certificate = der(0x30, &[tbs.clone(), der(0x30, &[]), der(0x03, &[0])].concat());
+        let certificate = der(
+            0x30,
+            &[tbs.clone(), der(0x30, &[]), der(0x03, &[0])].concat(),
+        );
         assert_eq!(v1_rsa_public_key(&certificate), Some(key.as_slice()));
 
         let mut versioned_tbs = tbs.clone();
         versioned_tbs[2] = 0xa0;
-        let versioned = der(0x30, &[versioned_tbs, der(0x30, &[]), der(0x03, &[0])].concat());
+        let versioned = der(
+            0x30,
+            &[versioned_tbs, der(0x30, &[]), der(0x03, &[0])].concat(),
+        );
         assert_eq!(v1_rsa_public_key(&versioned), None);
-        assert_eq!(v1_rsa_public_key(&certificate[..certificate.len() - 1]), None);
+        assert_eq!(
+            v1_rsa_public_key(&certificate[..certificate.len() - 1]),
+            None
+        );
     }
 }
 
@@ -186,11 +196,18 @@ impl ClientCertVerifier for AnyClientCertificate {
                 SignatureScheme::RSA_PSS_SHA256 => &RSA_PSS_2048_8192_SHA256,
                 SignatureScheme::RSA_PSS_SHA384 => &RSA_PSS_2048_8192_SHA384,
                 SignatureScheme::RSA_PSS_SHA512 => &RSA_PSS_2048_8192_SHA512,
-                _ => return Err(rustls::Error::General(format!("unsupported Quest v1 certificate signature scheme: {:?}", dss.scheme))),
+                _ => {
+                    return Err(rustls::Error::General(format!(
+                        "unsupported Quest v1 certificate signature scheme: {:?}",
+                        dss.scheme
+                    )));
+                }
             };
             UnparsedPublicKey::new(algorithm, public_key)
                 .verify(message, dss.signature())
-                .map_err(|_| rustls::Error::General("invalid Quest TLS CertificateVerify signature".into()))?;
+                .map_err(|_| {
+                    rustls::Error::General("invalid Quest TLS CertificateVerify signature".into())
+                })?;
             return Ok(HandshakeSignatureValid::assertion());
         }
         verify_tls13_signature(

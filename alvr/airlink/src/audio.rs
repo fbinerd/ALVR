@@ -83,7 +83,9 @@ mod tests {
         assert_eq!(&packet[20..24], &[0xa4, 0x3c, 0x80, 0x1e]);
         assert_eq!(
             &packet[3864..],
-            &[0, 0x0f, 0, 0, 0, 0, 0, 0, 0x68, 0xec, 0x84, 0xdb, 0x59, 0x05, 0, 0]
+            &[
+                0, 0x0f, 0, 0, 0, 0, 0, 0, 0x68, 0xec, 0x84, 0xdb, 0x59, 0x05, 0, 0
+            ]
         );
     }
 

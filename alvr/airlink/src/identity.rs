@@ -32,10 +32,7 @@ impl HostIdentity {
 
         let certificate_path = state_dir.join(CERT_FILE);
         let key_path = state_dir.join(KEY_FILE);
-        let (certificate, private_key) = match (
-            fs::read(&certificate_path),
-            fs::read(&key_path),
-        ) {
+        let (certificate, private_key) = match (fs::read(&certificate_path), fs::read(&key_path)) {
             (Ok(certificate), Ok(private_key)) => (certificate, private_key),
             (Err(cert_error), Err(key_error))
                 if cert_error.kind() == ErrorKind::NotFound
@@ -83,7 +80,10 @@ impl HostIdentity {
     }
 
     fn trust_path(&self, headset_id: [u8; 16]) -> PathBuf {
-        let id: String = headset_id.iter().map(|byte| format!("{byte:02x}")).collect();
+        let id: String = headset_id
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
         self.state_dir.join(TRUST_DIR).join(id)
     }
 
@@ -126,9 +126,7 @@ impl HostIdentity {
         fs::rename(temporary, self.trust_path(headset_id))
     }
 
-    pub fn rustls_identity(
-        &self,
-    ) -> (Vec<CertificateDer<'static>>, PrivateKeyDer<'static>) {
+    pub fn rustls_identity(&self) -> (Vec<CertificateDer<'static>>, PrivateKeyDer<'static>) {
         (
             vec![CertificateDer::from(self.certificate.clone())],
             PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(self.private_key.clone())),

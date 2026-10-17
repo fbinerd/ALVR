@@ -43,7 +43,9 @@ pub struct AirLinkControllerInput {
 }
 
 fn read_f32(data: &[u8], offset: usize) -> Option<f32> {
-    Some(f32::from_le_bytes(data.get(offset..offset + 4)?.try_into().ok()?))
+    Some(f32::from_le_bytes(
+        data.get(offset..offset + 4)?.try_into().ok()?,
+    ))
 }
 
 fn read_pose(data: &[u8], offset: usize) -> Option<AirLinkPose> {
@@ -109,7 +111,9 @@ fn controller_pose(pose: AirLinkPose) -> AirLinkPose {
 }
 
 fn read_f64(data: &[u8], offset: usize) -> Option<f64> {
-    Some(f64::from_le_bytes(data.get(offset..offset + 8)?.try_into().ok()?))
+    Some(f64::from_le_bytes(
+        data.get(offset..offset + 8)?.try_into().ok()?,
+    ))
 }
 
 /// Extrapolates the head pose to where it will be when the frame rendered
@@ -174,7 +178,12 @@ impl HeadPredictor {
             let half_angle = sine.atan2(delta[3]) * scale;
             let factor = half_angle.sin() / sine;
             quat_mul(
-                [delta[0] * factor, delta[1] * factor, delta[2] * factor, half_angle.cos()],
+                [
+                    delta[0] * factor,
+                    delta[1] * factor,
+                    delta[2] * factor,
+                    half_angle.cos(),
+                ],
                 pose.orientation_xyzw,
             )
         };
@@ -201,13 +210,21 @@ fn quat_mul(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
 }
 
 fn read_u32(data: &[u8], offset: usize) -> Option<u32> {
-    Some(u32::from_le_bytes(data.get(offset..offset + 4)?.try_into().ok()?))
+    Some(u32::from_le_bytes(
+        data.get(offset..offset + 4)?.try_into().ok()?,
+    ))
 }
 
 fn read_hand_input(data: &[u8], offset: usize) -> Option<AirLinkHandInput> {
     let released_trigger = read_f32(data, offset + 8)?;
     let released_grip = read_f32(data, offset + 12)?;
-    let clean = |v: f32| if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 };
+    let clean = |v: f32| {
+        if v.is_finite() {
+            v.clamp(0.0, 1.0)
+        } else {
+            0.0
+        }
+    };
     let axis = |offset| {
         let value = read_f32(data, offset)?;
         Some(if value.is_finite() {

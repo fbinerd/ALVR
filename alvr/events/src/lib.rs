@@ -80,7 +80,10 @@ pub struct AdbEvent {
 #[serde(tag = "id", content = "data")]
 pub enum EventType {
     Log(LogEntry),
-    DebugGroup { group: String, message: String },
+    DebugGroup {
+        group: String,
+        message: String,
+    },
     Session(Box<SessionConfig>),
     StatisticsSummary(StatisticsSummary),
     GraphStatistics(GraphStatistics),
@@ -104,7 +107,10 @@ pub enum EventType {
     },
     ServerRequestsSelfRestart,
     Adb(AdbEvent),
-    NewVersionFound { version: String, message: String },
+    NewVersionFound {
+        version: String,
+        message: String,
+    },
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -151,7 +157,10 @@ impl Event {
             EventType::DriversList(drivers) => serde_json::to_string(drivers).unwrap(),
             EventType::AirLinkStreaming(streaming) => streaming.to_string(),
             EventType::AirLinkHeadset { address, streaming } => {
-                format!("{} streaming: {streaming}", address.as_deref().unwrap_or("none"))
+                format!(
+                    "{} streaming: {streaming}",
+                    address.as_deref().unwrap_or("none")
+                )
             }
             EventType::AirLinkPairing { address, .. } => {
                 address.clone().unwrap_or_else(|| "none".into())
