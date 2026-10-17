@@ -101,6 +101,7 @@ pub enum EventType {
     AirLinkPairing {
         address: Option<String>,
         headset: Option<String>,
+        pairing_code: Option<u32>,
     },
     ServerRequestsSelfRestart,
     Adb(AdbEvent),
