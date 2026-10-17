@@ -6,6 +6,7 @@ authors.workspace = true
 license.workspace = true
 
 [dependencies]
+base64 = "0.22"
 log = "0.4"
 libc = "0.2"
 mdns-sd = "0.19"
