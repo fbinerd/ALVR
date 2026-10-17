@@ -646,6 +646,7 @@ impl ServerCoreContext {
                                     .as_ref()
                                     .map(|request| request.address.ip().to_string()),
                                 headset: pairing.as_ref().map(|request| request.headset_name.clone()),
+                                pairing_code: pairing.as_ref().and_then(|request| request.pairing_code),
                             });
                             pairing_reported = pairing;
                             ticks_since_pairing_report = 0;

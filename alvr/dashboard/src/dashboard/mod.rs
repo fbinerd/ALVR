@@ -82,7 +82,7 @@ pub struct Dashboard {
     streaming_audio_applied: bool,
     streaming_audio_tried_at: Option<std::time::Instant>,
     // Address of the headset asking to pair and when the server last said so.
-    airlink_pairing: Option<(String, std::time::Instant)>,
+    airlink_pairing: Option<(String, Option<u32>, std::time::Instant)>,
     airlink_pairing_answered_at: Option<std::time::Instant>,
 }
 
@@ -271,7 +271,7 @@ impl eframe::App for Dashboard {
                 EventType::AirLinkHeadset { address, streaming } => self
                     .connections_tab
                     .update_airlink_headset(address, streaming),
-                EventType::AirLinkPairing { address, headset } => {
+                EventType::AirLinkPairing { address, headset, pairing_code } => {
                     // The server may repeat the request once more before it
                     // has taken the answer.
                     let just_answered = self
@@ -279,7 +279,7 @@ impl eframe::App for Dashboard {
                         .is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(4));
                     self.airlink_pairing = address.filter(|_| !just_answered).map(|address| {
                         let headset = headset.unwrap_or_else(|| "A headset".into());
-                        (format!("{headset} at {address}"), std::time::Instant::now())
+                        (format!("{headset} at {address}"), pairing_code, std::time::Instant::now())
                     });
                 }
                 EventType::AirLinkStreaming(streaming) => self.airlink_streaming = streaming,
@@ -452,14 +452,22 @@ impl eframe::App for Dashboard {
         if self
             .airlink_pairing
             .as_ref()
-            .is_some_and(|(_, at)| at.elapsed() > std::time::Duration::from_secs(8))
+            .is_some_and(|(_, _, at)| at.elapsed() > std::time::Duration::from_secs(8))
         {
             self.airlink_pairing = None;
         }
-        if let Some((address, _)) = &self.airlink_pairing {
+        if let Some((address, pairing_code, _)) = &self.airlink_pairing {
             let accept = alvr_gui_common::ModalButton::Custom("Accept".into());
             let refuse = alvr_gui_common::ModalButton::Custom("Refuse".into());
             let address = address.clone();
+            let pairing_code = *pairing_code;
+            // Do not let a new headset bypass the certificate comparison
+            // while the exchange is still in progress or supplied no cert.
+            let buttons = if pairing_code.is_some() {
+                vec![accept.clone(), refuse]
+            } else {
+                vec![refuse]
+            };
             let answer = alvr_gui_common::modal(
                 ui,
                 "Meta Air Link: new headset",
@@ -467,12 +475,18 @@ impl eframe::App for Dashboard {
                     ui.label(format!(
                         "{address} asks to connect to this computer through Air Link."
                     ));
+                    if let Some(code) = pairing_code {
+                        ui.heading(format!("{code:06}"));
+                        ui.label("Check that the headset shows the same code.");
+                    } else {
+                        ui.label("Waiting for the headset's pairing code.");
+                    }
                     ui.label(
                         "Accepted, it stays in the list of trusted devices and connects \
                          without asking until you remove it there.",
                     );
                 }),
-                &[accept.clone(), refuse],
+                &buttons,
                 Some(420.0),
             );
             if let Some(answer) = answer {
