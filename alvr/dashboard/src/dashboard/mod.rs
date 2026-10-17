@@ -39,8 +39,6 @@ pub enum ServerRequest {
     GetDriverList,
     RegisterAlvrDriver,
     UnregisterDriver(PathBuf),
-    GetAirLinkDevices,
-    SetAirLinkDevices(bool),
     AnswerAirLinkPairing(bool),
     RestartSteamvr,
     ShutdownSteamvr,
@@ -263,9 +261,6 @@ impl eframe::App for Dashboard {
                 EventType::ServerRequestsSelfRestart => self.restart_steamvr(&mut requests),
                 #[cfg(not(target_arch = "wasm32"))]
                 EventType::DriversList(list) => self.installation_tab.update_drivers(list),
-                EventType::AirLinkDevices(enabled) => {
-                    self.connections_tab.update_airlink_devices(enabled)
-                }
                 // The dashboard switches the system's default devices: the
                 // server runs in SteamVR's container, which has no pactl.
                 EventType::AirLinkHeadset { address, streaming } => self

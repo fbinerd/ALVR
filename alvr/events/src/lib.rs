@@ -88,7 +88,6 @@ pub enum EventType {
     Buttons(Vec<ButtonEvent>),
     Haptics(HapticsEvent),
     DriversList(Vec<PathBuf>),
-    AirLinkDevices(bool),
     /// A Meta Air Link headset started (true) or stopped streaming.
     AirLinkStreaming(bool),
     /// The headset connected with Meta Air Link, repeated while it stays.
@@ -131,7 +130,6 @@ impl Event {
             EventType::Buttons(_) => "BUTTONS".to_string(),
             EventType::Haptics(_) => "HAPTICS".to_string(),
             EventType::DriversList(_) => "DRV LIST".to_string(),
-            EventType::AirLinkDevices(_) => "AIRLINK DEVICES".to_string(),
             EventType::AirLinkStreaming(_) => "AIRLINK STREAMING".to_string(),
             EventType::AirLinkHeadset { .. } => "AIRLINK HEADSET".to_string(),
             EventType::AirLinkPairing { .. } => "AIRLINK PAIRING".to_string(),
@@ -151,7 +149,6 @@ impl Event {
             EventType::Buttons(buttons) => serde_json::to_string(buttons).unwrap(),
             EventType::Haptics(haptics) => serde_json::to_string(haptics).unwrap(),
             EventType::DriversList(drivers) => serde_json::to_string(drivers).unwrap(),
-            EventType::AirLinkDevices(enabled) => enabled.to_string(),
             EventType::AirLinkStreaming(streaming) => streaming.to_string(),
             EventType::AirLinkHeadset { address, streaming } => {
                 format!("{} streaming: {streaming}", address.as_deref().unwrap_or("none"))

@@ -16,9 +16,6 @@ use std::{
     time::Duration,
 };
 
-const AIRLINK_SPEAKERS_SINK: &str = "mhl_airlink_speakers";
-const AIRLINK_MICROPHONE_SINK: &str = "mhl_airlink_microphone_bus";
-const AIRLINK_MICROPHONE_SOURCE: &str = "mhl_airlink_microphone";
 // Node names of the streams ALVR makes while a headset streams (see below).
 const ALVR_CLIENT_SINK: &str = "ALVR Audio";
 const ALVR_CLIENT_SOURCE: &str = "ALVR Microphone";
@@ -32,36 +29,6 @@ fn pactl(args: &[&str]) -> Result<String> {
         bail!("pactl {} failed: {}", args.join(" "), error.trim());
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
-}
-
-fn pipewire_module_ids() -> Result<Vec<(u32, String)>> {
-    let modules = pactl(&["list", "short", "modules"])?
-        .lines()
-        .filter_map(|line| {
-            let mut fields = line.splitn(3, '\t');
-            let id = fields.next()?.parse().ok()?;
-            let module = fields.next()?;
-            let arguments = fields.next().unwrap_or_default();
-            Some((id, format!("{module} {arguments}")))
-        })
-        .collect();
-    Ok(modules)
-}
-
-fn airlink_module_ids() -> Result<Vec<u32>> {
-    Ok(pipewire_module_ids()?
-        .into_iter()
-        .filter_map(|(id, description)| {
-            [
-                format!("sink_name={AIRLINK_SPEAKERS_SINK}"),
-                format!("sink_name={AIRLINK_MICROPHONE_SINK}"),
-                format!("source_name={AIRLINK_MICROPHONE_SOURCE}"),
-            ]
-            .iter()
-            .any(|name| description.contains(name))
-            .then_some(id)
-        })
-        .collect())
 }
 
 /// The system's default output and input as they were with no headset
@@ -81,20 +48,14 @@ pub fn remember_idle_default_devices() {
 }
 
 /// Name and description of the system's outputs (`kind` "sinks") or inputs
-/// ("sources"), without monitors and without the AirLink devices themselves.
+/// ("sources"), without monitors and without ALVR's own devices.
 pub fn list_audio_devices(kind: &str) -> Result<Vec<(String, String)>> {
     Ok(all_audio_devices(kind)?
         .into_iter()
         .filter(|(name, description)| {
-            ![
-                AIRLINK_SPEAKERS_SINK,
-                AIRLINK_MICROPHONE_SINK,
-                AIRLINK_MICROPHONE_SOURCE,
-            ]
-            .contains(&name.as_str())
-                && ![ALVR_CLIENT_SINK, ALVR_CLIENT_SOURCE]
-                    .iter()
-                    .any(|own| name == own || description == own)
+            ![ALVR_CLIENT_SINK, ALVR_CLIENT_SOURCE]
+                .iter()
+                .any(|own| name == own || description == own)
         })
         .collect())
 }
@@ -203,114 +164,6 @@ pub fn streaming_restore_default_devices() {
     if let Some((sink, source)) = IDLE_DEFAULTS.lock().clone() {
         pactl(&["set-default-sink", &sink]).ok();
         pactl(&["set-default-source", &source]).ok();
-    }
-}
-
-pub struct AirLinkDevices;
-
-impl AirLinkDevices {
-    pub fn is_enabled() -> Result<bool> {
-        let modules = airlink_module_ids()?;
-        let sinks = pactl(&["list", "short", "sinks"])?;
-        let sources = pactl(&["list", "short", "sources"])?;
-        Ok(modules.len() == 3
-            && sinks
-                .lines()
-                .any(|line| line.split('\t').nth(1) == Some(AIRLINK_SPEAKERS_SINK))
-            && sinks
-                .lines()
-                .any(|line| line.split('\t').nth(1) == Some(AIRLINK_MICROPHONE_SINK))
-            && sources
-                .lines()
-                .any(|line| line.split('\t').nth(1) == Some(AIRLINK_MICROPHONE_SOURCE)))
-        }
-
-    pub fn set_enabled(enabled: bool) -> Result<bool> {
-        if enabled {
-            if Self::is_enabled()? {
-                return Ok(true);
-            }
-
-            // Remove only a partial AirLink setup left by an interrupted start.
-            for id in airlink_module_ids()?.into_iter().rev() {
-                pactl(&["unload-module", &id.to_string()])?;
-            }
-
-            let modules = [
-                (
-                    "module-null-sink",
-                    vec![
-                        format!("sink_name={AIRLINK_SPEAKERS_SINK}"),
-                        "format=s16le".into(),
-                        "rate=48000".into(),
-                        "channels=2".into(),
-                        "channel_map=front-left,front-right".into(),
-                        "sink_properties=device.description=AirLink_Speakers".into(),
-                    ],
-                ),
-                (
-                    "module-null-sink",
-                    vec![
-                        format!("sink_name={AIRLINK_MICROPHONE_SINK}"),
-                        "format=s16le".into(),
-                        "rate=48000".into(),
-                        "channels=1".into(),
-                        "channel_map=mono".into(),
-                        "sink_properties=device.description=AirLink_Microphone_Input".into(),
-                    ],
-                ),
-                (
-                    "module-remap-source",
-                    vec![
-                        format!("master={AIRLINK_MICROPHONE_SINK}.monitor"),
-                        format!("source_name={AIRLINK_MICROPHONE_SOURCE}"),
-                        "master_channel_map=mono".into(),
-                        "channel_map=mono".into(),
-                        "source_properties=device.description=AirLink_Microphone".into(),
-                    ],
-                ),
-            ];
-            let mut loaded: Vec<u32> = Vec::new();
-            for (module, args) in modules {
-                let mut command_args = vec!["load-module", module];
-                command_args.extend(args.iter().map(String::as_str));
-                let id = match pactl(&command_args) {
-                    Ok(id) => match id.parse::<u32>() {
-                        Ok(id) => id,
-                        Err(_) => {
-                            for loaded_id in loaded.iter().rev() {
-                                let loaded_id = loaded_id.to_string();
-                                let _ = pactl(&["unload-module", &loaded_id]);
-                            }
-                            bail!("pactl returned an invalid module id: {id:?}");
-                        }
-                    },
-                    Err(error) => {
-                        for loaded_id in loaded.iter().rev() {
-                            let loaded_id = loaded_id.to_string();
-                            let _ = pactl(&["unload-module", &loaded_id]);
-                        }
-                        return Err(error);
-                    }
-                };
-                loaded.push(id);
-            }
-
-            if !Self::is_enabled()? {
-                for id in loaded.iter().rev() {
-                    let id = id.to_string();
-                    let _ = pactl(&["unload-module", &id]);
-                }
-                bail!("PipeWire did not expose all AirLink audio endpoints");
-            }
-            Ok(true)
-        } else {
-            for id in airlink_module_ids()?.into_iter().rev() {
-                let id = id.to_string();
-                pactl(&["unload-module", &id])?;
-            }
-            Ok(false)
-        }
     }
 }
 

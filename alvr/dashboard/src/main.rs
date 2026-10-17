@@ -84,11 +84,6 @@ fn main() {
         unsafe { env::set_var("WINIT_X11_SCALE_FACTOR", "1") };
     }
 
-    // Air Link used devices of its own, made here; it now shares "ALVR Audio"
-    // and "ALVR Microphone" with ALVR's client. Remove what an earlier
-    // version may have left behind.
-    alvr_audio::set_airlink_devices_enabled(false).ok();
-
     let result = eframe::run_native(
         &format!("ALVR Dashboard (streamer v{})", *ALVR_VERSION),
         NativeOptions {
