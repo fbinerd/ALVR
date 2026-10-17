@@ -20,12 +20,15 @@ pub struct Control {
     is_output: bool,
     // (name, description)
     devices: Vec<(String, String)>,
+    // Whether PipeWire keeps default devices here (see
+    // alvr_audio::linux::streaming_devices_supported).
+    supported: bool,
     listed_at: Option<Instant>,
     combobox_id: usize,
 }
 
 impl Control {
-    /// The control for this setting, if it is one of the Air Link devices.
+    /// The control for this setting, if it is a device used while streaming.
     pub fn for_setting(nesting_info: &NestingInfo) -> Option<Self> {
         if !matches!(nesting_info.path.last()?, PathSegment::Name(name) if name == "streaming_device")
         {
@@ -41,6 +44,7 @@ impl Control {
             nesting_info: nesting_info.clone(),
             is_output,
             devices: vec![],
+            supported: true,
             listed_at: None,
             combobox_id: alvr_gui_common::get_id(),
         })
@@ -58,7 +62,13 @@ impl Control {
         self.listed_at = Some(Instant::now());
         #[cfg(target_os = "linux")]
         {
-            let kind = if self.is_output { "sinks" } else { "sources" };
+            use alvr_audio::linux::DeviceKind;
+            let kind = if self.is_output {
+                DeviceKind::Output
+            } else {
+                DeviceKind::Input
+            };
+            self.supported = alvr_audio::linux::streaming_devices_supported();
             self.devices = alvr_audio::linux::list_audio_devices(kind).unwrap_or_default();
         }
     }
@@ -72,8 +82,22 @@ impl Control {
         super::grid_flow_inline(ui, allow_inline);
         self.refresh_devices();
 
-        let variant = session_fragment["variant"].as_str().unwrap_or(HEADSET).to_owned();
-        let custom = session_fragment[CUSTOM].as_str().unwrap_or_default().to_owned();
+        if !self.supported {
+            ui.label(
+                "Needs PipeWire with a session manager (WirePlumber). \
+                 Change the default device in the system's sound settings instead.",
+            );
+            return None;
+        }
+
+        let variant = session_fragment["variant"]
+            .as_str()
+            .unwrap_or(HEADSET)
+            .to_owned();
+        let custom = session_fragment[CUSTOM]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
 
         let headset_label = if self.is_output {
             "Headset speakers"
@@ -101,7 +125,10 @@ impl Control {
                 .selected_text(selected_text)
                 .width(320.0)
                 .show_ui(ui, |ui| {
-                    if ui.selectable_label(variant == HEADSET, headset_label).clicked() {
+                    if ui
+                        .selectable_label(variant == HEADSET, headset_label)
+                        .clicked()
+                    {
                         chosen = Some((HEADSET, custom.clone()));
                     }
                     if ui

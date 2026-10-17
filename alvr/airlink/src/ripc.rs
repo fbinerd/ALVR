@@ -31,8 +31,13 @@ pub const GPU_STREAM_CHANNEL_DID_CREATE_TYPE: u32 = 0xb67a_b64c;
 pub const GPU_STREAM_CHANNEL_DID_CONNECT_METHOD: u32 = 0x01aa_1146;
 pub const GPU_STREAM_CHANNEL_DID_CONNECT_RESPONSE: u32 = 0xbc8a_5740;
 pub const RUNTIME_SERVICE_BOOTSTRAP_METHODS: [u32; 7] = [
-    0x680c_c30a, 0x3ed8_3bbe, 0x62a4_153c, 0x680c_c30a,
-    0x3ed8_3bbe, 0x62a4_153c, 0xec6c_96c7,
+    0x680c_c30a,
+    0x3ed8_3bbe,
+    0x62a4_153c,
+    0x680c_c30a,
+    0x3ed8_3bbe,
+    0x62a4_153c,
+    0xec6c_96c7,
 ];
 pub const RUNTIME_SERVICE_GPU_PREPARE_REQUEST: [u8; 5] = [0x08, 0x6c, 0x16, 0, 0];
 
@@ -108,7 +113,9 @@ pub fn pack_runtime_service_client_create(client_id: u32) -> Result<Vec<u8>, &'s
 }
 
 pub fn pack_runtime_service_reverse_connect(
-    quest_uuid: &[u8; 16], client_id: u32, request_id: u32,
+    quest_uuid: &[u8; 16],
+    client_id: u32,
+    request_id: u32,
 ) -> Result<Vec<u8>, &'static str> {
     let endpoint = uuid::Uuid::from_bytes(*quest_uuid);
     let mut custom_data = vec![16, 0, 0, 0];
@@ -117,7 +124,10 @@ pub fn pack_runtime_service_reverse_connect(
         (0xc104_9f28, reflect_string("com.oculus.systemdriver")),
         (0x6a63_18fb, reflect_string("com.oculus.vrruntimeservice")),
         (0x9877_44f3, reflect_string("RuntimeServiceServer")),
-        (0x69cb_fee9, reflect_string(&format!("highwind_FixedLan_{endpoint}"))),
+        (
+            0x69cb_fee9,
+            reflect_string(&format!("highwind_FixedLan_{endpoint}")),
+        ),
         (0x7f71_62ed, 15u32.to_le_bytes().to_vec()),
         (0x3169_63db, reflect_string("")),
         (0x7240_121b, vec![0]),
@@ -140,7 +150,10 @@ pub fn pack_runtime_service_reverse_connect(
 }
 
 pub fn pack_runtime_service_bootstrap(
-    client_id: u32, request_id: u32, method_hash: u32, serialized_request: &[u8],
+    client_id: u32,
+    request_id: u32,
+    method_hash: u32,
+    serialized_request: &[u8],
 ) -> Result<Vec<u8>, &'static str> {
     let mut payload = Vec::with_capacity(7 + serialized_request.len());
     payload.extend_from_slice(&5u16.to_le_bytes());
@@ -165,16 +178,25 @@ pub fn response_success(payload: &[u8]) -> bool {
     let mut offset = 0;
     while offset + 8 <= payload.len() {
         let size = u32::from_le_bytes(payload[offset..offset + 4].try_into().unwrap()) as usize;
-        if size == 0 { return false; }
+        if size == 0 {
+            return false;
+        }
         let field = u32::from_le_bytes(payload[offset + 4..offset + 8].try_into().unwrap());
-        let end = match (offset + 8).checked_add(size) { Some(end) if end <= payload.len() => end, _ => return false };
-        if field == 0xf47b_aaea { return size == 1 && payload[offset + 8] == 1; }
+        let end = match (offset + 8).checked_add(size) {
+            Some(end) if end <= payload.len() => end,
+            _ => return false,
+        };
+        if field == 0xf47b_aaea {
+            return size == 1 && payload[offset + 8] == 1;
+        }
         offset = end;
     }
     false
 }
 
-pub fn pack_gpu_stream_channel_config_event(route: RuntimeIpcHeader) -> Result<Vec<u8>, &'static str> {
+pub fn pack_gpu_stream_channel_config_event(
+    route: RuntimeIpcHeader,
+) -> Result<Vec<u8>, &'static str> {
     let mut payload = Vec::from(2u16.to_le_bytes());
     payload.extend_from_slice(&GPU_STREAM_CHANNEL_DID_CREATE_HANDLER.to_le_bytes());
     payload.extend_from_slice(&GPU_STREAM_CHANNEL_DID_CREATE_TYPE.to_le_bytes());
@@ -182,7 +204,9 @@ pub fn pack_gpu_stream_channel_config_event(route: RuntimeIpcHeader) -> Result<V
     payload.push(0x3a);
     payload.extend_from_slice(&width.to_le_bytes());
     payload.extend_from_slice(&height.to_le_bytes());
-    payload.extend_from_slice(&[3, 0, 0, 0, 0x20, 1, 0, 0, 0, 1, 0, 2, 0, 1, 0, 0x48, 0, 0, 0, 0, 1]);
+    payload.extend_from_slice(&[
+        3, 0, 0, 0, 0x20, 1, 0, 0, 0, 1, 0, 2, 0, 1, 0, 0x48, 0, 0, 0, 0, 1,
+    ]);
     let header = RuntimeIpcHeader {
         message_type: MESSAGE_TYPE_SESSION_EVENT,
         message_size: payload.len() as u32,
@@ -406,9 +430,13 @@ impl ChannelCreateRequest {
         }
         let mut names = Vec::with_capacity(3);
         for _ in 0..3 {
-            let size = *data.get(offset).ok_or("RIPC channel request is truncated")? as usize;
+            let size = *data
+                .get(offset)
+                .ok_or("RIPC channel request is truncated")? as usize;
             offset += 1;
-            let end = offset.checked_add(size).ok_or("channel name size overflow")?;
+            let end = offset
+                .checked_add(size)
+                .ok_or("channel name size overflow")?;
             let value = data.get(offset..end).ok_or("channel name is truncated")?;
             names.push(
                 std::str::from_utf8(value)
@@ -527,8 +555,8 @@ pub fn pack_runtime_rpc_success_response(
     rpc: RuntimeRpcRequest,
     response_type_hash: u32,
 ) -> Result<Vec<u8>, &'static str> {
-    let reflect_v2 = rpc.helper_protocol_version >= 5
-        && rpc.flags.is_some_and(|flags| flags & 0x20 != 0);
+    let reflect_v2 =
+        rpc.helper_protocol_version >= 5 && rpc.flags.is_some_and(|flags| flags & 0x20 != 0);
     let serialized_response = if reflect_v2 {
         vec![2, 1]
     } else {
@@ -573,13 +601,14 @@ pub fn pack_channel_create_response(
         }
         body
     } else {
-        let (type_hash, channel_id) = channel_type_info(&channel.channel_name)
-            .ok_or("unsupported RIPC channel type")?;
+        let (type_hash, channel_id) =
+            channel_type_info(&channel.channel_name).ok_or("unsupported RIPC channel type")?;
         if channel.descriptor.len() < 8 {
             return Err("RIPC channel descriptor is shorter than its request token");
         }
         let name = channel.channel_name.as_bytes();
-        let mut response_body = Vec::with_capacity(1 + name.len() + 4 + channel.descriptor.len() + 4);
+        let mut response_body =
+            Vec::with_capacity(1 + name.len() + 4 + channel.descriptor.len() + 4);
         response_body.push(u8::try_from(name.len()).map_err(|_| "RIPC channel name too long")?);
         response_body.extend_from_slice(name);
         response_body.extend_from_slice(&type_hash.to_le_bytes());
@@ -613,9 +642,7 @@ fn channel_type_info(name: &str) -> Option<(u32, u32)> {
     })
 }
 
-pub fn extract_invite(
-    invite_message: &[u8],
-) -> Result<(u32, String), &'static str> {
+pub fn extract_invite(invite_message: &[u8]) -> Result<(u32, String), &'static str> {
     let invite_records = unpack_tagged_records(invite_message)?;
     let invite_field_id = reflect_field_id("::xrs::XrsInvite", "invite");
     let invite_data = invite_records
@@ -626,9 +653,7 @@ pub fn extract_invite(
     let invite_fields = unpack_tagged_records(invite_data)?;
     let session_type = invite_fields
         .iter()
-        .find(|(field_id, _)| {
-            *field_id == reflect_field_id("::xrs::XrsSessionType", "sessionType")
-        })
+        .find(|(field_id, _)| *field_id == reflect_field_id("::xrs::XrsSessionType", "sessionType"))
         .map(|(_, value)| value.as_slice())
         .ok_or("XrsInvite has no session type")?;
     if session_type.len() != 4 {
@@ -638,9 +663,7 @@ pub fn extract_invite(
 
     let session_id = invite_fields
         .iter()
-        .find(|(field_id, _)| {
-            *field_id == reflect_field_id("std::string", "linkFlowSessionId")
-        })
+        .find(|(field_id, _)| *field_id == reflect_field_id("std::string", "linkFlowSessionId"))
         .map(|(_, value)| value.as_slice())
         .ok_or("XrsInvite has no link flow session id")?;
     if session_id.len() < 4 {
@@ -701,19 +724,17 @@ pub fn pack_session_invite_accepted_event(
     let mut event_object = match session_type {
         1 => {
             let prefix = [
-                0x01, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-                0, 0, 0, 0, 9, b'T', b'C', b'P', b'_', b'D', b'I', b'S', b'C', b'O', 0, 0, 0,
-                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 14, b'2', b'0', b'8',
-                b'.', b'0', b'.', b'0', b'.', b'7', b'4', b'.', b'5', b'3', b'5', b'$',
+                0x01, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 9, b'T', b'C', b'P', b'_', b'D', b'I', b'S', b'C', b'O', 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 14, b'2', b'0', b'8', b'.', b'0', b'.', b'0', b'.',
+                b'7', b'4', b'.', b'5', b'3', b'5', b'$',
             ];
             let mut invite = prefix.to_vec();
             invite.extend_from_slice(link_flow_session_id.as_bytes());
             let mut object = Vec::new();
             pack_compact_size(invite.len(), &mut object)?;
             object.extend_from_slice(&invite);
-            object.extend_from_slice(&[
-                0x16, 0x05, 0x02, 0, 4, 0, 3, 0, 5, 0, 9, 0, 2, 0,
-            ]);
+            object.extend_from_slice(&[0x16, 0x05, 0x02, 0, 4, 0, 3, 0, 5, 0, 9, 0, 2, 0]);
             let mut wrapped = Vec::new();
             pack_compact_size(object.len(), &mut wrapped)?;
             wrapped.extend_from_slice(&object);
@@ -811,7 +832,10 @@ pub fn pack_oaf_broadcast_event(
 }
 
 fn decode_hex(data: &str) -> Result<Vec<u8>, &'static str> {
-    let compact = data.bytes().filter(|byte| !byte.is_ascii_whitespace()).collect::<Vec<_>>();
+    let compact = data
+        .bytes()
+        .filter(|byte| !byte.is_ascii_whitespace())
+        .collect::<Vec<_>>();
     if compact.len() % 2 != 0 {
         return Err("invalid hexadecimal RIPC event template");
     }
@@ -838,8 +862,8 @@ pub struct HandshakeMessage {
 
 impl HandshakeMessage {
     pub fn pack(&self) -> Result<Vec<u8>, &'static str> {
-        let payload_size = u64::try_from(self.payload.len())
-            .map_err(|_| "RIPC handshake payload is too large")?;
+        let payload_size =
+            u64::try_from(self.payload.len()).map_err(|_| "RIPC handshake payload is too large")?;
         let mut data = Vec::with_capacity(16 + self.payload.len());
         data.extend_from_slice(&HANDSHAKE_HEADER_SIZE.to_le_bytes());
         data.extend_from_slice(&payload_size.to_le_bytes());
@@ -922,16 +946,20 @@ mod captured_layout_tests {
     fn client_create_payload_is_complete() {
         let payload = decode_hex(RUNTIME_SERVICE_CLIENT_CREATE_PAYLOAD_HEX).unwrap();
         assert_eq!(payload.len(), 95);
-        assert!(payload
-            .windows(b"com.oculus.systemdriver".len())
-            .any(|window| window == b"com.oculus.systemdriver"));
+        assert!(
+            payload
+                .windows(b"com.oculus.systemdriver".len())
+                .any(|window| window == b"com.oculus.systemdriver")
+        );
     }
 
     #[test]
     fn channel_handshake_matches_the_headset() {
         assert_eq!(
             CHANNEL_BUFFER_HANDSHAKE,
-            [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 5, 0, 0, 0, 1, 1, 0, 0, 0]
+            [
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 5, 0, 0, 0, 1, 1, 0, 0, 0
+            ]
         );
     }
 }

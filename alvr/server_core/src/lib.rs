@@ -16,24 +16,23 @@ pub use logging_backend::init_logging;
 pub use tracking::HandType;
 
 use crate::connection::VideoPacket;
+use alvr_common::inputs::{
+    CONTROLLER_PROFILE_INFO, LEFT_MENU_CLICK_ID, LEFT_SQUEEZE_VALUE_ID, LEFT_THUMBREST_TOUCH_ID,
+    LEFT_THUMBSTICK_CLICK_ID, LEFT_THUMBSTICK_TOUCH_ID, LEFT_THUMBSTICK_X_ID, LEFT_THUMBSTICK_Y_ID,
+    LEFT_TRIGGER_TOUCH_ID, LEFT_TRIGGER_VALUE_ID, LEFT_X_CLICK_ID, LEFT_X_TOUCH_ID,
+    LEFT_Y_CLICK_ID, LEFT_Y_TOUCH_ID, QUEST_CONTROLLER_PROFILE_ID, RIGHT_A_CLICK_ID,
+    RIGHT_A_TOUCH_ID, RIGHT_B_CLICK_ID, RIGHT_B_TOUCH_ID, RIGHT_SQUEEZE_VALUE_ID,
+    RIGHT_SYSTEM_CLICK_ID, RIGHT_THUMBREST_TOUCH_ID, RIGHT_THUMBSTICK_CLICK_ID,
+    RIGHT_THUMBSTICK_TOUCH_ID, RIGHT_THUMBSTICK_X_ID, RIGHT_THUMBSTICK_Y_ID,
+    RIGHT_TRIGGER_TOUCH_ID, RIGHT_TRIGGER_VALUE_ID,
+};
 use alvr_common::{
-    AlvrFoveatedEncodingParams, ConnectionState, DEVICE_ID_TO_PATH, DeviceMotion, Fov, HAND_LEFT_ID,
-    HAND_RIGHT_ID, HEAD_ID, LifecycleState, Pose, ViewParams, dbg_server_core, error,
+    AlvrFoveatedEncodingParams, ConnectionState, DEVICE_ID_TO_PATH, DeviceMotion, Fov,
+    HAND_LEFT_ID, HAND_RIGHT_ID, HEAD_ID, LifecycleState, Pose, ViewParams, dbg_server_core, error,
     glam::{Quat, UVec2, Vec2, Vec3},
     parking_lot::{Mutex, RwLock},
     settings_schema::Switch,
     warn,
-};
-use alvr_common::inputs::{
-    CONTROLLER_PROFILE_INFO, LEFT_MENU_CLICK_ID, LEFT_SQUEEZE_VALUE_ID,
-    LEFT_THUMBSTICK_CLICK_ID, LEFT_THUMBSTICK_TOUCH_ID, LEFT_THUMBSTICK_X_ID,
-    LEFT_THUMBSTICK_Y_ID, LEFT_THUMBREST_TOUCH_ID, LEFT_TRIGGER_TOUCH_ID,
-    LEFT_TRIGGER_VALUE_ID, LEFT_X_CLICK_ID, LEFT_X_TOUCH_ID, LEFT_Y_CLICK_ID,
-    LEFT_Y_TOUCH_ID, QUEST_CONTROLLER_PROFILE_ID, RIGHT_A_CLICK_ID, RIGHT_A_TOUCH_ID,
-    RIGHT_B_CLICK_ID, RIGHT_B_TOUCH_ID, RIGHT_SQUEEZE_VALUE_ID, RIGHT_SYSTEM_CLICK_ID,
-    RIGHT_THUMBSTICK_CLICK_ID, RIGHT_THUMBSTICK_TOUCH_ID, RIGHT_THUMBSTICK_X_ID,
-    RIGHT_THUMBSTICK_Y_ID, RIGHT_THUMBREST_TOUCH_ID, RIGHT_TRIGGER_TOUCH_ID,
-    RIGHT_TRIGGER_VALUE_ID,
 };
 use alvr_events::{EventType, HapticsEvent};
 use alvr_filesystem as afs;
@@ -382,7 +381,9 @@ impl ServerCoreContext {
             started_sender
                 .send(ServerCoreEvent::LocalViewParams(airlink_view_params()))
                 .ok();
-            started_sender.send(ServerCoreEvent::ProximityState(true)).ok();
+            started_sender
+                .send(ServerCoreEvent::ProximityState(true))
+                .ok();
             AIRLINK_STREAMING.store(true, Ordering::Relaxed);
             alvr_events::send_event(EventType::AirLinkStreaming(true));
         });
@@ -391,18 +392,27 @@ impl ServerCoreContext {
             keyframe_sender.send(ServerCoreEvent::RequestIDR).ok();
         });
         let guardian_sender = self.connection_context.events_sender.clone();
-        let on_guardian_update = Arc::new(move |guardian: alvr_airlink::guardian::AirLinkGuardian| {
-            guardian_sender
-                .send(ServerCoreEvent::AirLinkGuardian {
-                    perimeter: guardian.perimeter.iter().map(|p| Vec2::from_array(*p)).collect(),
-                    play_area: guardian.play_area_or_extent().map(Vec2::from_array),
-                })
-                .ok();
-        });
+        let on_guardian_update =
+            Arc::new(move |guardian: alvr_airlink::guardian::AirLinkGuardian| {
+                guardian_sender
+                    .send(ServerCoreEvent::AirLinkGuardian {
+                        perimeter: guardian
+                            .perimeter
+                            .iter()
+                            .map(|p| Vec2::from_array(*p))
+                            .collect(),
+                        play_area: guardian.play_area_or_extent().map(Vec2::from_array),
+                    })
+                    .ok();
+            });
         let stopped_sender = self.connection_context.events_sender.clone();
         let on_streaming_stopped = Arc::new(move || {
-            stopped_sender.send(ServerCoreEvent::ProximityState(false)).ok();
-            stopped_sender.send(ServerCoreEvent::ClientDisconnected).ok();
+            stopped_sender
+                .send(ServerCoreEvent::ProximityState(false))
+                .ok();
+            stopped_sender
+                .send(ServerCoreEvent::ClientDisconnected)
+                .ok();
             AIRLINK_STREAMING.store(false, Ordering::Relaxed);
             alvr_events::send_event(EventType::AirLinkStreaming(false));
         });
@@ -493,8 +503,7 @@ impl ServerCoreContext {
                     {
                         *reported = (input.battery_percent, Instant::now());
                         let devices = [*HAND_LEFT_ID, *HAND_RIGHT_ID, *HEAD_ID];
-                        for (device_id, percent) in devices.into_iter().zip(input.battery_percent)
-                        {
+                        for (device_id, percent) in devices.into_iter().zip(input.battery_percent) {
                             if percent <= 100 {
                                 if let Some(stats) =
                                     &mut *battery_context.statistics_manager.write()
@@ -645,8 +654,12 @@ impl ServerCoreContext {
                                 address: pairing
                                     .as_ref()
                                     .map(|request| request.address.ip().to_string()),
-                                headset: pairing.as_ref().map(|request| request.headset_name.clone()),
-                                pairing_code: pairing.as_ref().and_then(|request| request.pairing_code),
+                                headset: pairing
+                                    .as_ref()
+                                    .map(|request| request.headset_name.clone()),
+                                pairing_code: pairing
+                                    .as_ref()
+                                    .and_then(|request| request.pairing_code),
                             });
                             pairing_reported = pairing;
                             ticks_since_pairing_report = 0;
@@ -826,9 +839,7 @@ impl ServerCoreContext {
             // The encoder's parameter sets were split off the keyframe and
             // stored as the decoder config; the headset needs them in band.
             let mut nal = Vec::new();
-            if is_idr
-                && let Some(config) = &*self.connection_context.decoder_config.lock()
-            {
+            if is_idr && let Some(config) = &*self.connection_context.decoder_config.lock() {
                 nal = alvr_airlink::video::without_delimiters_and_sei(&config.config_buffer);
             }
             nal.extend(alvr_airlink::video::without_delimiters_and_sei(&nal_buffer));
@@ -836,8 +847,13 @@ impl ServerCoreContext {
                 is_idr,
                 nal,
                 head_pose: [
-                    orientation[0], orientation[1], orientation[2], orientation[3], position[0],
-                    position[1], position[2],
+                    orientation[0],
+                    orientation[1],
+                    orientation[2],
+                    orientation[3],
+                    position[0],
+                    position[1],
+                    position[2],
                 ],
             };
             // Debugging aid: `~/.config/alvr/airlink_video_dump` names a file
@@ -866,11 +882,18 @@ impl ServerCoreContext {
                     .map_or(0, |elapsed| elapsed.as_millis());
                 writeln!(files.1, "{now_ms}").ok();
             }
-            self.connection_context.airlink_video_sender.send(frame).ok();
+            self.connection_context
+                .airlink_video_sender
+                .send(frame)
+                .ok();
 
             // An Air Link headset sends no statistics of its own, and the
             // code below, for ALVR's client, does not run without its stream.
-            if self.connection_context.video_channel_sender.lock().is_none()
+            if self
+                .connection_context
+                .video_channel_sender
+                .lock()
+                .is_none()
                 && let Some(stats) = &mut *self.connection_context.statistics_manager.write()
             {
                 stats.report_frame_encoded(timestamp, nal_buffer.len());
@@ -1190,7 +1213,10 @@ fn airlink_audio() -> alvr_airlink::audio::AirLinkAudio {
 pub const AIRLINK_CLIENT_PREFIX: &str = "airlink-";
 
 pub fn airlink_client_name(headset_id: [u8; 16]) -> String {
-    let hex: String = headset_id.iter().map(|byte| format!("{byte:02x}")).collect();
+    let hex: String = headset_id
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
     format!("{AIRLINK_CLIENT_PREFIX}{hex}")
 }
 

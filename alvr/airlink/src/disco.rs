@@ -147,7 +147,10 @@ fn name_field(value: &str) -> Result<[u8; NAME_SIZE], &'static str> {
 }
 
 fn text_field(field: &[u8]) -> String {
-    let end = field.iter().position(|byte| *byte == 0).unwrap_or(field.len());
+    let end = field
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(field.len());
     String::from_utf8_lossy(&field[..end]).into_owned()
 }
 
@@ -172,9 +175,8 @@ impl ConnectRequest {
         if read_u32_le(payload, 4)? != MSG_CONNECT_REQ {
             return Err("DISCO message is not ConnectReq");
         }
-        let copy_uuid = |offset: usize| -> [u8; 16] {
-            payload[offset..offset + 16].try_into().unwrap()
-        };
+        let copy_uuid =
+            |offset: usize| -> [u8; 16] { payload[offset..offset + 16].try_into().unwrap() };
         Ok(Self {
             group: read_u32_le(payload, 0)?,
             endpoint_uuid: copy_uuid(8),
@@ -225,11 +227,7 @@ pub fn message_header(payload: &[u8]) -> Result<(u32, u32), &'static str> {
     Ok((read_u32_le(payload, 0)?, read_u32_le(payload, 4)?))
 }
 
-pub fn pack_clock_sync_reply(
-    client_time: u64,
-    receive_time: u64,
-    send_time: u64,
-) -> [u8; 32] {
+pub fn pack_clock_sync_reply(client_time: u64, receive_time: u64, send_time: u64) -> [u8; 32] {
     let mut payload = [0; 32];
     payload[0..4].copy_from_slice(&1u32.to_le_bytes());
     payload[4..8].copy_from_slice(&MSG_CLOCK_SYNC_REPLY.to_le_bytes());
@@ -310,13 +308,12 @@ impl CertExchange {
     }
 
     pub fn pack(&self, message: u32) -> Result<Vec<u8>, &'static str> {
-        let metadata_size = u32::try_from(self.metadata.len())
-            .map_err(|_| "certificate metadata is too large")?;
+        let metadata_size =
+            u32::try_from(self.metadata.len()).map_err(|_| "certificate metadata is too large")?;
         let signature_size = u32::try_from(self.signature.len())
             .map_err(|_| "certificate signature is too large")?;
-        let mut payload = Vec::with_capacity(
-            16 + self.metadata.len() + self.signature.len() + RANDOM_SIZE,
-        );
+        let mut payload =
+            Vec::with_capacity(16 + self.metadata.len() + self.signature.len() + RANDOM_SIZE);
         payload.extend_from_slice(&1u32.to_le_bytes());
         payload.extend_from_slice(&message.to_le_bytes());
         payload.extend_from_slice(&metadata_size.to_le_bytes());

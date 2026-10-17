@@ -90,10 +90,7 @@ pub async fn web_server(connection_context: Arc<ConnectionContext>) -> Result<()
                         ),
                 )
                 .route("/buttons", routing::post(set_buttons))
-                .route(
-                    "/airlink-pairing",
-                    routing::post(answer_airlink_pairing),
-                )
+                .route("/airlink-pairing", routing::post(answer_airlink_pairing))
                 .route("/insert-idr", routing::post(insert_idr))
                 .nest(
                     "/recording",

@@ -113,27 +113,33 @@ fn make_settings(negotiated: Option<&ServerNegotiatedStreamingConfig>) -> Settin
         };
 
     // Resolution and refresh rate come from negotiation; fall back to persisted steamvr_hmd_init_config.
-    let (render_width, render_height, target_width, target_height, refresh_rate, display_refresh_rate) =
-        if let Some(n) = negotiated {
-            (
-                n.transcoding_view_resolution.x * 2,
-                n.transcoding_view_resolution.y,
-                n.emulated_headset_view_resolution.x * 2,
-                n.emulated_headset_view_resolution.y,
-                n.refresh_rate as i32,
-                n.display_refresh_rate,
-            )
-        } else {
-            let openvr = alvr_server_core::steamvr_hmd_init_config();
-            (
-                openvr.eye_resolution_width * 2,
-                openvr.eye_resolution_height,
-                openvr.target_eye_resolution_width * 2,
-                openvr.target_eye_resolution_height,
-                openvr.refresh_rate as i32,
-                openvr.refresh_rate as f32,
-            )
-        };
+    let (
+        render_width,
+        render_height,
+        target_width,
+        target_height,
+        refresh_rate,
+        display_refresh_rate,
+    ) = if let Some(n) = negotiated {
+        (
+            n.transcoding_view_resolution.x * 2,
+            n.transcoding_view_resolution.y,
+            n.emulated_headset_view_resolution.x * 2,
+            n.emulated_headset_view_resolution.y,
+            n.refresh_rate as i32,
+            n.display_refresh_rate,
+        )
+    } else {
+        let openvr = alvr_server_core::steamvr_hmd_init_config();
+        (
+            openvr.eye_resolution_width * 2,
+            openvr.eye_resolution_height,
+            openvr.target_eye_resolution_width * 2,
+            openvr.target_eye_resolution_height,
+            openvr.refresh_rate as i32,
+            openvr.refresh_rate as f32,
+        )
+    };
 
     // Encoder params determined by negotiation; default to zero before any client connects.
     let (codec, h264_profile, use_10bit_encoder, encoding_gamma, enable_hdr) =
