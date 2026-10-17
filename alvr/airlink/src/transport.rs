@@ -8,6 +8,10 @@ use rustls::{
     server::danger::{ClientCertVerified, ClientCertVerifier},
     version::TLS13,
 };
+use ring::signature::{
+    RSA_PSS_2048_8192_SHA256, RSA_PSS_2048_8192_SHA384, RSA_PSS_2048_8192_SHA512,
+    UnparsedPublicKey,
+};
 use std::{net::SocketAddr, sync::Arc};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
@@ -16,6 +20,118 @@ use tokio::{
 use tokio_rustls::{TlsAcceptor, server::TlsStream};
 
 const MAX_FRAME_SIZE: usize = 16 * 1024 * 1024;
+
+// rustls-webpki only accepts X.509 v3 certificates. The Quest presents a v1
+// RSA certificate, so extract its public key for CertificateVerify instead.
+// Every DER layer is bounded before it is used; other versions retain the
+// normal rustls verifier.
+fn der_item(input: &[u8]) -> Option<(u8, &[u8], &[u8])> {
+    let tag = *input.first()?;
+    let length_byte = *input.get(1)?;
+    let (length, header) = if length_byte < 0x80 {
+        (usize::from(length_byte), 2)
+    } else {
+        let count = usize::from(length_byte & 0x7f);
+        if count == 0 || count > 4 || input.len() < 2 + count || input[2] == 0 {
+            return None;
+        }
+        let mut length = 0usize;
+        for byte in &input[2..2 + count] {
+            length = length.checked_mul(256)?.checked_add(usize::from(*byte))?;
+        }
+        if length < 128 {
+            return None;
+        }
+        (length, 2 + count)
+    };
+    let end = header.checked_add(length)?;
+    if end > input.len() {
+        return None;
+    }
+    Some((tag, &input[header..end], &input[end..]))
+}
+
+fn take_der<'a>(input: &mut &'a [u8], expected_tag: u8) -> Option<&'a [u8]> {
+    let (tag, body, rest) = der_item(input)?;
+    if tag != expected_tag {
+        return None;
+    }
+    *input = rest;
+    Some(body)
+}
+
+fn v1_rsa_public_key(certificate: &[u8]) -> Option<&[u8]> {
+    let mut outer = certificate;
+    let mut certificate_body = take_der(&mut outer, 0x30)?;
+    if !outer.is_empty() {
+        return None;
+    }
+    let mut tbs = take_der(&mut certificate_body, 0x30)?;
+    // A v1 TBSCertificate starts with serialNumber, without explicit version.
+    take_der(&mut tbs, 0x02)?;
+    take_der(&mut tbs, 0x30)?; // signature algorithm
+    take_der(&mut tbs, 0x30)?; // issuer
+    take_der(&mut tbs, 0x30)?; // validity
+    take_der(&mut tbs, 0x30)?; // subject
+    let mut spki = take_der(&mut tbs, 0x30)?;
+    let mut algorithm = take_der(&mut spki, 0x30)?;
+    const RSA_ENCRYPTION_OID: &[u8] = &[0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01];
+    if take_der(&mut algorithm, 0x06)? != RSA_ENCRYPTION_OID {
+        return None;
+    }
+    if !algorithm.is_empty() && (take_der(&mut algorithm, 0x05)? != [] || !algorithm.is_empty()) {
+        return None;
+    }
+    let bit_string = take_der(&mut spki, 0x03)?;
+    if !spki.is_empty() || bit_string.first() != Some(&0) {
+        return None;
+    }
+    let public_key = &bit_string[1..];
+    let (tag, _, rest) = der_item(public_key)?;
+    if tag != 0x30 || !rest.is_empty() {
+        return None;
+    }
+    Some(public_key)
+}
+
+#[cfg(test)]
+mod v1_certificate_tests {
+    use super::v1_rsa_public_key;
+
+    fn der(tag: u8, contents: &[u8]) -> Vec<u8> {
+        assert!(contents.len() < 128);
+        [vec![tag, contents.len() as u8], contents.to_vec()].concat()
+    }
+
+    #[test]
+    fn extracts_v1_rsa_key_and_rejects_other_versions() {
+        let key = der(0x30, &[0x02, 0x01, 0x03]);
+        let rsa_oid = der(0x06, &[0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 1, 1, 1]);
+        let algorithm = der(0x30, &[rsa_oid, der(0x05, &[])].concat());
+        let subject_public_key = der(0x03, &[vec![0], key.clone()].concat());
+        let spki = der(0x30, &[algorithm, subject_public_key].concat());
+        let tbs = der(
+            0x30,
+            &[
+                der(0x02, &[0]),
+                der(0x30, &[]),
+                der(0x30, &[]),
+                der(0x30, &[]),
+                der(0x30, &[]),
+                spki,
+            ]
+            .concat(),
+        );
+        let certificate = der(0x30, &[tbs.clone(), der(0x30, &[]), der(0x03, &[0])].concat());
+        assert_eq!(v1_rsa_public_key(&certificate), Some(key.as_slice()));
+
+        let mut versioned_tbs = tbs.clone();
+        versioned_tbs[2] = 0xa0;
+        let versioned = der(0x30, &[versioned_tbs, der(0x30, &[]), der(0x03, &[0])].concat());
+        assert_eq!(v1_rsa_public_key(&versioned), None);
+        assert_eq!(v1_rsa_public_key(&certificate[..certificate.len() - 1]), None);
+    }
+}
 
 /// Asks the headset for its certificate and takes any, as Meta's host does:
 /// the pairing code, which both sides derive from the two certificates, is
@@ -65,6 +181,18 @@ impl ClientCertVerifier for AnyClientCertificate {
         cert: &CertificateDer<'_>,
         dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        if let Some(public_key) = v1_rsa_public_key(cert.as_ref()) {
+            let algorithm = match dss.scheme {
+                SignatureScheme::RSA_PSS_SHA256 => &RSA_PSS_2048_8192_SHA256,
+                SignatureScheme::RSA_PSS_SHA384 => &RSA_PSS_2048_8192_SHA384,
+                SignatureScheme::RSA_PSS_SHA512 => &RSA_PSS_2048_8192_SHA512,
+                _ => return Err(rustls::Error::General(format!("unsupported Quest v1 certificate signature scheme: {:?}", dss.scheme))),
+            };
+            UnparsedPublicKey::new(algorithm, public_key)
+                .verify(message, dss.signature())
+                .map_err(|_| rustls::Error::General("invalid Quest TLS CertificateVerify signature".into()))?;
+            return Ok(HandshakeSignatureValid::assertion());
+        }
         verify_tls13_signature(
             message,
             cert,
