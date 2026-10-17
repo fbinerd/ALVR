@@ -1,4 +1,5 @@
 pub mod array;
+pub mod audio_device;
 pub mod boolean;
 pub mod choice;
 pub mod collapsible;
@@ -80,6 +81,7 @@ pub struct NestingInfo {
 pub enum SettingControl {
     Section(section::Control),
     Choice(choice::Control),
+    AudioDevice(audio_device::Control),
     Optional(optional::Control),
     Switch(switch::Control),
     Boolean(boolean::Control),
@@ -106,7 +108,13 @@ impl SettingControl {
                 default,
                 variants,
                 gui,
-            } => Self::Choice(choice::Control::new(nesting_info, default, variants, gui)),
+            } => {
+                if let Some(control) = audio_device::Control::for_setting(&nesting_info) {
+                    Self::AudioDevice(control)
+                } else {
+                    Self::Choice(choice::Control::new(nesting_info, default, variants, gui))
+                }
+            }
             SchemaNode::Optional {
                 default_set,
                 content,
@@ -164,6 +172,7 @@ impl SettingControl {
         match self {
             Self::Section(control) => control.ui(ui, session_fragment, allow_inline),
             Self::Choice(control) => control.ui(ui, session_fragment, allow_inline),
+            Self::AudioDevice(control) => control.ui(ui, session_fragment, allow_inline),
             Self::Optional(control) => control.ui(ui, session_fragment, allow_inline),
             Self::Switch(control) => control.ui(ui, session_fragment, allow_inline),
             Self::Boolean(control) => control.ui(ui, session_fragment, allow_inline),
