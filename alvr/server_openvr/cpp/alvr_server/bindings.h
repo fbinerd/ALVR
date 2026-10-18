@@ -236,6 +236,9 @@ extern "C" unsigned int TakeSkippedVsyncs();
 
 extern "C" void CppInit(bool earlyHmdInitialization, Settings settings);
 extern "C" void* CppOpenvrEntryPoint(const char* pInterfaceName, int* pReturnCode);
+#ifdef __linux__
+extern "C" void* CppLinuxCompositorPluginEntryPoint(int* returnCode);
+#endif
 extern "C" void InitializeRuntime();
 extern "C" bool InitializeStreaming(Settings settings);
 extern "C" void DeinitializeStreaming();

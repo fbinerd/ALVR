@@ -766,6 +766,16 @@ pub unsafe extern "C" fn HmdDriverFactory(
     interface_name: *const c_char,
     return_code: *mut i32,
 ) -> *mut c_void {
+    #[cfg(target_os = "linux")]
+    if !interface_name.is_null()
+        && unsafe { std::ffi::CStr::from_ptr(interface_name) }
+            == c"IVRCompositorPluginProvider_001"
+    {
+        // vrcompositor loads this provider in its own process. Do not prepare
+        // the server runtime, inspect processes, or modify FACTORY_INIT_DATA.
+        return unsafe { CppLinuxCompositorPluginEntryPoint(return_code) };
+    }
+
     let Ok(driver_dir) = alvr_server_io::get_driver_dir_from_registered() else {
         return ptr::null_mut();
     };

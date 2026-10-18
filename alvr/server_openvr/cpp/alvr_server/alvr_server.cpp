@@ -22,6 +22,8 @@
 
 #ifdef __linux__
 #include "include/openvr_math.h"
+#include "platform/linux/VirtualDisplayPoc.h"
+#include "platform/linux/VirtualDisplayRedirect.h"
 std::unique_ptr<vr::HmdMatrix34_t> GetInvZeroPose();
 
 std::unique_ptr<vr::HmdMatrix34_t> GetRawZeroPose() {
@@ -79,6 +81,9 @@ public:
     bool early_hmd_initialization = false;
 
     std::unique_ptr<Hmd> hmd;
+#ifdef __linux__
+    std::unique_ptr<VirtualDisplayRedirect> virtual_display_redirect;
+#endif
     std::unique_ptr<Controller> left_controller, right_controller;
     std::unique_ptr<Controller> left_hand_tracker, right_hand_tracker;
     std::vector<std::unique_ptr<FakeViveTracker>> generic_trackers;
@@ -103,6 +108,19 @@ public:
             this->tracked_devices.insert({ HEAD_ID, this->hmd.get() });
         }
 
+#ifdef __linux__
+        if (IsLinuxVirtualDisplayPocEnabled()) {
+            virtual_display_redirect = std::make_unique<VirtualDisplayRedirect>();
+            if (!vr::VRServerDriverHost()->TrackedDeviceAdded(
+                    VirtualDisplayRedirect::SERIAL, vr::TrackedDeviceClass_DisplayRedirect,
+                    virtual_display_redirect.get())) {
+                virtual_display_redirect.reset();
+                Error("Failed to register Linux virtual display redirect");
+                return vr::VRInitError_Driver_Failed;
+            }
+        }
+#endif
+
         return vr::VRInitError_None;
     }
     virtual void Cleanup() override {
@@ -113,6 +131,9 @@ public:
         this->left_controller.reset();
         this->right_controller.reset();
         this->hmd.reset();
+#ifdef __linux__
+        virtual_display_redirect.reset();
+#endif
 
         CleanupDriverLog();
 
