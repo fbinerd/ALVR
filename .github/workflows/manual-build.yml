@@ -96,6 +96,9 @@ jobs:
           ALVR_LOCAL_BUILD=1 cargo xtask build-launcher --platform linux --ci --release
           cp -a build/alvr_streamer_linux artifacts/alvr_linux_bundle/build/
           cp -a build/alvr_launcher_linux artifacts/alvr_linux_bundle/build/
+          strip --strip-debug "artifacts/alvr_linux_bundle/build/alvr_launcher_linux/ALVR Launcher"
+          strip --strip-debug artifacts/alvr_linux_bundle/build/alvr_streamer_linux/bin/alvr_dashboard
+          strip --strip-debug artifacts/alvr_linux_bundle/build/alvr_streamer_linux/lib64/alvr/bin/linux64/driver_alvr_server.so
           XZ_OPT=-T0 tar -cJf artifacts/alvr_linux_bundle.tar.xz -C artifacts alvr_linux_bundle
           cp "$RUNNER_TEMP/alvr-build-source.txt" artifacts/build-source.txt
 
