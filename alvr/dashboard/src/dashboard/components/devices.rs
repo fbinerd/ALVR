@@ -276,26 +276,31 @@ fn airlink_section(
                     });
                     ui.end_row();
 
-                    match (enabled, headset) {
-                        (Some(true), Some((address, streaming))) => {
-                            ui.label(format!("Meta Quest: {address}"));
-                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                if streaming {
-                                    ui.colored_label(log_colors::INFO_LIGHT, "Streaming");
-                                } else {
-                                    ui.colored_label(log_colors::WARNING_LIGHT, "Connected");
-                                }
-                            });
-                            ui.end_row();
+                    // With accepted headsets listed below, the live status goes
+                    // on their entry; otherwise it gets a line of its own.
+                    if paired.is_empty() {
+                        match (enabled, headset) {
+                            (Some(true), Some((address, streaming))) => {
+                                ui.label(format!("Meta Quest: {address}"));
+                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                    airlink_status_label(ui, Some(streaming));
+                                });
+                                ui.end_row();
+                            }
+                            (Some(true), None) => {
+                                ui.label("No headset connected");
+                                ui.end_row();
+                            }
+                            _ => {}
                         }
-                        (Some(true), None) => {
-                            ui.label("No headset connected");
-                            ui.end_row();
-                        }
-                        _ => {}
                     }
                 });
 
+            // The server reports the connected headset by address only; with a
+            // single accepted headset it is that one.
+            let live = (enabled == Some(true) && paired.len() == 1)
+                .then_some(headset)
+                .flatten();
             for (hostname, data) in paired {
                 ui.add_space(theme::FRAME_TEXT_SPACING);
                 Frame::group(ui.style())
@@ -307,6 +312,15 @@ fn airlink_section(
                             .spacing(egui::vec2(8.0, 8.0))
                             .show(ui, |ui| {
                                 ui.label(&data.display_name);
+                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                    airlink_status_label(ui, live.map(|(_, streaming)| streaming));
+                                });
+                                ui.end_row();
+
+                                ui.label(live.map_or_else(
+                                    || "Unknown IP".to_owned(),
+                                    |(address, _)| address.to_owned(),
+                                ));
                                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                                     if ui.button("Remove").clicked() {
                                         requests.push(ServerRequest::UpdateClientList {
@@ -322,6 +336,15 @@ fn airlink_section(
         });
 
     requests
+}
+
+/// Streaming, Connected, or Disconnected when there is no live status.
+fn airlink_status_label(ui: &mut Ui, streaming: Option<bool>) {
+    match streaming {
+        Some(true) => ui.colored_label(theme::OK_GREEN, "Streaming"),
+        Some(false) => ui.colored_label(theme::OK_GREEN, "Connected"),
+        None => ui.colored_label(Color32::GRAY, "Disconnected"),
+    };
 }
 
 fn wired_client_section(
