@@ -198,6 +198,74 @@ impl HeadPredictor {
     }
 }
 
+/// Measures a controller's linear and angular velocity from its recent poses.
+/// Air Link's tracking packets carry poses only; without velocities ALVR and
+/// SteamVR cannot predict the controllers, which then lag behind the hands by
+/// the whole streaming latency while the head (see HeadPredictor) does not.
+#[derive(Default)]
+pub struct VelocityEstimator {
+    // (time, pose) of the last tens of milliseconds, oldest first.
+    history: std::collections::VecDeque<(f64, AirLinkPose)>,
+}
+
+impl VelocityEstimator {
+    /// Velocity is measured against the sample this much older.
+    const BASELINE_S: f64 = 0.016;
+
+    pub fn reset(&mut self) {
+        self.history.clear();
+    }
+
+    /// Linear velocity (m/s) and angular velocity (rad/s, an axis scaled by
+    /// the rate, in the tracking space), zero until enough history exists.
+    pub fn update(&mut self, pose: AirLinkPose, time_s: f64) -> ([f32; 3], [f32; 3]) {
+        if self.history.back().is_some_and(|(last, _)| time_s <= *last) {
+            // A repeated sample keeps the previous estimate's basis; a clock
+            // that went back is a new session.
+            if self.history.back().is_some_and(|(last, _)| time_s < *last) {
+                self.history.clear();
+            } else {
+                self.history.pop_back();
+            }
+        }
+        self.history.push_back((time_s, pose));
+        while self
+            .history
+            .get(1)
+            .is_some_and(|(next, _)| time_s - *next >= Self::BASELINE_S)
+        {
+            self.history.pop_front();
+        }
+        let (old_time, old) = self.history[0];
+        let dt = time_s - old_time;
+        if dt < Self::BASELINE_S / 2.0 || dt > 0.1 {
+            return ([0.0; 3], [0.0; 3]);
+        }
+        let inverse_dt = (1.0 / dt) as f32;
+        let mut linear = [0.0; 3];
+        for axis in 0..3 {
+            linear[axis] = (pose.position_xyz[axis] - old.position_xyz[axis]) * inverse_dt;
+        }
+        // Rotation since the old sample, in the tracking space: q * old^-1.
+        let [x0, y0, z0, w0] = old.orientation_xyzw;
+        let delta = quat_mul(pose.orientation_xyzw, [-x0, -y0, -z0, w0]);
+        let delta = if delta[3] < 0.0 {
+            delta.map(|component| -component)
+        } else {
+            delta
+        };
+        let sine = (delta[0] * delta[0] + delta[1] * delta[1] + delta[2] * delta[2]).sqrt();
+        let angular = if sine < 1e-6 {
+            [0.0; 3]
+        } else {
+            let angle = 2.0 * sine.atan2(delta[3]);
+            let rate = angle * inverse_dt / sine;
+            [delta[0] * rate, delta[1] * rate, delta[2] * rate]
+        };
+        (linear, angular)
+    }
+}
+
 fn quat_mul(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
     let [ax, ay, az, aw] = a;
     let [bx, by, bz, bw] = b;
@@ -252,4 +320,30 @@ pub fn unpack_controller_input(data: &[u8]) -> Option<AirLinkControllerInput> {
         battery_percent: [data[36], data[97], data[223]],
         origin_height: read_f32(data, 25).filter(|height| (0.1..3.0).contains(height)),
     })
+}
+
+#[cfg(test)]
+mod velocity_tests {
+    use super::{AirLinkPose, VelocityEstimator};
+
+    #[test]
+    fn measures_a_steady_move_and_turn() {
+        let mut estimator = VelocityEstimator::default();
+        let mut result = ([0.0; 3], [0.0; 3]);
+        // 1 m/s along x and 90 degrees per second about y, sampled at 500 Hz.
+        for step in 0..20 {
+            let t = step as f64 * 0.002;
+            let half = (std::f64::consts::FRAC_PI_2 * t / 2.0) as f32;
+            let pose = AirLinkPose {
+                orientation_xyzw: [0.0, half.sin(), 0.0, half.cos()],
+                position_xyz: [t as f32, 1.0, 0.0],
+            };
+            result = estimator.update(pose, t);
+        }
+        let (linear, angular) = result;
+        assert!((linear[0] - 1.0).abs() < 1e-3, "{linear:?}");
+        assert!(linear[1].abs() < 1e-6 && linear[2].abs() < 1e-6);
+        assert!((angular[1] - std::f32::consts::FRAC_PI_2).abs() < 1e-2, "{angular:?}");
+        assert!(angular[0].abs() < 1e-4 && angular[2].abs() < 1e-4);
+    }
 }
