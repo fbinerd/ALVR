@@ -1,15 +1,11 @@
-# Builds a chosen branch of this fork on request only (Actions tab ->
-# "Manual build" -> "Run workflow"). Same steps as ALVR's build.yml, which
-# only runs on pull requests; nothing here runs on push or on a schedule.
+# Builds the branch selected in the Actions tab's "Run workflow" branch menu.
+# Same steps as ALVR's build.yml, which only runs on pull requests; nothing
+# here runs on push or on a schedule.
 name: Manual build
 
 on:
   workflow_dispatch:
     inputs:
-      ref:
-        description: "Branch, tag or commit to build"
-        required: true
-        default: "airlink-frame-sync-and-colour"
       linux:
         description: "Linux streamer and launcher"
         type: boolean
@@ -33,8 +29,33 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: ${{ inputs.ref }}
           submodules: true
+
+      - name: Record selected source revision
+        id: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_sha="$(git rev-parse HEAD)"
+          if [[ "$source_sha" != "$GITHUB_SHA" ]]; then
+            echo "::error::Checkout $source_sha does not match dispatched revision $GITHUB_SHA"
+            exit 1
+          fi
+          safe_ref="$(printf '%s' "$GITHUB_REF_NAME" | sed -E 's/[^[:alnum:]_.-]+/-/g' | cut -c1-64)"
+          artifact_suffix="${safe_ref}-${source_sha:0:12}"
+          echo "artifact_suffix=$artifact_suffix" >> "$GITHUB_OUTPUT"
+          cat > "$RUNNER_TEMP/alvr-build-source.txt" <<EOF
+          Workflow ref: $GITHUB_REF
+          Source commit: $source_sha
+          Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID
+          EOF
+          cat "$RUNNER_TEMP/alvr-build-source.txt"
+          {
+            echo '### Build source'
+            echo
+            echo "- Ref: \`$GITHUB_REF\`"
+            echo "- Commit: \`$source_sha\`"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Install dependencies
         run: |
@@ -56,11 +77,12 @@ jobs:
           tar -cJf artifacts/alvr_streamer_linux.tar.xz ./build/alvr_streamer*
           cargo xtask build-launcher --platform linux --ci
           tar -cJf artifacts/alvr_launcher_linux.tar.xz ./build/alvr_launcher*
+          cp "$RUNNER_TEMP/alvr-build-source.txt" artifacts/build-source.txt
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v7
         with:
-          name: Linux packages
+          name: Linux packages - ${{ steps.source.outputs.artifact_suffix }}
           path: ./artifacts/*
 
   build-windows:
@@ -69,8 +91,33 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: ${{ inputs.ref }}
           submodules: true
+
+      - name: Record selected source revision
+        id: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_sha="$(git rev-parse HEAD)"
+          if [[ "$source_sha" != "$GITHUB_SHA" ]]; then
+            echo "::error::Checkout $source_sha does not match dispatched revision $GITHUB_SHA"
+            exit 1
+          fi
+          safe_ref="$(printf '%s' "$GITHUB_REF_NAME" | sed -E 's/[^[:alnum:]_.-]+/-/g' | cut -c1-64)"
+          artifact_suffix="${safe_ref}-${source_sha:0:12}"
+          echo "artifact_suffix=$artifact_suffix" >> "$GITHUB_OUTPUT"
+          cat > "$RUNNER_TEMP/alvr-build-source.txt" <<EOF
+          Workflow ref: $GITHUB_REF
+          Source commit: $source_sha
+          Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID
+          EOF
+          cat "$RUNNER_TEMP/alvr-build-source.txt"
+          {
+            echo '### Build source'
+            echo
+            echo "- Ref: \`$GITHUB_REF\`"
+            echo "- Commit: \`$source_sha\`"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - uses: crazy-max/ghaction-chocolatey@v4
         with:
@@ -90,11 +137,12 @@ jobs:
           zip -r9X artifacts/alvr_streamer_windows.zip ./build/alvr_streamer*
           cargo xtask build-launcher --platform windows --ci
           zip -r9X artifacts/alvr_launcher_windows.zip ./build/alvr_launcher*
+          cp "$RUNNER_TEMP/alvr-build-source.txt" artifacts/build-source.txt
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v7
         with:
-          name: Windows packages
+          name: Windows packages - ${{ steps.source.outputs.artifact_suffix }}
           path: ./artifacts/*
 
   build-android:
@@ -103,8 +151,33 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: ${{ inputs.ref }}
           submodules: true
+
+      - name: Record selected source revision
+        id: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_sha="$(git rev-parse HEAD)"
+          if [[ "$source_sha" != "$GITHUB_SHA" ]]; then
+            echo "::error::Checkout $source_sha does not match dispatched revision $GITHUB_SHA"
+            exit 1
+          fi
+          safe_ref="$(printf '%s' "$GITHUB_REF_NAME" | sed -E 's/[^[:alnum:]_.-]+/-/g' | cut -c1-64)"
+          artifact_suffix="${safe_ref}-${source_sha:0:12}"
+          echo "artifact_suffix=$artifact_suffix" >> "$GITHUB_OUTPUT"
+          cat > "$RUNNER_TEMP/alvr-build-source.txt" <<EOF
+          Workflow ref: $GITHUB_REF
+          Source commit: $source_sha
+          Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID
+          EOF
+          cat "$RUNNER_TEMP/alvr-build-source.txt"
+          {
+            echo '### Build source'
+            echo
+            echo "- Ref: \`$GITHUB_REF\`"
+            echo "- Commit: \`$source_sha\`"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -137,8 +210,13 @@ jobs:
         working-directory: ./alvr/client_openxr
         run: cargo xtask build-client
 
+      - name: Add build source to APK artifact
+        run: cp "$RUNNER_TEMP/alvr-build-source.txt" ./build/alvr_client_android/build-source.txt
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v7
         with:
-          name: Android APK
-          path: ./build/alvr_client_android/alvr_client_android.apk
+          name: Android APK - ${{ steps.source.outputs.artifact_suffix }}
+          path: |
+            ./build/alvr_client_android/alvr_client_android.apk
+            ./build/alvr_client_android/build-source.txt
