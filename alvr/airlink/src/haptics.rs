@@ -28,8 +28,10 @@ const BODY_BYTES: usize = 65;
 const KIND: [u8; 5] = [0x42, 0x01, 0, 0, 0];
 const MIDDLE: [u8; 9] = [0x0d, 0, 0, 0, 0x8a, 0x62, 0x49, 0x3d, 0x10];
 const TAIL_MARK: [u8; 2] = [0x3c, 0x19];
-/// Shortest vibration sent to the headset.
-pub const MIN_DURATION: Duration = Duration::from_millis(80);
+/// Shortest vibration sent to the headset, for a zero-length request that
+/// bypassed ALVR's setting. 10 ms at 16 % amplitude was still felt (user
+/// test, 2026-10-17); longer pulses feel stronger because they merge.
+pub const MIN_DURATION: Duration = Duration::from_millis(10);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AirLinkHand {

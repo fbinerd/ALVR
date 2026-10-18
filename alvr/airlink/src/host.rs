@@ -358,10 +358,9 @@ impl AirLinkHost {
                                     monotonic_nanos() as f64 / 1e9,
                                 );
                                 self.send(stream, HAPTIC_TOPIC, &packet).await?;
-                                // SteamVR sends a stream of zero-length pulses, each
-                                // meant to hold until the next; stopped after a few
-                                // milliseconds the motor barely spins up (user test,
-                                // 2026-10-17). Meta's runtime held them 20 to 240 ms.
+                                // The duration already carries ALVR's minimum
+                                // (Settings > Controllers > Haptics); SteamVR's own
+                                // pulses are zero-length.
                                 haptic_stop_at[hand] = (haptic.amplitude > 0.0).then(|| {
                                     tokio::time::Instant::now()
                                         + haptic.duration.max(crate::haptics::MIN_DURATION)
