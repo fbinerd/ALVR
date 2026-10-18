@@ -90,9 +90,9 @@ jobs:
         run: |
           set -e
           mkdir -p artifacts/alvr_linux_bundle/build
-          cargo xtask build-streamer --platform linux --ci --release
           git apply --check ../workflow/.github/patches/launcher-local-build.patch
           git apply ../workflow/.github/patches/launcher-local-build.patch
+          cargo xtask build-streamer --platform linux --ci --release
           ALVR_LOCAL_BUILD=1 cargo xtask build-launcher --platform linux --ci --release
           cp -a build/alvr_streamer_linux artifacts/alvr_linux_bundle/build/
           cp -a build/alvr_launcher_linux artifacts/alvr_linux_bundle/build/

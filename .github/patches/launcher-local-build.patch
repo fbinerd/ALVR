@@ -192,3 +192,11 @@ index 991f1919..cc750cf5 100644
                      ui.label(match &self.release_channels_info {
                          Some(data) => format!("Latest stable release: {}", data.stable[0].version),
                          None => "Fetching latest release...".into(),
+diff --git a/alvr/xtask/src/build.rs b/alvr/xtask/src/build.rs
+--- a/alvr/xtask/src/build.rs
++++ b/alvr/xtask/src/build.rs
+@@ -214,3 +214,3 @@
+         // copy linux specific firewalls
+-        sh.create_dir(build_layout.firewall_script()).unwrap();
++        sh.create_dir(&build_layout.firewall_script_dir).unwrap();
+         sh.copy_file(firewall_script, build_layout.firewall_script())
