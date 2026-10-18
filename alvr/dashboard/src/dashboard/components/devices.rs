@@ -19,6 +19,23 @@ fn is_airlink_client(hostname: &str) -> bool {
     hostname.starts_with(AIRLINK_CLIENT_PREFIX)
 }
 
+/// The headset connected to the Air Link host, as the server last reported it.
+struct AirLinkHeadset {
+    address: String,
+    approved: bool,
+    streaming: bool,
+    reported_at: std::time::Instant,
+}
+
+/// What an Air Link headset entry shows on its right.
+#[derive(Clone, Copy)]
+enum AirLinkState {
+    Disconnected,
+    Connecting,
+    Connected,
+    Streaming,
+}
+
 struct EditPopupState {
     new_devices: bool,
     hostname: String,
@@ -31,8 +48,7 @@ pub struct DevicesTab {
     edit_popup_state: Option<EditPopupState>,
     adb_download_progress: Option<f32>,
     airlink_host_enabled: Option<bool>,
-    // Address, streaming, and when the server last reported it.
-    airlink_headset: Option<(String, bool, std::time::Instant)>,
+    airlink_headset: Option<AirLinkHeadset>,
 }
 
 impl DevicesTab {
@@ -64,9 +80,18 @@ impl DevicesTab {
         self.adb_download_progress = Some(progress);
     }
 
-    pub fn update_airlink_headset(&mut self, address: Option<String>, streaming: bool) {
-        self.airlink_headset =
-            address.map(|address| (address, streaming, std::time::Instant::now()));
+    pub fn update_airlink_headset(
+        &mut self,
+        address: Option<String>,
+        approved: bool,
+        streaming: bool,
+    ) {
+        self.airlink_headset = address.map(|address| AirLinkHeadset {
+            address,
+            approved,
+            streaming,
+            reported_at: std::time::Instant::now(),
+        });
     }
 
     pub fn ui(&mut self, ui: &mut Ui, connected_to_server: bool) -> Vec<ServerRequest> {
@@ -127,7 +152,9 @@ impl DevicesTab {
                 || self
                     .airlink_headset
                     .as_ref()
-                    .is_some_and(|(_, _, at)| at.elapsed() > std::time::Duration::from_secs(8))
+                    .is_some_and(|headset| {
+                        headset.reported_at.elapsed() > std::time::Duration::from_secs(8)
+                    })
             {
                 self.airlink_headset = None;
             }
@@ -144,9 +171,7 @@ impl DevicesTab {
             requests.extend(airlink_section(
                 ui,
                 self.airlink_host_enabled,
-                self.airlink_headset
-                    .as_ref()
-                    .map(|(address, streaming, _)| (address.as_str(), *streaming)),
+                self.airlink_headset.as_ref(),
                 &airlink_clients,
             ));
 
@@ -241,15 +266,29 @@ impl DevicesTab {
     }
 }
 
-/// The Meta Air Link host: its switch, the headset connected to it and the
-/// headsets the user accepted.
+/// The Meta Air Link host: its switch and its headsets, the accepted ones
+/// and one still connecting or waiting to be accepted.
 fn airlink_section(
     ui: &mut Ui,
     enabled: Option<bool>,
-    headset: Option<(&str, bool)>,
+    headset: Option<&AirLinkHeadset>,
     paired: &[&(String, ClientConnectionConfig)],
 ) -> Vec<ServerRequest> {
     let mut requests = vec![];
+    let headset = headset.filter(|_| enabled == Some(true));
+    let live_state = headset.map(|headset| {
+        if !headset.approved {
+            AirLinkState::Connecting
+        } else if headset.streaming {
+            AirLinkState::Streaming
+        } else {
+            AirLinkState::Connected
+        }
+    });
+    // The server reports the connected headset by address only: an accepted
+    // one is taken to be the single accepted entry; otherwise it gets an
+    // entry of its own.
+    let live_on_paired = headset.is_some_and(|headset| headset.approved) && paired.len() == 1;
 
     Frame::group(ui.style())
         .fill(theme::SECTION_BG)
@@ -283,75 +322,96 @@ fn airlink_section(
                     });
                     ui.end_row();
 
-                    // With accepted headsets listed below, the live status goes
-                    // on their entry; otherwise it gets a line of its own.
-                    if paired.is_empty() {
-                        match (enabled, headset) {
-                            (Some(true), Some((address, streaming))) => {
-                                ui.label(format!("Meta Quest: {address}"));
-                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                    airlink_status_label(ui, Some(streaming));
-                                });
-                                ui.end_row();
-                            }
-                            (Some(true), None) => {
-                                ui.label("No headset connected");
-                                ui.end_row();
-                            }
-                            _ => {}
-                        }
+                    if enabled == Some(true) && headset.is_none() && paired.is_empty() {
+                        ui.label("No headset connected");
+                        ui.end_row();
                     }
                 });
 
-            // The server reports the connected headset by address only; with a
-            // single accepted headset it is that one.
-            let live = (enabled == Some(true) && paired.len() == 1)
-                .then_some(headset)
-                .flatten();
             for (hostname, data) in paired {
-                ui.add_space(theme::FRAME_TEXT_SPACING);
-                Frame::group(ui.style())
-                    .fill(theme::DARKER_BG)
-                    .inner_margin(egui::vec2(15.0, 12.0))
-                    .show(ui, |ui| {
-                        Grid::new(format!("{hostname}-airlink"))
-                            .num_columns(2)
-                            .spacing(egui::vec2(8.0, 8.0))
-                            .show(ui, |ui| {
-                                ui.label(&data.display_name);
-                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                    airlink_status_label(ui, live.map(|(_, streaming)| streaming));
-                                });
-                                ui.end_row();
-
-                                ui.label(live.map_or_else(
-                                    || "Unknown IP".to_owned(),
-                                    |(address, _)| address.to_owned(),
-                                ));
-                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                    if ui.button("Remove").clicked() {
-                                        requests.push(ServerRequest::UpdateClientList {
-                                            hostname: hostname.clone(),
-                                            action: ClientConnectionsAction::RemoveEntry,
-                                        });
-                                    }
-                                });
-                                ui.end_row();
-                            });
-                    });
+                let (state, address) = if live_on_paired {
+                    (
+                        live_state.unwrap_or(AirLinkState::Disconnected),
+                        headset.map(|headset| headset.address.as_str()),
+                    )
+                } else {
+                    (AirLinkState::Disconnected, None)
+                };
+                if let Some(request) =
+                    airlink_entry(ui, hostname, &data.display_name, address, state, true)
+                {
+                    requests.push(request);
+                }
+            }
+            if let (Some(headset), Some(state)) = (headset, live_state)
+                && !live_on_paired
+            {
+                airlink_entry(
+                    ui,
+                    "airlink-live",
+                    "Meta Quest",
+                    Some(&headset.address),
+                    state,
+                    false,
+                );
             }
         });
 
     requests
 }
 
-/// Streaming, Connected, or Disconnected when there is no live status.
-fn airlink_status_label(ui: &mut Ui, streaming: Option<bool>) {
-    match streaming {
-        Some(true) => ui.colored_label(theme::OK_GREEN, "Streaming"),
-        Some(false) => ui.colored_label(theme::OK_GREEN, "Connected"),
-        None => ui.colored_label(Color32::GRAY, "Disconnected"),
-    };
+/// One Air Link headset: name and state, then address and, for an accepted
+/// one, a Remove button.
+fn airlink_entry(
+    ui: &mut Ui,
+    id: &str,
+    name: &str,
+    address: Option<&str>,
+    state: AirLinkState,
+    removable: bool,
+) -> Option<ServerRequest> {
+    let mut request = None;
+    ui.add_space(theme::FRAME_TEXT_SPACING);
+    Frame::group(ui.style())
+        .fill(theme::DARKER_BG)
+        .inner_margin(egui::vec2(15.0, 12.0))
+        .show(ui, |ui| {
+            Grid::new(format!("{id}-airlink"))
+                .num_columns(2)
+                .spacing(egui::vec2(8.0, 8.0))
+                .show(ui, |ui| {
+                    ui.label(name);
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        match state {
+                            AirLinkState::Disconnected => {
+                                ui.colored_label(Color32::GRAY, "Disconnected")
+                            }
+                            AirLinkState::Connecting => {
+                                ui.colored_label(log_colors::WARNING_LIGHT, "Connecting")
+                            }
+                            AirLinkState::Connected => {
+                                ui.colored_label(theme::OK_GREEN, "Connected")
+                            }
+                            AirLinkState::Streaming => {
+                                ui.colored_label(theme::OK_GREEN, "Streaming")
+                            }
+                        };
+                    });
+                    ui.end_row();
+
+                    ui.label(address.unwrap_or("Unknown IP"));
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if removable && ui.button("Remove").clicked() {
+                            request = Some(ServerRequest::UpdateClientList {
+                                hostname: id.to_owned(),
+                                action: ClientConnectionsAction::RemoveEntry,
+                            });
+                        }
+                    });
+                    ui.end_row();
+                });
+        });
+    request
 }
 
 fn wired_client_section(

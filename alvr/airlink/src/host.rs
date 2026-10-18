@@ -74,6 +74,9 @@ pub fn answer_pairing(accept: bool) {
 #[derive(Clone, Copy, PartialEq)]
 pub struct AirLinkHeadsetStatus {
     pub address: SocketAddr,
+    /// The user accepted this headset (now or earlier); before that it is
+    /// still connecting.
+    pub approved: bool,
     pub streaming: bool,
 }
 
@@ -254,6 +257,7 @@ impl AirLinkHost {
             log::info!("Meta Air Link TLS session established from {peer}");
             *STATUS.lock().unwrap() = Some(AirLinkHeadsetStatus {
                 address: peer,
+                approved: false,
                 streaming: false,
             });
             let result = tokio::select! {
@@ -459,6 +463,9 @@ impl AirLinkHost {
                                 .trust_headset_certificate(headset_id, certificate)?;
                             log::info!("Air Link headset accepted by the user");
                             approved = true;
+                            if let Some(status) = STATUS.lock().unwrap().as_mut() {
+                                status.approved = true;
+                            }
                             approved_at = Some(std::time::Instant::now());
                             if std::mem::take(&mut pairing_awaits_ack) {
                                 self.send(stream, PAIRING_TOPIC, &disco::pack_awaiting_user_ack())
@@ -649,6 +656,9 @@ impl AirLinkHost {
                     .is_some_and(|(id, _)| self.headset_is_known(*id, headset_certificate))
                 {
                     approved = true;
+                            if let Some(status) = STATUS.lock().unwrap().as_mut() {
+                                status.approved = true;
+                            }
                 } else {
                     if !pairing_pending
                         && let (Some((id, name)), Some(address)) = (&headset, peer_address)

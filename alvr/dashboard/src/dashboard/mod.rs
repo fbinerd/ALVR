@@ -296,9 +296,13 @@ impl eframe::App for Dashboard {
                 EventType::DriversList(list) => self.installation_tab.update_drivers(list),
                 // The dashboard switches the system's default devices: the
                 // server runs in SteamVR's container, which has no pactl.
-                EventType::AirLinkHeadset { address, streaming } => self
+                EventType::AirLinkHeadset {
+                    address,
+                    approved,
+                    streaming,
+                } => self
                     .connections_tab
-                    .update_airlink_headset(address, streaming),
+                    .update_airlink_headset(address, approved, streaming),
                 EventType::AirLinkPairing {
                     address,
                     headset,
