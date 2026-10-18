@@ -204,9 +204,11 @@ pub fn pack_gpu_stream_channel_config_event(
     payload.push(0x3a);
     payload.extend_from_slice(&width.to_le_bytes());
     payload.extend_from_slice(&height.to_le_bytes());
-    payload.extend_from_slice(&[
-        3, 0, 0, 0, 0x20, 1, 0, 0, 0, 1, 0, 2, 0, 1, 0, 0x48, 0, 0, 0, 0, 1,
-    ]);
+    payload.extend_from_slice(&[3, 0, 0, 0, 0x20, 1, 0, 0, 0, 1, 0, 2, 0, 1, 0]);
+    // The display refresh rate (0x48 = 72 in the 72 Hz capture, 90 and 120 in
+    // the others).
+    payload.extend_from_slice(&crate::video::display_refresh_hz().to_le_bytes());
+    payload.push(1);
     let header = RuntimeIpcHeader {
         message_type: MESSAGE_TYPE_SESSION_EVENT,
         message_size: payload.len() as u32,
@@ -252,6 +254,12 @@ pub fn pack_sharpening_event(route: RuntimeIpcHeader, level: u8) -> Result<Vec<u
     };
     RuntimeIpcMessage::pack(header, &payload)
 }
+
+/// Where the display refresh rate sits in the GPU buffer channel response
+/// body and in the streaming session invite template (found by comparing
+/// Windows captures at 72, 90 and 120 Hz).
+const GPU_BUFFER_REFRESH_RATE_OFFSET: usize = 162;
+const INVITE_REFRESH_RATE_OFFSET: usize = 18;
 
 const GPU_BUFFER_CHANNEL_RESPONSE_BODY_HEX: &str = concat!(
     "a006196770755f6275666665725f73747265616d5f6368616e6e656c",
@@ -599,6 +607,15 @@ pub fn pack_channel_create_response(
         for position in positions {
             body[position..position + 8].copy_from_slice(&current);
         }
+        // The display refresh rate, a u32 (72 in this 72 Hz capture; 90 and
+        // 120 in the captures at those rates).
+        if body.get(GPU_BUFFER_REFRESH_RATE_OFFSET..GPU_BUFFER_REFRESH_RATE_OFFSET + 4)
+            != Some(&72u32.to_le_bytes()[..])
+        {
+            return Err("GPU buffer channel response template lost its refresh rate field");
+        }
+        body[GPU_BUFFER_REFRESH_RATE_OFFSET..GPU_BUFFER_REFRESH_RATE_OFFSET + 4]
+            .copy_from_slice(&crate::video::display_refresh_hz().to_le_bytes());
         body
     } else {
         let (type_hash, channel_id) =
@@ -755,6 +772,15 @@ pub fn pack_session_invite_accepted_event(
             )?;
             let mut object = encoded;
             object[78..114].copy_from_slice(link_flow_session_id.as_bytes());
+            // The display refresh rate the headset switches to, a u32 (72 in
+            // this template; 90 and 120 in the captures at those rates).
+            if object.get(INVITE_REFRESH_RATE_OFFSET..INVITE_REFRESH_RATE_OFFSET + 4)
+                != Some(&72u32.to_le_bytes()[..])
+            {
+                return Err("session invite template lost its refresh rate field");
+            }
+            object[INVITE_REFRESH_RATE_OFFSET..INVITE_REFRESH_RATE_OFFSET + 4]
+                .copy_from_slice(&crate::video::display_refresh_hz().to_le_bytes());
             object
         }
         _ => return Err("unsupported captured Air Link session type"),

@@ -22,11 +22,32 @@ pub const REFRESH_RATE_FACTOR: f64 = 71.8272 / 72.0;
 
 static FRAME_PERIOD_NS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(13_922_300);
+static DISPLAY_REFRESH_HZ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(72);
 
-/// Sets the headset's real frame period from its nominal refresh rate.
+/// Display refresh rates a Quest 2 accepts over Link.
+pub const SUPPORTED_REFRESH_RATES: [u32; 4] = [72, 80, 90, 120];
+
+/// Sets the refresh rate the headset is asked to run at (the supported rate
+/// nearest to `nominal_hz`) and the frame period that goes with it. Meta
+/// Horizon Link sends the rate in the session invite and in the GPU stream
+/// channel's messages, and the headset switches its display to it.
 pub fn set_refresh_rate(nominal_hz: f32) {
-    let period_ns = 1e9 / (f64::from(nominal_hz.max(1.0)) * REFRESH_RATE_FACTOR);
+    let hz = SUPPORTED_REFRESH_RATES
+        .into_iter()
+        .min_by(|a, b| {
+            (*a as f32 - nominal_hz)
+                .abs()
+                .total_cmp(&(*b as f32 - nominal_hz).abs())
+        })
+        .unwrap_or(72);
+    DISPLAY_REFRESH_HZ.store(hz, Ordering::Relaxed);
+    let period_ns = 1e9 / (f64::from(hz) * REFRESH_RATE_FACTOR);
     FRAME_PERIOD_NS.store(period_ns as u64, Ordering::Relaxed);
+}
+
+/// The display refresh rate the headset is asked to run at, in Hz.
+pub fn display_refresh_hz() -> u32 {
+    DISPLAY_REFRESH_HZ.load(Ordering::Relaxed)
 }
 
 /// The headset's real frame period, in seconds.
