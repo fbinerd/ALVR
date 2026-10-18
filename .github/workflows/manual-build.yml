@@ -1,4 +1,4 @@
-# Builds the branch selected in the Actions tab's "Run workflow" branch menu.
+# Run this workflow from master and choose the source branch in `source_ref`.
 # Same steps as ALVR's build.yml, which only runs on pull requests; nothing
 # here runs on push or on a schedule.
 name: Manual build
@@ -6,6 +6,11 @@ name: Manual build
 on:
   workflow_dispatch:
     inputs:
+      source_ref:
+        description: "Branch or tag to compile (run this workflow from master)"
+        type: string
+        required: true
+        default: master
       linux:
         description: "Linux streamer and launcher"
         type: boolean
@@ -29,23 +34,32 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
+          ref: ${{ inputs.source_ref }}
           submodules: true
+
+      - uses: actions/checkout@v6
+        with:
+          ref: master
+          path: .workflow-master
 
       - name: Record selected source revision
         id: source
         shell: bash
+        env:
+          SOURCE_REF: ${{ inputs.source_ref }}
         run: |
           set -euo pipefail
-          source_sha="$(git rev-parse HEAD)"
-          if [[ "$source_sha" != "$GITHUB_SHA" ]]; then
-            echo "::error::Checkout $source_sha does not match dispatched revision $GITHUB_SHA"
+          if [[ "$GITHUB_REF" != "refs/heads/master" ]]; then
+            echo "::error::Run this workflow from master; choose the build source in source_ref."
             exit 1
           fi
-          safe_ref="$(printf '%s' "$GITHUB_REF_NAME" | sed -E 's/[^[:alnum:]_.-]+/-/g' | cut -c1-64)"
+          source_sha="$(git rev-parse HEAD)"
+          safe_ref="$(printf '%s' "$SOURCE_REF" | sed -E 's/[^[:alnum:]_.-]+/-/g' | cut -c1-64)"
           artifact_suffix="${safe_ref}-${source_sha:0:12}"
           echo "artifact_suffix=$artifact_suffix" >> "$GITHUB_OUTPUT"
           cat > "$RUNNER_TEMP/alvr-build-source.txt" <<EOF
           Workflow ref: $GITHUB_REF
+          Selected source ref: $SOURCE_REF
           Source commit: $source_sha
           Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID
           EOF
@@ -53,7 +67,8 @@ jobs:
           {
             echo '### Build source'
             echo
-            echo "- Ref: \`$GITHUB_REF\`"
+            echo "- Workflow ref: \`$GITHUB_REF\`"
+            echo "- Source ref: \`$SOURCE_REF\`"
             echo "- Commit: \`$source_sha\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -75,8 +90,10 @@ jobs:
           mkdir artifacts/
           cargo xtask build-streamer --platform linux --ci
           tar -cJf artifacts/alvr_streamer_linux.tar.xz ./build/alvr_streamer*
-          cargo xtask build-launcher --platform linux --ci
-          tar -cJf artifacts/alvr_launcher_linux.tar.xz ./build/alvr_launcher*
+          git apply .workflow-master/.github/patches/launcher-local-build.patch
+          ALVR_LOCAL_BUILD=1 cargo xtask build-launcher --platform linux --ci
+          cp -a build/alvr_streamer_linux build/alvr_launcher_linux/alvr_streamer_linux
+          tar -cJf artifacts/alvr_launcher_linux.tar.xz -C build/alvr_launcher_linux .
           cp "$RUNNER_TEMP/alvr-build-source.txt" artifacts/build-source.txt
 
       - name: Upload artifacts
@@ -91,23 +108,27 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
+          ref: ${{ inputs.source_ref }}
           submodules: true
 
       - name: Record selected source revision
         id: source
         shell: bash
+        env:
+          SOURCE_REF: ${{ inputs.source_ref }}
         run: |
           set -euo pipefail
-          source_sha="$(git rev-parse HEAD)"
-          if [[ "$source_sha" != "$GITHUB_SHA" ]]; then
-            echo "::error::Checkout $source_sha does not match dispatched revision $GITHUB_SHA"
+          if [[ "$GITHUB_REF" != "refs/heads/master" ]]; then
+            echo "::error::Run this workflow from master; choose the build source in source_ref."
             exit 1
           fi
-          safe_ref="$(printf '%s' "$GITHUB_REF_NAME" | sed -E 's/[^[:alnum:]_.-]+/-/g' | cut -c1-64)"
+          source_sha="$(git rev-parse HEAD)"
+          safe_ref="$(printf '%s' "$SOURCE_REF" | sed -E 's/[^[:alnum:]_.-]+/-/g' | cut -c1-64)"
           artifact_suffix="${safe_ref}-${source_sha:0:12}"
           echo "artifact_suffix=$artifact_suffix" >> "$GITHUB_OUTPUT"
           cat > "$RUNNER_TEMP/alvr-build-source.txt" <<EOF
           Workflow ref: $GITHUB_REF
+          Selected source ref: $SOURCE_REF
           Source commit: $source_sha
           Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID
           EOF
@@ -115,7 +136,8 @@ jobs:
           {
             echo '### Build source'
             echo
-            echo "- Ref: \`$GITHUB_REF\`"
+            echo "- Workflow ref: \`$GITHUB_REF\`"
+            echo "- Source ref: \`$SOURCE_REF\`"
             echo "- Commit: \`$source_sha\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -151,23 +173,27 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
+          ref: ${{ inputs.source_ref }}
           submodules: true
 
       - name: Record selected source revision
         id: source
         shell: bash
+        env:
+          SOURCE_REF: ${{ inputs.source_ref }}
         run: |
           set -euo pipefail
-          source_sha="$(git rev-parse HEAD)"
-          if [[ "$source_sha" != "$GITHUB_SHA" ]]; then
-            echo "::error::Checkout $source_sha does not match dispatched revision $GITHUB_SHA"
+          if [[ "$GITHUB_REF" != "refs/heads/master" ]]; then
+            echo "::error::Run this workflow from master; choose the build source in source_ref."
             exit 1
           fi
-          safe_ref="$(printf '%s' "$GITHUB_REF_NAME" | sed -E 's/[^[:alnum:]_.-]+/-/g' | cut -c1-64)"
+          source_sha="$(git rev-parse HEAD)"
+          safe_ref="$(printf '%s' "$SOURCE_REF" | sed -E 's/[^[:alnum:]_.-]+/-/g' | cut -c1-64)"
           artifact_suffix="${safe_ref}-${source_sha:0:12}"
           echo "artifact_suffix=$artifact_suffix" >> "$GITHUB_OUTPUT"
           cat > "$RUNNER_TEMP/alvr-build-source.txt" <<EOF
           Workflow ref: $GITHUB_REF
+          Selected source ref: $SOURCE_REF
           Source commit: $source_sha
           Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID
           EOF
@@ -175,7 +201,8 @@ jobs:
           {
             echo '### Build source'
             echo
-            echo "- Ref: \`$GITHUB_REF\`"
+            echo "- Workflow ref: \`$GITHUB_REF\`"
+            echo "- Source ref: \`$SOURCE_REF\`"
             echo "- Commit: \`$source_sha\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
