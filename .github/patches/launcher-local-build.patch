@@ -1,0 +1,192 @@
+diff --git a/alvr/launcher/src/actions.rs b/alvr/launcher/src/actions.rs
+index b6c0fb05..929b2808 100644
+--- a/alvr/launcher/src/actions.rs
++++ b/alvr/launcher/src/actions.rs
+@@ -15,6 +15,11 @@ use std::{
+ };
+ 
+ const APK_NAME: &str = "client.apk";
++const LOCAL_BUILD: bool = option_env!("ALVR_LOCAL_BUILD").is_some();
++
++pub fn is_local_build() -> bool {
++    LOCAL_BUILD
++}
+ 
+ pub fn installations_dir() -> PathBuf {
+     data_dir().join("installations")
+@@ -31,17 +36,19 @@ pub fn worker(
+                 .user_agent("ALVR-Launcher")
+                 .build()
+                 .unwrap();
+-            let version_data = match fetch_all_releases(&req_client).await {
+-                Ok(data) => data,
+-                Err(e) => {
+-                    eprintln!("Error fetching version data: {e}");
+-                    return;
+-                }
+-            };
++            if !LOCAL_BUILD {
++                let version_data = match fetch_all_releases(&req_client).await {
++                    Ok(data) => data,
++                    Err(e) => {
++                        eprintln!("Error fetching version data: {e}");
++                        return;
++                    }
++                };
+ 
+-            worker_message_sender
+-                .send(WorkerMessage::ReleaseChannelsInfo(version_data))
+-                .unwrap();
++                worker_message_sender
++                    .send(WorkerMessage::ReleaseChannelsInfo(version_data))
++                    .unwrap();
++            }
+ 
+             loop {
+                 let Ok(message) = ui_message_receiver.recv() else {
+@@ -64,6 +71,7 @@ pub fn worker(
+                     UiMessage::InstallClient(release_info) => {
+                         install_and_launch_apk(&worker_message_sender, release_info)
+                     }
++                    UiMessage::InstallLocalClient => install_local_apk(&worker_message_sender),
+                 };
+                 match res {
+                     Ok(()) => worker_message_sender.send(WorkerMessage::Done).unwrap(),
+@@ -75,6 +83,41 @@ pub fn worker(
+         });
+ }
+ 
++fn install_local_apk(worker_message_sender: &Sender<WorkerMessage>) -> Result<()> {
++    worker_message_sender.send(WorkerMessage::ProgressUpdate(Progress {
++        message: "Installing local Quest APK".into(),
++        progress: 0.0,
++    }))?;
++
++    let launcher_dir = env::current_exe()?
++        .parent()
++        .context("Unable to determine launcher directory")?
++        .to_path_buf();
++    let apk_path = launcher_dir.join("alvr_client_android.apk");
++    if !apk_path.is_file() {
++        bail!("Local APK not found at {}", apk_path.display())
++    }
++
++    // Local builds use system ADB and never download platform-tools.
++    let adb_path = "adb";
++    let device_serial = alvr_adb::commands::list_devices(adb_path)?
++        .into_iter()
++        .find_map(|device| device.serial)
++        .context("No connected ADB device found")?;
++    let application_id = alvr_system_info::PACKAGE_NAME_GITHUB_DEV;
++    if alvr_adb::commands::is_package_installed(adb_path, &device_serial, application_id)? {
++        worker_message_sender.send(WorkerMessage::ProgressUpdate(Progress {
++            message: "Removing installed development client".into(),
++            progress: 0.25,
++        }))?;
++        alvr_adb::commands::uninstall_package(adb_path, &device_serial, application_id)?;
++    }
++    alvr_adb::commands::install_package(adb_path, &device_serial, &apk_path.to_string_lossy())?;
++    alvr_adb::commands::start_application(adb_path, &device_serial, application_id)?;
++
++    Ok(())
++}
++
+ async fn fetch_all_releases(client: &reqwest::Client) -> Result<ReleaseChannelsInfo> {
+     Ok(ReleaseChannelsInfo {
+         stable: fetch_releases_for_repo(
+@@ -364,8 +407,21 @@ pub fn get_installations() -> Vec<InstallationInfo> {
+ }
+ 
+ pub fn launch_dashboard(version: &str) -> Result<()> {
+-    let installation_dir = installations_dir().join(version);
++    if LOCAL_BUILD && cfg!(target_os = "linux") {
++        let dashboard_path = env::current_exe()?
++            .parent()
++            .context("Unable to determine launcher directory")?
++            .join("alvr_streamer_linux/bin/alvr_dashboard");
++        if !dashboard_path.is_file() {
++            bail!("ALVR Dashboard not found at {}", dashboard_path.display())
++        }
++        Command::new(&dashboard_path)
++            .current_dir(dashboard_path.parent().unwrap())
++            .spawn()?;
++        return Ok(());
++    }
+ 
++    let installation_dir = installations_dir().join(version);
+     let dashboard_path = if cfg!(windows) {
+         installation_dir.join("ALVR Dashboard.exe")
+     } else if cfg!(target_os = "linux") {
+@@ -375,7 +431,6 @@ pub fn launch_dashboard(version: &str) -> Result<()> {
+     };
+ 
+     Command::new(dashboard_path).spawn()?;
+-
+     Ok(())
+ }
+ 
+diff --git a/alvr/launcher/src/main.rs b/alvr/launcher/src/main.rs
+index c94f5f38..bc081f26 100644
+--- a/alvr/launcher/src/main.rs
++++ b/alvr/launcher/src/main.rs
+@@ -35,6 +35,7 @@ pub enum UiMessage {
+         session_version: Option<String>,
+     },
+     InstallClient(ReleaseInfo),
++    InstallLocalClient,
+     Quit,
+ }
+ 
+diff --git a/alvr/launcher/src/ui.rs b/alvr/launcher/src/ui.rs
+index 991f1919..cc750cf5 100644
+--- a/alvr/launcher/src/ui.rs
++++ b/alvr/launcher/src/ui.rs
+@@ -299,6 +299,48 @@ impl eframe::App for Launcher {
+             State::Default => {
+                 ui.with_layout(Layout::top_down(Align::Center), |ui| {
+                     ui.label(RichText::new("ALVR Launcher").size(25.0).strong());
++                    if actions::is_local_build() {
++                        let launcher_dir = std::env::current_exe()
++                            .ok()
++                            .and_then(|path| path.parent().map(|path| path.to_path_buf()));
++                        if let Some(launcher_dir) = launcher_dir {
++                            ui.label("Local build (offline)");
++                            ui.label("Quest APK: alvr_client_android.apk beside this launcher");
++                            ui.horizontal(|ui| {
++                                if ui.button("Open build folder").clicked() {
++                                    open::that_in_background(&launcher_dir);
++                                }
++                                if ui
++                                    .add_enabled(
++                                        launcher_dir.join("alvr_client_android.apk").is_file(),
++                                        Button::new("Install local Quest APK"),
++                                    )
++                                    .clicked()
++                                {
++                                    self.ui_message_sender
++                                        .send(UiMessage::InstallLocalClient)
++                                        .ok();
++                                }
++                                if ui.button("Launch ALVR Dashboard").clicked() {
++                                    match actions::launch_dashboard("local") {
++                                        Ok(()) => {
++                                            self.ui_message_sender.send(UiMessage::Quit).ok();
++                                            ui.send_viewport_cmd(ViewportCommand::Close);
++                                        }
++                                        Err(e) => self.state = State::Error(e.to_string()),
++                                    }
++                                }
++                            });
++                            if !launcher_dir.join("alvr_client_android.apk").is_file() {
++                                ui.label("No local Quest APK found in the build folder.");
++                            }
++                        } else {
++                            self.state =
++                                State::Error("Unable to determine launcher directory".into());
++                        }
++                        return;
++                    }
++
+                     ui.label(match &self.release_channels_info {
+                         Some(data) => format!("Latest stable release: {}", data.stable[0].version),
+                         None => "Fetching latest release...".into(),
