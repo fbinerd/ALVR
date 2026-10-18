@@ -83,25 +83,26 @@ jobs:
           RUST_BACKTRACE: 1
         run: cargo xtask prepare-deps --platform linux
 
-      - name: Build and package ALVR (.tar.xz)
+      - name: Build and package ALVR Linux bundle (.tar.xz)
         working-directory: source
         env:
           RUST_BACKTRACE: 1
         run: |
           set -e
-          mkdir artifacts/
-          cargo xtask build-streamer --platform linux --ci
-          tar -cJf artifacts/alvr_streamer_linux.tar.xz ./build/alvr_streamer*
+          mkdir -p artifacts/alvr_linux_bundle/build
+          cargo xtask build-streamer --platform linux --ci --release
           git apply --check ../workflow/.github/patches/launcher-local-build.patch
           git apply ../workflow/.github/patches/launcher-local-build.patch
-          ALVR_LOCAL_BUILD=1 cargo xtask build-launcher --platform linux --ci
-          tar -cJf artifacts/alvr_launcher_linux.tar.xz ./build/alvr_launcher*
+          ALVR_LOCAL_BUILD=1 cargo xtask build-launcher --platform linux --ci --release
+          cp -a build/alvr_streamer_linux artifacts/alvr_linux_bundle/build/
+          cp -a build/alvr_launcher_linux artifacts/alvr_linux_bundle/build/
+          tar -cJf artifacts/alvr_linux_bundle.tar.xz -C artifacts alvr_linux_bundle
           cp "$RUNNER_TEMP/alvr-build-source.txt" artifacts/build-source.txt
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v7
         with:
-          name: Linux packages - ${{ steps.source.outputs.artifact_suffix }}
+          name: Linux bundle - ${{ steps.source.outputs.artifact_suffix }}
           path: ./source/artifacts/*
 
   build-windows:

@@ -94,7 +94,7 @@ index b6c0fb05..929b2808 100644
  async fn fetch_all_releases(client: &reqwest::Client) -> Result<ReleaseChannelsInfo> {
      Ok(ReleaseChannelsInfo {
          stable: fetch_releases_for_repo(
-@@ -364,8 +407,21 @@ pub fn get_installations() -> Vec<InstallationInfo> {
+@@ -364,8 +407,23 @@ pub fn get_installations() -> Vec<InstallationInfo> {
  }
  
  pub fn launch_dashboard(version: &str) -> Result<()> {
@@ -103,6 +103,8 @@ index b6c0fb05..929b2808 100644
 +        let dashboard_path = env::current_exe()?
 +            .parent()
 +            .context("Unable to determine launcher directory")?
++            .parent()
++            .context("Unable to determine bundle build directory")?
 +            .join("alvr_streamer_linux/bin/alvr_dashboard");
 +        if !dashboard_path.is_file() {
 +            bail!("ALVR Dashboard not found at {}", dashboard_path.display())
