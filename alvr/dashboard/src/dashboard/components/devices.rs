@@ -10,6 +10,15 @@ use eframe::{
     epaint::Color32,
 };
 
+/// Entries of the client list made for Air Link headsets (see
+/// alvr_server_core::AIRLINK_CLIENT_PREFIX); they are listed under Meta Air
+/// Link rather than with ALVR's wireless clients.
+const AIRLINK_CLIENT_PREFIX: &str = "airlink-";
+
+fn is_airlink_client(hostname: &str) -> bool {
+    hostname.starts_with(AIRLINK_CLIENT_PREFIX)
+}
+
 struct EditPopupState {
     new_devices: bool,
     hostname: String,
@@ -119,12 +128,19 @@ impl DevicesTab {
             {
                 self.airlink_headset = None;
             }
+            let airlink_clients = self
+                .trusted_devices
+                .iter()
+                .flatten()
+                .filter(|(hostname, _)| is_airlink_client(hostname))
+                .collect::<Vec<_>>();
             requests.extend(airlink_section(
                 ui,
                 self.airlink_host_enabled,
                 self.airlink_headset
                     .as_ref()
                     .map(|(address, streaming, _)| (address.as_str(), *streaming)),
+                &airlink_clients,
             ));
 
             ui.add_space(theme::FRAME_PADDING);
@@ -142,7 +158,9 @@ impl DevicesTab {
                     ui,
                     clients
                         .iter()
-                        .filter(|(hostname, _)| hostname != WIRED_CLIENT_HOSTNAME)
+                        .filter(|(hostname, _)| {
+                            hostname != WIRED_CLIENT_HOSTNAME && !is_airlink_client(hostname)
+                        })
                         .collect::<Vec<_>>()
                         .as_slice(),
                     &mut self.edit_popup_state,
@@ -216,11 +234,13 @@ impl DevicesTab {
     }
 }
 
-/// The Meta Air Link host: its switch and the headset connected to it.
+/// The Meta Air Link host: its switch, the headset connected to it and the
+/// headsets the user accepted.
 fn airlink_section(
     ui: &mut Ui,
     enabled: Option<bool>,
     headset: Option<(&str, bool)>,
+    paired: &[&(String, ClientConnectionConfig)],
 ) -> Vec<ServerRequest> {
     let mut requests = vec![];
 
@@ -275,6 +295,30 @@ fn airlink_section(
                         _ => {}
                     }
                 });
+
+            for (hostname, data) in paired {
+                ui.add_space(theme::FRAME_TEXT_SPACING);
+                Frame::group(ui.style())
+                    .fill(theme::DARKER_BG)
+                    .inner_margin(egui::vec2(15.0, 12.0))
+                    .show(ui, |ui| {
+                        Grid::new(format!("{hostname}-airlink"))
+                            .num_columns(2)
+                            .spacing(egui::vec2(8.0, 8.0))
+                            .show(ui, |ui| {
+                                ui.label(&data.display_name);
+                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                    if ui.button("Remove").clicked() {
+                                        requests.push(ServerRequest::UpdateClientList {
+                                            hostname: hostname.clone(),
+                                            action: ClientConnectionsAction::RemoveEntry,
+                                        });
+                                    }
+                                });
+                                ui.end_row();
+                            });
+                    });
+            }
         });
 
     requests
