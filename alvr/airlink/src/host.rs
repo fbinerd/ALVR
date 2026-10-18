@@ -354,12 +354,17 @@ impl AirLinkHost {
                                 let packet = crate::haptics::pack_haptic_packet(
                                     hand as u32,
                                     haptic.amplitude,
+                                    haptic.frequency,
                                     monotonic_nanos() as f64 / 1e9,
                                 );
                                 self.send(stream, HAPTIC_TOPIC, &packet).await?;
+                                // SteamVR sends a stream of zero-length pulses, each
+                                // meant to hold until the next; stopped after a few
+                                // milliseconds the motor barely spins up (user test,
+                                // 2026-10-17). Meta's runtime held them 20 to 240 ms.
                                 haptic_stop_at[hand] = (haptic.amplitude > 0.0).then(|| {
                                     tokio::time::Instant::now()
-                                        + haptic.duration.max(std::time::Duration::from_millis(10))
+                                        + haptic.duration.max(crate::haptics::MIN_DURATION)
                                 });
                                 haptic_packets += 1;
                                 if haptic_packets == 1 || haptic_packets % 1000 == 0 {
@@ -380,6 +385,7 @@ impl AirLinkHost {
                                 *stop_at = None;
                                 let packet = crate::haptics::pack_haptic_packet(
                                     hand as u32,
+                                    0.0,
                                     0.0,
                                     monotonic_nanos() as f64 / 1e9,
                                 );

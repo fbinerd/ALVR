@@ -802,6 +802,7 @@ impl ServerCoreContext {
             alvr_airlink::haptics::send_haptic(alvr_airlink::haptics::AirLinkHaptic {
                 hand,
                 amplitude: haptics.amplitude,
+                frequency: 1.0,
                 duration: haptics.duration,
             });
         }
