@@ -682,6 +682,11 @@ impl ServerCoreContext {
                         alvr_airlink::host::set_enabled(
                             SESSION_MANAGER.read().settings().connection.airlink_host,
                         );
+                        // The headset's display rate goes in the session invite,
+                        // before the stream starts: keep it on ALVR's setting.
+                        alvr_airlink::video::set_refresh_rate(
+                            SESSION_MANAGER.read().settings().video.preferred_fps,
+                        );
                         let status = alvr_airlink::host::headset_status();
                         ticks_since_report += 1;
                         if status != reported || (status.is_some() && ticks_since_report >= 3) {
