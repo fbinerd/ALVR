@@ -208,7 +208,7 @@ pub fn pack_gpu_stream_channel_config_event(
     // The display refresh rate (0x48 = 72 in the 72 Hz capture, 90 and 120 in
     // the others).
     payload.extend_from_slice(&crate::video::display_refresh_hz().to_le_bytes());
-    payload.push(1);
+    payload.extend_from_slice(&[0, 1]);
     let header = RuntimeIpcHeader {
         message_type: MESSAGE_TYPE_SESSION_EVENT,
         message_size: payload.len() as u32,
@@ -987,5 +987,30 @@ mod captured_layout_tests {
                 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 5, 0, 0, 0, 1, 1, 0, 0, 0
             ]
         );
+    }
+}
+
+#[cfg(test)]
+mod refresh_rate_tests {
+    use super::{RuntimeIpcHeader, pack_gpu_stream_channel_config_event};
+
+    #[test]
+    fn gpu_stream_channel_config_keeps_its_captured_tail_at_72_hz() {
+        crate::video::set_refresh_rate(72.0);
+        let route = RuntimeIpcHeader {
+            message_type: 0,
+            message_size: 0,
+            client_id: 1,
+            server_id: 2,
+            one_way: false,
+            request_id: 0,
+            memory_id: 0,
+            message_direction: 0,
+            rpc_failure_status: 0,
+        };
+        let packet = pack_gpu_stream_channel_config_event(route).unwrap();
+        assert!(packet.ends_with(&[
+            3, 0, 0, 0, 0x20, 1, 0, 0, 0, 1, 0, 2, 0, 1, 0, 0x48, 0, 0, 0, 0, 1
+        ]));
     }
 }
