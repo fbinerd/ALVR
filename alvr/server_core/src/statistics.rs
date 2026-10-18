@@ -54,6 +54,8 @@ pub struct StatisticsManager {
     steamvr_pipeline_latency: Duration,
     motion_to_photon_latency_average: SlidingWindowAverage<Duration>,
     last_vsync_time: Instant,
+    #[cfg(target_os = "linux")]
+    vsync_frame_counter: u64,
     frame_interval: Duration,
     last_throughput_directives: BitrateDirectives,
 }
@@ -84,6 +86,8 @@ impl StatisticsManager {
                 max_history_size,
             ),
             last_vsync_time: Instant::now(),
+            #[cfg(target_os = "linux")]
+            vsync_frame_counter: 0,
             frame_interval: nominal_server_frame_interval,
             last_throughput_directives: BitrateDirectives::default(),
         }
@@ -299,12 +303,33 @@ impl StatisticsManager {
     // NB: this call is non-blocking, waiting should be done externally
     pub fn duration_until_next_vsync(&mut self) -> Duration {
         let now = Instant::now();
+        self.advance_vsync_grid(now);
 
-        // update the last vsync if it's too old
+        (self.last_vsync_time + self.frame_interval).saturating_duration_since(now)
+    }
+
+    #[cfg(target_os = "linux")]
+    pub fn time_since_last_vsync(&mut self) -> (Duration, u64) {
+        let now = Instant::now();
+        self.advance_vsync_grid(now);
+        (
+            now.saturating_duration_since(self.last_vsync_time),
+            self.vsync_frame_counter,
+        )
+    }
+
+    #[cfg(target_os = "linux")]
+    fn advance_vsync_grid(&mut self, now: Instant) {
+        while self.last_vsync_time + self.frame_interval < now {
+            self.last_vsync_time += self.frame_interval;
+            self.vsync_frame_counter = self.vsync_frame_counter.wrapping_add(1);
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn advance_vsync_grid(&mut self, now: Instant) {
         while self.last_vsync_time + self.frame_interval < now {
             self.last_vsync_time += self.frame_interval;
         }
-
-        (self.last_vsync_time + self.frame_interval).saturating_duration_since(now)
     }
 }

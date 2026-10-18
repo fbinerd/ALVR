@@ -727,6 +727,25 @@ extern "C" fn wait_for_vsync() {
     }
 }
 
+#[unsafe(export_name = "TimeSinceLastVSync")]
+#[cfg(target_os = "linux")]
+unsafe extern "C" fn time_since_last_vsync(
+    elapsed_ns: *mut u64,
+    frame_counter: *mut u64,
+) -> bool {
+    if let Some(context) = &*SERVER_CORE_CONTEXT.read()
+        && let Some((elapsed, counter)) = context.time_since_last_vsync()
+    {
+        unsafe {
+            *elapsed_ns = elapsed.as_nanos() as u64;
+            *frame_counter = counter;
+        }
+        true
+    } else {
+        false
+    }
+}
+
 #[unsafe(export_name = "ShutdownRuntime")]
 pub extern "C" fn shutdown_driver() {
     SERVER_CORE_CONTEXT.write().take();

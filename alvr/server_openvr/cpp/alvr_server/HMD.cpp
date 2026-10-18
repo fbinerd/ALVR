@@ -8,7 +8,29 @@
 #include "ViveTrackerProxy.h"
 #include "bindings.h"
 #include <cfloat>
+#include <cstdlib>
+#include <fstream>
 #include <memory>
+#include <string>
+
+#ifdef __linux__
+static bool IsLinuxVirtualDisplayPocEnabled() {
+    const char* enabledEnv = std::getenv("ALVR_LINUX_VIRTUAL_DISPLAY_POC");
+    if (enabledEnv && std::string(enabledEnv) == "1") {
+        return true;
+    }
+
+    const char* home = std::getenv("HOME");
+    if (!home) {
+        return false;
+    }
+
+    std::ifstream config(std::string(home) + "/.config/alvr/virtual_display_poc");
+    std::string value;
+    config >> value;
+    return value == "1";
+}
+#endif
 
 #ifdef _WIN32
 #include "platform/win32/CEncoder.h"
@@ -34,6 +56,10 @@ Hmd::Hmd()
     this->m_viewParams[1] = dummy_m_viewParams;
 
     m_poseHistory = std::make_shared<PoseHistory>();
+
+#ifdef __linux__
+    m_virtualDisplayPoc = IsLinuxVirtualDisplayPocEnabled();
+#endif
 
     if (Settings_Instance()->m_enableViveTrackerProxy) {
         m_viveTrackerProxy = std::make_unique<ViveTrackerProxy>(*this);
@@ -71,6 +97,19 @@ bool Hmd::activate() {
     auto vr_properties = vr::VRProperties();
 
     SetOpenvrProps((void*)this, this->device_id);
+
+#ifdef __linux__
+    vr_properties->SetBoolProperty(
+        this->prop_container,
+        vr::Prop_HasVirtualDisplayComponent_Bool,
+        m_virtualDisplayPoc
+    );
+    vr_properties->SetBoolProperty(
+        this->prop_container,
+        vr::Prop_HasDriverDirectModeComponent_Bool,
+        !m_virtualDisplayPoc
+    );
+#endif
 
 #if !defined(_WIN32) && !defined(__APPLE__)
     // The property has no type suffix in the header, so the generated key
@@ -130,7 +169,12 @@ bool Hmd::activate() {
             m_directModeComponent
                 = std::make_shared<OvrDirectModeComponent>(m_D3DRender, m_poseHistory);
 #elif __linux__
-            m_directModeComponent = std::make_shared<OvrDirectModeComponent>(m_poseHistory);
+            if (m_virtualDisplayPoc) {
+                Info("Linux virtual display proof enabled");
+                m_virtualDisplayComponent = std::make_shared<OvrVirtualDisplayComponent>();
+            } else {
+                m_directModeComponent = std::make_shared<OvrDirectModeComponent>(m_poseHistory);
+            }
 #endif
         }
 
@@ -159,6 +203,12 @@ void* Hmd::get_component(const char* component_name_and_version) {
     }
 
 #ifndef __APPLE__
+#ifdef __linux__
+    if (name_and_vers == vr::IVRVirtualDisplay_Version) {
+        return m_virtualDisplayComponent.get();
+    }
+#endif
+
     if (name_and_vers == vr::IVRDriverDirectModeComponent_Version) {
         return m_directModeComponent.get();
     }

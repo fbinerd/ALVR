@@ -8,6 +8,7 @@
 #include "platform/win32/OvrDirectModeComponent.h"
 #elif __linux__
 #include "platform/linux/OvrDirectModeComponent.h"
+#include "platform/linux/OvrVirtualDisplayComponent.h"
 #endif
 
 class Controller;
@@ -59,6 +60,11 @@ public:
     std::shared_ptr<OvrDirectModeComponent> m_directModeComponent;
 
 private:
+#endif
+
+#ifdef __linux__
+    std::shared_ptr<OvrVirtualDisplayComponent> m_virtualDisplayComponent;
+    bool m_virtualDisplayPoc = false;
 #endif
 
     std::shared_ptr<ViveTrackerProxy> m_viveTrackerProxy;

@@ -540,6 +540,15 @@ impl ServerCoreContext {
             .as_mut()
             .map(|stats| stats.duration_until_next_vsync())
     }
+
+    #[cfg(target_os = "linux")]
+    pub fn time_since_last_vsync(&self) -> Option<(Duration, u64)> {
+        self.connection_context
+            .statistics_manager
+            .write()
+            .as_mut()
+            .map(|stats| stats.time_since_last_vsync())
+    }
 }
 
 impl Drop for ServerCoreContext {
