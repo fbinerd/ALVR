@@ -779,8 +779,9 @@ pub fn pack_session_invite_accepted_event(
             {
                 return Err("session invite template lost its refresh rate field");
             }
+            let hz = crate::video::start_session_refresh_rate();
             object[INVITE_REFRESH_RATE_OFFSET..INVITE_REFRESH_RATE_OFFSET + 4]
-                .copy_from_slice(&crate::video::display_refresh_hz().to_le_bytes());
+                .copy_from_slice(&hz.to_le_bytes());
             object
         }
         _ => return Err("unsupported captured Air Link session type"),
@@ -997,6 +998,7 @@ mod refresh_rate_tests {
     #[test]
     fn gpu_stream_channel_config_keeps_its_captured_tail_at_72_hz() {
         crate::video::set_refresh_rate(72.0);
+        crate::video::start_session_refresh_rate();
         let route = RuntimeIpcHeader {
             message_type: 0,
             message_size: 0,

@@ -22,15 +22,20 @@ pub const REFRESH_RATE_FACTOR: f64 = 71.8272 / 72.0;
 
 static FRAME_PERIOD_NS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(13_922_300);
+// The rate asked for in the settings, and the one of the current session:
+// the headset takes its rate from the session invite only, so a change
+// waits for the next session.
+static REQUESTED_REFRESH_HZ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(72);
 static DISPLAY_REFRESH_HZ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(72);
 
 /// Display refresh rates a Quest 2 accepts over Link.
 pub const SUPPORTED_REFRESH_RATES: [u32; 4] = [72, 80, 90, 120];
 
-/// Sets the refresh rate the headset is asked to run at (the supported rate
-/// nearest to `nominal_hz`) and the frame period that goes with it. Meta
-/// Horizon Link sends the rate in the session invite and in the GPU stream
-/// channel's messages, and the headset switches its display to it.
+/// Sets the refresh rate the headset is asked to run at from the next
+/// session on (the supported rate nearest to `nominal_hz`). Meta Horizon
+/// Link sends the rate in the session invite and in the GPU stream channel's
+/// messages, and the headset switches its display to it; Horizon restarts
+/// the session to change it.
 pub fn set_refresh_rate(nominal_hz: f32) {
     let hz = SUPPORTED_REFRESH_RATES
         .into_iter()
@@ -40,9 +45,17 @@ pub fn set_refresh_rate(nominal_hz: f32) {
                 .total_cmp(&(*b as f32 - nominal_hz).abs())
         })
         .unwrap_or(72);
+    REQUESTED_REFRESH_HZ.store(hz, Ordering::Relaxed);
+}
+
+/// Starts a session at the requested rate: the invite, the GPU stream
+/// channel's messages and the frame pacing all use it until the next one.
+pub fn start_session_refresh_rate() -> u32 {
+    let hz = REQUESTED_REFRESH_HZ.load(Ordering::Relaxed);
     DISPLAY_REFRESH_HZ.store(hz, Ordering::Relaxed);
     let period_ns = 1e9 / (f64::from(hz) * REFRESH_RATE_FACTOR);
     FRAME_PERIOD_NS.store(period_ns as u64, Ordering::Relaxed);
+    hz
 }
 
 /// The display refresh rate the headset is asked to run at, in Hz.
