@@ -120,13 +120,20 @@ impl DevicesTab {
             ui.add_space(theme::FRAME_PADDING);
 
             // The server repeats the headset's status while it is connected;
-            // one that stopped coming is from a server that went away.
-            if self
-                .airlink_headset
-                .as_ref()
-                .is_some_and(|(_, _, at)| at.elapsed() > std::time::Duration::from_secs(8))
+            // one that stopped coming is from a server that went away. The
+            // page is redrawn every second meanwhile, or nothing would clear
+            // it until the user moves the mouse.
+            if !connected_to_server
+                || self
+                    .airlink_headset
+                    .as_ref()
+                    .is_some_and(|(_, _, at)| at.elapsed() > std::time::Duration::from_secs(8))
             {
                 self.airlink_headset = None;
+            }
+            if self.airlink_headset.is_some() {
+                ui.ctx()
+                    .request_repaint_after(std::time::Duration::from_secs(1));
             }
             let airlink_clients = self
                 .trusted_devices
