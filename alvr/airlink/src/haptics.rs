@@ -32,6 +32,14 @@ const TAIL_MARK: [u8; 2] = [0x3c, 0x19];
 /// bypassed ALVR's setting. 10 ms at 16 % amplitude was still felt (user
 /// test, 2026-10-17); longer pulses feel stronger because they merge.
 pub const MIN_DURATION: Duration = Duration::from_millis(10);
+/// A pulse train continues if the next pulse comes within this time after
+/// the previous one ends (VRChat's pulses come up to 17 ms apart), so the
+/// motor is not stopped and restarted between them. A lone pulse lasts this
+/// much longer than asked.
+pub const PULSE_TRAIN_GAP: Duration = Duration::from_millis(20);
+/// A steady vibration is repeated to the headset this often, in case it
+/// times vibrations out on its own.
+pub const REFRESH_INTERVAL: Duration = Duration::from_millis(500);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AirLinkHand {

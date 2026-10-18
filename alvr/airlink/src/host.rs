@@ -315,6 +315,8 @@ impl AirLinkHost {
         let _haptic_queue = HapticQueueGuard;
         let mut haptics_open = true;
         let mut haptic_stop_at: [Option<tokio::time::Instant>; 2] = [None; 2];
+        // What each hand vibrates at now, and when the headset was last told.
+        let mut haptic_playing: [Option<(f32, f32, tokio::time::Instant)>; 2] = [None; 2];
         let mut haptic_packets = 0u64;
         let mut display_grid_s: Option<f64> = None;
         let mut display_lead_s = display_lead_ms() / 1000.0;
@@ -351,24 +353,49 @@ impl AirLinkHost {
                         match haptic {
                             Some(haptic) if next_video_frame_id > 2 => {
                                 let hand = haptic.hand as usize;
-                                let packet = crate::haptics::pack_haptic_packet(
-                                    hand as u32,
-                                    haptic.amplitude,
-                                    haptic.frequency,
-                                    monotonic_nanos() as f64 / 1e9,
-                                );
-                                self.send(stream, HAPTIC_TOPIC, &packet).await?;
-                                // The duration already carries ALVR's minimum
-                                // (Settings > Controllers > Haptics); SteamVR's own
-                                // pulses are zero-length.
-                                haptic_stop_at[hand] = (haptic.amplitude > 0.0).then(|| {
-                                    tokio::time::Instant::now()
-                                        + haptic.duration.max(crate::haptics::MIN_DURATION)
-                                });
-                                haptic_packets += 1;
-                                if haptic_packets == 1 || haptic_packets % 1000 == 0 {
-                                    log::info!("Air Link haptics: {haptic_packets} vibrations sent");
+                                let now = tokio::time::Instant::now();
+                                if haptic.amplitude <= 0.0 {
+                                    // An explicit stop: let the timer send it now.
+                                    if haptic_playing[hand].is_some() {
+                                        haptic_stop_at[hand] = Some(now);
+                                    }
+                                    continue;
                                 }
+                                // Games send trains of short pulses (VRChat: 3 ms
+                                // every 7 to 17 ms while a saber touches). The
+                                // headset vibrates until told to stop, so the host
+                                // tells it only when the vibration starts or
+                                // changes, and stops it once the pulses stop for
+                                // longer than PULSE_TRAIN_GAP.
+                                let unchanged = haptic_playing[hand].is_some_and(
+                                    |(amplitude, frequency, sent_at)| {
+                                        (amplitude - haptic.amplitude).abs() < 0.01
+                                            && (frequency - haptic.frequency).abs() < 0.01
+                                            && now - sent_at < crate::haptics::REFRESH_INTERVAL
+                                    },
+                                );
+                                if !unchanged {
+                                    let packet = crate::haptics::pack_haptic_packet(
+                                        hand as u32,
+                                        haptic.amplitude,
+                                        haptic.frequency,
+                                        monotonic_nanos() as f64 / 1e9,
+                                    );
+                                    self.send(stream, HAPTIC_TOPIC, &packet).await?;
+                                    haptic_playing[hand] =
+                                        Some((haptic.amplitude, haptic.frequency, now));
+                                    haptic_packets += 1;
+                                    if haptic_packets == 1 || haptic_packets % 1000 == 0 {
+                                        log::info!("Air Link haptics: {haptic_packets} packets sent");
+                                    }
+                                }
+                                // The duration already carries ALVR's minimum
+                                // (Settings > Controllers > Haptics).
+                                let stop_at = now
+                                    + haptic.duration.max(crate::haptics::MIN_DURATION)
+                                    + crate::haptics::PULSE_TRAIN_GAP;
+                                haptic_stop_at[hand] =
+                                    Some(haptic_stop_at[hand].map_or(stop_at, |at| at.max(stop_at)));
                             }
                             Some(_) => {}
                             None => haptics_open = false,
@@ -382,6 +409,7 @@ impl AirLinkHost {
                         for (hand, stop_at) in haptic_stop_at.iter_mut().enumerate() {
                             if stop_at.is_some_and(|stop_at| stop_at <= now) {
                                 *stop_at = None;
+                                haptic_playing[hand] = None;
                                 let packet = crate::haptics::pack_haptic_packet(
                                     hand as u32,
                                     0.0,
