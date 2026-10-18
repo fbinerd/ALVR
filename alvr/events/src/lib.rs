@@ -96,6 +96,9 @@ pub enum EventType {
     /// The headset connected with Meta Air Link, repeated while it stays.
     AirLinkHeadset {
         address: Option<String>,
+        /// Accepted by the user; before that the headset is connecting.
+        #[serde(default)]
+        approved: bool,
         streaming: bool,
     },
     /// A headset waits for its Meta Air Link pairing to be accepted here,
@@ -156,9 +159,13 @@ impl Event {
             EventType::Haptics(haptics) => serde_json::to_string(haptics).unwrap(),
             EventType::DriversList(drivers) => serde_json::to_string(drivers).unwrap(),
             EventType::AirLinkStreaming(streaming) => streaming.to_string(),
-            EventType::AirLinkHeadset { address, streaming } => {
+            EventType::AirLinkHeadset {
+                address,
+                approved,
+                streaming,
+            } => {
                 format!(
-                    "{} streaming: {streaming}",
+                    "{} approved: {approved} streaming: {streaming}",
                     address.as_deref().unwrap_or("none")
                 )
             }

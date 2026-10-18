@@ -687,6 +687,7 @@ impl ServerCoreContext {
                         if status != reported || (status.is_some() && ticks_since_report >= 3) {
                             alvr_events::send_event(EventType::AirLinkHeadset {
                                 address: status.map(|status| status.address.ip().to_string()),
+                                approved: status.is_some_and(|status| status.approved),
                                 streaming: status.is_some_and(|status| status.streaming),
                             });
                             reported = status;
