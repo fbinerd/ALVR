@@ -337,6 +337,9 @@ impl AirLinkHost {
         let mut headset: Option<([u8; 16], String)> = None;
         let mut approved = false;
         let mut approved_at: Option<std::time::Instant> = None;
+        // A headset the user removes in the dashboard is dropped at once.
+        let mut removal_check = tokio::time::interval(std::time::Duration::from_secs(1));
+        removal_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut held: std::collections::VecDeque<(u32, Vec<u8>)> =
             std::collections::VecDeque::new();
         let peer_address = STATUS.lock().unwrap().map(|status| status.address);
@@ -418,6 +421,18 @@ impl AirLinkHost {
                                 );
                                 self.send(stream, HAPTIC_TOPIC, &packet).await?;
                             }
+                        }
+                        continue;
+                    }
+                    _ = removal_check.tick(), if approved => {
+                        // The known list follows the dashboard's client list
+                        // about once a second; a just-accepted headset gets
+                        // a few seconds to appear in it.
+                        if let Some((id, _)) = &headset
+                            && approved_at.is_none_or(|at| at.elapsed().as_secs() >= 5)
+                            && !KNOWN_HEADSETS.lock().unwrap().contains(id)
+                        {
+                            return Err("the headset was removed in the dashboard".into());
                         }
                         continue;
                     }
