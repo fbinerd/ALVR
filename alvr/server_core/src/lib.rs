@@ -420,6 +420,12 @@ impl ServerCoreContext {
         let tracking_events = self.connection_context.events_sender.clone();
         let tracking_origin = Instant::now();
         let headset_settings = settings.headset.clone();
+        // Air Link reports controller poses only: their velocities are
+        // measured here so ALVR's controller prediction works as for its client.
+        let controller_velocities = Mutex::new([
+            alvr_airlink::tracking::VelocityEstimator::default(),
+            alvr_airlink::tracking::VelocityEstimator::default(),
+        ]);
         let on_tracking_update = Arc::new(
             move |sample: alvr_airlink::tracking::AirLinkTrackingSample| {
                 let pose = |pose: alvr_airlink::tracking::AirLinkPose| Pose {
@@ -442,20 +448,29 @@ impl ServerCoreContext {
                 )];
                 // A controller that is asleep or out of sight is left out:
                 // SteamVR then shows it as not tracked.
-                for (device_id, hand) in [
+                let mut velocities = controller_velocities.lock();
+                for ((device_id, hand), estimator) in [
                     (*HAND_LEFT_ID, sample.left_hand),
                     (*HAND_RIGHT_ID, sample.right_hand),
-                ] {
+                ]
+                .into_iter()
+                .zip(velocities.iter_mut())
+                {
                     if let Some(hand) = hand {
+                        let (linear, angular) = estimator.update(hand, sample.head_time_s);
                         motions.push((
                             device_id,
                             DeviceMotion {
                                 pose: pose(hand),
-                                ..DeviceMotion::default()
+                                linear_velocity: Vec3::from_array(linear),
+                                angular_velocity: Vec3::from_array(angular),
                             },
                         ));
+                    } else {
+                        estimator.reset();
                     }
                 }
+                drop(velocities);
                 tracking_context
                     .tracking_manager
                     .write()
