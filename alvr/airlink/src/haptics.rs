@@ -15,7 +15,9 @@
 //! | 34 | `3c 19` and zeros, constant |
 //!
 //! The headset vibrates until told to stop: Meta's runtime sends a packet
-//! with amplitude 0 when the vibration's duration is over.
+//! with amplitude 0 when the vibration's duration is over. The frequency
+//! field made no difference the user could feel (sweep from 1 to 0.1 at full
+//! amplitude, 2026-10-17); the amplitude does.
 
 use std::sync::Mutex;
 use std::time::Duration;
@@ -26,6 +28,8 @@ const BODY_BYTES: usize = 65;
 const KIND: [u8; 5] = [0x42, 0x01, 0, 0, 0];
 const MIDDLE: [u8; 9] = [0x0d, 0, 0, 0, 0x8a, 0x62, 0x49, 0x3d, 0x10];
 const TAIL_MARK: [u8; 2] = [0x3c, 0x19];
+/// Shortest vibration sent to the headset.
+pub const MIN_DURATION: Duration = Duration::from_millis(80);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AirLinkHand {
@@ -39,10 +43,12 @@ pub struct AirLinkHaptic {
     pub hand: AirLinkHand,
     /// 0 to 1.
     pub amplitude: f32,
+    /// 0 to 1 in Meta's unit (1 is what Meta's runtime always sends).
+    pub frequency: f32,
     pub duration: Duration,
 }
 
-pub fn pack_haptic_packet(hand: u32, amplitude: f32, pc_clock_s: f64) -> Vec<u8> {
+pub fn pack_haptic_packet(hand: u32, amplitude: f32, frequency: f32, pc_clock_s: f64) -> Vec<u8> {
     let mut packet = Vec::with_capacity(PREFIX_BYTES + 2 + BODY_BYTES);
     packet.resize(PREFIX_BYTES, 0);
     // (65 << 1) as a varint.
@@ -51,7 +57,7 @@ pub fn pack_haptic_packet(hand: u32, amplitude: f32, pc_clock_s: f64) -> Vec<u8>
     packet.extend_from_slice(&pc_clock_s.to_le_bytes());
     packet.extend_from_slice(&hand.to_le_bytes());
     packet.extend_from_slice(&MIDDLE);
-    let frequency = if amplitude > 0.0 { 1.0f32 } else { 0.0 };
+    let frequency = if amplitude > 0.0 { frequency.clamp(0.0, 1.0) } else { 0.0 };
     packet.extend_from_slice(&frequency.to_le_bytes());
     packet.extend_from_slice(&amplitude.clamp(0.0, 1.0).to_le_bytes());
     packet.extend_from_slice(&TAIL_MARK);
@@ -102,14 +108,14 @@ mod tests {
             "7d84de8e6c4ef240",
             "00".repeat(29)
         );
-        assert_eq!(pack_haptic_packet(0, 0.15, time), hex(&on));
+        assert_eq!(pack_haptic_packet(0, 0.15, 1.0, time), hex(&on));
         let off = format!(
             "{}82014201000000{}010000000d0000008a62493d1000000000000000003c19{}",
             "00".repeat(20),
             "7d84de8e6c4ef240",
             "00".repeat(29)
         );
-        assert_eq!(pack_haptic_packet(1, 0.0, time), hex(&off));
-        assert_eq!(pack_haptic_packet(1, 0.0, time).len(), 87);
+        assert_eq!(pack_haptic_packet(1, 0.0, 1.0, time), hex(&off));
+        assert_eq!(pack_haptic_packet(1, 0.0, 1.0, time).len(), 87);
     }
 }

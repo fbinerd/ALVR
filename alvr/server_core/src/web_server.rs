@@ -92,6 +92,7 @@ pub async fn web_server(connection_context: Arc<ConnectionContext>) -> Result<()
                 .route("/buttons", routing::post(set_buttons))
                 .route("/airlink-pairing", routing::post(answer_airlink_pairing))
                 .route("/insert-idr", routing::post(insert_idr))
+                .route("/airlink-test-haptics", routing::post(airlink_test_haptics))
                 .nest(
                     "/recording",
                     Router::new()
@@ -204,6 +205,31 @@ async fn update_client_connections(
 
 async fn insert_idr(State(ctx): State<Arc<ConnectionContext>>) {
     ctx.events_sender.send(ServerCoreEvent::RequestIDR).ok();
+}
+
+#[derive(serde::Deserialize)]
+struct AirLinkTestHaptics {
+    right: bool,
+    amplitude: f32,
+    duration_s: f32,
+    #[serde(default = "full_frequency")]
+    frequency: f32,
+}
+
+fn full_frequency() -> f32 {
+    1.0
+}
+
+/// Vibrates an Air Link controller directly, for testing strength and
+/// duration without a game: {"right": false, "amplitude": 1.0, "duration_s": 0.5}.
+async fn airlink_test_haptics(Json(request): Json<AirLinkTestHaptics>) {
+    use alvr_airlink::haptics::{AirLinkHand, AirLinkHaptic, send_haptic};
+    send_haptic(AirLinkHaptic {
+        hand: if request.right { AirLinkHand::Right } else { AirLinkHand::Left },
+        amplitude: request.amplitude,
+        frequency: request.frequency,
+        duration: std::time::Duration::from_secs_f32(request.duration_s.clamp(0.0, 5.0)),
+    });
 }
 
 async fn start_recording(State(ctx): State<Arc<ConnectionContext>>) {
