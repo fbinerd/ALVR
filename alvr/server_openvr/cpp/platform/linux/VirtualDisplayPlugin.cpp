@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <mutex>
 #include <thread>
 #include <unistd.h>
@@ -174,6 +175,32 @@ public:
             vr::CleanupDriverContext();
             return error;
         }
+
+        // Linux constructs CHmdWindowSDL before choosing the virtual display
+        // renderer. Without a physical HMD output it needs this fallback even
+        // when our compositor component was found. The test runner owns the
+        // SteamVR settings backup/restoration; this provider only reads them.
+        auto* settings = vr::VRSettings();
+        for (const char* key : {"enableLinuxVulkanAsync", "allowFallbackMirrorWindowLinux"}) {
+            vr::EVRSettingsError settingError = vr::VRSettingsError_None;
+            const bool value = settings->GetBool(vr::k_pch_SteamVR_Section, key, &settingError);
+            m_log.Write("Bootstrap setting=%s value=%d error=%d", key, value,
+                        static_cast<int>(settingError));
+        }
+
+        // Record the library mappings while this process is still alive. The
+        // previous trial exited before the runner could read /proc/<pid>/maps.
+        std::ifstream maps("/proc/self/maps");
+        std::string mapping;
+        bool foundMapping = false;
+        while (std::getline(maps, mapping)) {
+            if (mapping.find("driver_alvr_server.so") != std::string::npos) {
+                m_log.Write("ModuleMap %s", mapping.c_str());
+                foundMapping = true;
+            }
+        }
+        m_log.Write("ModuleMap found=%d", foundMapping);
+
         m_display.Reset();
         m_initialized = true;
         m_log.Write("Init complete refresh_hz=72 runtime=local_proof_only");
@@ -195,8 +222,10 @@ public:
     void* GetComponent(const char* name) override {
         const bool supported = m_initialized && name
             && std::strcmp(name, vr::IVRVirtualDisplay_Version) == 0;
-        m_log.Write("GetComponent name=%s supported=%d", name ? name : "<null>", supported);
-        return supported ? static_cast<vr::IVRVirtualDisplay*>(&m_display) : nullptr;
+        auto* component = supported ? static_cast<vr::IVRVirtualDisplay*>(&m_display) : nullptr;
+        m_log.Write("GetComponent name=%s supported=%d component=%p",
+                    name ? name : "<null>", supported, static_cast<void*>(component));
+        return component;
     }
 
     PluginLog m_log;
