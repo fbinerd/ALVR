@@ -215,9 +215,6 @@ HapticsSend(unsigned long long path, float duration_s, float frequency, float am
 extern "C" void ShutdownRuntime();
 extern "C" unsigned long long PathStringToHash(const char* path);
 extern "C" void ReportPresent(unsigned long long timestamp_ns, unsigned long long offset_ns);
-#ifdef __linux__
-extern "C" bool ShouldEncodeAirLinkTestFrame();
-#endif
 extern "C" void ReportComposed(unsigned long long timestamp_ns, unsigned long long offset_ns);
 extern "C" FfiDynamicEncoderParams GetDynamicEncoderParams();
 extern "C" FfiFoveationCenters GetEyeTrackedFoveationCenters(unsigned long long targetTimestampNs);

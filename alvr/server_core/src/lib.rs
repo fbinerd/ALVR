@@ -1,5 +1,3 @@
-#[cfg(target_os = "linux")]
-mod airlink_test;
 mod bitrate;
 mod c_api;
 mod connection;
@@ -853,19 +851,6 @@ impl ServerCoreContext {
         });
     }
 
-    /// Skip source frames before encoding, so HEVC references only sent frames.
-    #[cfg(target_os = "linux")]
-    pub fn should_encode_airlink_test_frame(&self) -> bool {
-        static GATE: LazyLock<Mutex<airlink_test::FrameGate>> = LazyLock::new(Default::default);
-        let Some(layout) = FILESYSTEM_LAYOUT.get() else {
-            return true;
-        };
-        let active = AIRLINK_STREAMING.load(Ordering::Relaxed)
-            && self.connection_context.video_channel_sender.lock().is_none();
-        GATE.lock()
-            .should_encode(active, &layout.config_dir.join("airlink_test_frame_divisor"))
-    }
-
     pub fn send_video_nal(
         &self,
         timestamp: Duration,
@@ -899,7 +884,6 @@ impl ServerCoreContext {
             let frame = alvr_airlink::video::AirLinkVideoFrame {
                 is_idr,
                 nal,
-                frame_divisor: alvr_airlink::video::test_frame_divisor(),
                 head_pose: [
                     orientation[0],
                     orientation[1],

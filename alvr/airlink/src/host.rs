@@ -323,7 +323,6 @@ impl AirLinkHost {
         let mut haptic_playing: [Option<(f32, f32, tokio::time::Instant)>; 2] = [None; 2];
         let mut haptic_packets = 0u64;
         let mut display_grid_s: Option<f64> = None;
-        let mut previous_frame_divisor = 1u32;
         let mut display_lead_s = display_lead_ms() / 1000.0;
         let frame_report_trace = std::env::var_os("HOME").is_some_and(|home| {
             std::path::Path::new(&home)
@@ -585,24 +584,13 @@ impl AirLinkHost {
                                 let headset_now_s =
                                     (host_now_ns as i128 + i128::from(headset_offset_ns)) as f64 / 1e9;
                                 let period_s = crate::video::frame_period_s();
-                                let divisor = frame.frame_divisor.max(1);
-                                // Kept pictures remain N display slots apart. On a
-                                // live divisor change the first picture is admitted
-                                // immediately; use its observed slot before adopting
-                                // the new cadence. Encoded frame IDs stay consecutive.
-                                let step_s = if divisor == previous_frame_divisor {
-                                    period_s * f64::from(divisor)
-                                } else {
-                                    period_s
-                                };
-                                previous_frame_divisor = divisor;
                                 let display_base_s = match display_grid_s {
                                     Some(previous) => {
-                                        let next = previous + step_s;
+                                        let next = previous + period_s;
                                         // Positive: the frame left later than
                                         // its slot.
                                         let error = headset_now_s - next;
-                                        if error.abs() > 4.0 * period_s * f64::from(divisor) {
+                                        if error.abs() > 4.0 * period_s {
                                             // A stall or a clock step: start over.
                                             headset_now_s
                                         } else if error > 0.75 * period_s {
