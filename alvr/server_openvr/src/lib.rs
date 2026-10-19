@@ -717,6 +717,15 @@ extern "C" fn report_present(timestamp_ns: u64, offset_ns: u64) {
     }
 }
 
+#[cfg(target_os = "linux")]
+#[unsafe(export_name = "ShouldEncodeAirLinkTestFrame")]
+extern "C" fn should_encode_airlink_test_frame() -> bool {
+    SERVER_CORE_CONTEXT
+        .read()
+        .as_ref()
+        .is_none_or(|context| context.should_encode_airlink_test_frame())
+}
+
 #[unsafe(export_name = "WaitForVSync")]
 extern "C" fn wait_for_vsync() {
     // Default 120Hz-ish wait if StatisticsManager isn't up.
@@ -854,6 +863,18 @@ pub extern "C" fn initialize_runtime() {
         alvr_server_core::init_logging(
             log_to_disk.then(|| filesystem_layout.session_log()),
             Some(filesystem_layout.crash_log()),
+        );
+
+        // Log the session selected by the runtime environment before passing
+        // its persisted HMD settings across the C++ boundary.
+        let hmd = alvr_server_core::steamvr_hmd_init_config();
+        alvr_common::info!(
+            "OpenVR driver session: {}; HMD={}x{} {}Hz; codec={:?}",
+            filesystem_layout.session().display(),
+            hmd.eye_resolution_width,
+            hmd.eye_resolution_height,
+            hmd.refresh_rate,
+            alvr_server_core::settings().video.preferred_codec,
         );
 
         unsafe {
