@@ -717,6 +717,15 @@ extern "C" fn report_present(timestamp_ns: u64, offset_ns: u64) {
     }
 }
 
+#[cfg(target_os = "linux")]
+#[unsafe(export_name = "ShouldEncodeAirLinkTestFrame")]
+extern "C" fn should_encode_airlink_test_frame() -> bool {
+    SERVER_CORE_CONTEXT
+        .read()
+        .as_ref()
+        .is_none_or(|context| context.should_encode_airlink_test_frame())
+}
+
 #[unsafe(export_name = "WaitForVSync")]
 extern "C" fn wait_for_vsync() {
     // Default 120Hz-ish wait if StatisticsManager isn't up.
