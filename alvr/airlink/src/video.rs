@@ -9,16 +9,6 @@ use std::sync::atomic::{AtomicU32, Ordering};
 // mesh. They have to agree with what the encoder produces.
 static STREAM_WIDTH: AtomicU32 = AtomicU32::new(3680);
 static STREAM_HEIGHT: AtomicU32 = AtomicU32::new(1920);
-static TEST_FRAME_DIVISOR: AtomicU32 = AtomicU32::new(1);
-
-/// Effective source-frame admission divisor; never changes display refresh.
-pub fn set_test_frame_divisor(divisor: u32) {
-    TEST_FRAME_DIVISOR.store(divisor.max(1), Ordering::Relaxed);
-}
-
-pub fn test_frame_divisor() -> u32 {
-    TEST_FRAME_DIVISOR.load(Ordering::Relaxed)
-}
 
 pub fn set_stream_size(width: u32, height: u32) {
     STREAM_WIDTH.store(width, Ordering::Relaxed);
@@ -111,7 +101,6 @@ pub fn stream_size() -> (u32, u32) {
 pub struct AirLinkVideoFrame {
     pub is_idr: bool,
     pub nal: Vec<u8>,
-    pub frame_divisor: u32,
     /// Orientation quaternion x, y, z, w followed by position x, y, z, in the
     /// headset's tracking space: the order of the frame metadata at offset 52.
     pub head_pose: [f32; 7],

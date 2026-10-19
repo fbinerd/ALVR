@@ -676,13 +676,6 @@ void OvrDirectModeComponent::Present(vr::SharedTextureHandle_t syncTexture) {
         return;
     }
 
-    // Drop before rendering/encoding: dropping encoded P frames would leave
-    // the Quest decoder referencing pictures it never received. PostPresent
-    // still paces every display slot, including those intentionally skipped.
-    if (!ShouldEncodeAirLinkTestFrame()) {
-        return;
-    }
-
     FrameJob job {};
     job.layers.push_back(*layer0);
     // Layers 1..n (SteamVR's dashboard and other overlays while a scene
