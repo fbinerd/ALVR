@@ -3,10 +3,12 @@
 #include <algorithm>
 #include <cassert>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
 #include <functional>
 #include <iostream>
+#include <string>
 #include <optional>
 #include <stdexcept>
 #include <string_view>
@@ -59,6 +61,69 @@ public:
 
 private:
     vk::Queue queue;
+    VkDebugUtilsMessengerEXT messenger = VK_NULL_HANDLE;
+
+    static VkBool32 validationMessage(
+        VkDebugUtilsMessageSeverityFlagBitsEXT severity,
+        VkDebugUtilsMessageTypeFlagsEXT,
+        const VkDebugUtilsMessengerCallbackDataEXT* data,
+        void*
+    ) {
+        if (severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT)
+            Error("Vulkan validation: %s", data->pMessage);
+        else
+            Warn("Vulkan validation: %s", data->pMessage);
+        return VK_FALSE;
+    }
+
+    // SteamVR shares its textures as opaque fds, which import only on the
+    // GPU that created them, and SteamVR does not tell the driver which one
+    // that is. With several GPUs, the first one listed is often the
+    // integrated one, so a discrete GPU is preferred. ALVR_VULKAN_DEVICE
+    // overrides the choice with an index or part of the device name.
+    static vk::PhysicalDevice selectPhysicalDevice(std::vector<vk::PhysicalDevice> const& devs) {
+        if (devs.empty()) {
+            throw std::runtime_error("No Vulkan device found");
+        }
+        for (usize i = 0; i < devs.size(); ++i) {
+            auto props = devs[i].getProperties();
+            Info(
+                "Vulkan device %zu: %s (%s)",
+                i,
+                props.deviceName.data(),
+                vk::to_string(props.deviceType).c_str()
+            );
+        }
+
+        if (char const* wanted = std::getenv("ALVR_VULKAN_DEVICE")) {
+            std::string_view name(wanted);
+            for (usize i = 0; i < devs.size(); ++i) {
+                std::string deviceName = devs[i].getProperties().deviceName.data();
+                std::string lowerName = deviceName, lowerWanted(name);
+                std::transform(lowerName.begin(), lowerName.end(), lowerName.begin(), ::tolower);
+                std::transform(
+                    lowerWanted.begin(), lowerWanted.end(), lowerWanted.begin(), ::tolower
+                );
+                if (name == std::to_string(i)
+                    || lowerName.find(lowerWanted) != std::string::npos) {
+                    Info("Using Vulkan device %zu (ALVR_VULKAN_DEVICE)", i);
+                    return devs[i];
+                }
+            }
+            Warn("ALVR_VULKAN_DEVICE=%s matches no Vulkan device", wanted);
+        }
+
+        for (auto type : { vk::PhysicalDeviceType::eDiscreteGpu,
+                           vk::PhysicalDeviceType::eIntegratedGpu }) {
+            for (usize i = 0; i < devs.size(); ++i) {
+                if (devs[i].getProperties().deviceType == type) {
+                    Info("Using Vulkan device %zu", i);
+                    return devs[i];
+                }
+            }
+        }
+        return devs[0];
+    }
 
     void sharedInit() {
         auto devProps = physDev.getProperties2();
@@ -91,39 +156,67 @@ public:
                 assert(false);
         }
 
+        // ALVR_VULKAN_VALIDATION=1 enables the Khronos validation layer on
+        // ALVR's own instance only, so its messages are told apart from
+        // SteamVR's in the ALVR log.
+        std::vector<const char*> layers;
+        bool validation = std::getenv("ALVR_VULKAN_VALIDATION") != nullptr;
+        if (validation) {
+            auto availLayers = vk::enumerateInstanceLayerProperties();
+            bool hasLayer = std::any_of(availLayers.begin(), availLayers.end(), [](auto& layer) {
+                return std::string_view(layer.layerName) == "VK_LAYER_KHRONOS_validation";
+            });
+            bool hasDebugUtils
+                = std::any_of(availInstExts.begin(), availInstExts.end(), [](auto& ext) {
+                      return std::string_view(ext.extensionName)
+                          == VK_EXT_DEBUG_UTILS_EXTENSION_NAME;
+                  });
+            if (hasLayer && hasDebugUtils) {
+                layers.push_back("VK_LAYER_KHRONOS_validation");
+                acquiredInstExts.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+            } else {
+                Warn("ALVR_VULKAN_VALIDATION set but the validation layer is not available");
+                validation = false;
+            }
+        }
+
         vk::ApplicationInfo appInfo {
             .pApplicationName = "ALVR",
             .apiVersion = VK_API_VERSION_1_2,
         };
         vk::InstanceCreateInfo instanceCI {
             .pApplicationInfo = &appInfo,
+            .enabledLayerCount = static_cast<uint32_t>(layers.size()),
+            .ppEnabledLayerNames = layers.data(),
             .enabledExtensionCount = static_cast<uint32_t>(acquiredInstExts.size()),
             .ppEnabledExtensionNames = acquiredInstExts.data(),
         };
         instance = vk::createInstance(instanceCI);
+
+        if (validation) {
+            auto create = reinterpret_cast<PFN_vkCreateDebugUtilsMessengerEXT>(
+                vkGetInstanceProcAddr(instance, "vkCreateDebugUtilsMessengerEXT")
+            );
+            VkDebugUtilsMessengerCreateInfoEXT messengerCI {
+                .sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
+                .pNext = nullptr,
+                .flags = 0,
+                .messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT
+                    | VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT,
+                .messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT
+                    | VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT
+                    | VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT,
+                .pfnUserCallback = validationMessage,
+                .pUserData = nullptr,
+            };
+            if (!create || create(instance, &messengerCI, nullptr, &messenger) != VK_SUCCESS)
+                Warn("Failed to create the Vulkan validation messenger");
+            else
+                Info("Vulkan validation enabled for ALVR's instance");
+        }
         auto physDevs = instance.enumeratePhysicalDevices();
 
-        physDev = physDevs[0];
-        //    for (auto dev : physDevs) {
-        //        vk::PhysicalDeviceVulkan11Properties props11{};
-        //        vk::PhysicalDeviceProperties2 props {
-        //            .pNext = &props11,
-        //        };
-        //        dev.getProperties2(&props);
-
-        // assert(deviceUUID.size() ==  VK_UUID_SIZE);
-        //        if (memcmp(props11.deviceUUID, deviceUUID.data(), VK_UUID_SIZE) == 0) {
-        //            physDev = dev;
-        //            break;
-        //        }
-        //    }
-        //    if (!physDev && !physDevs.empty()) {
-        //        Warn("Falling back to first physical device");
-        //        physDev = physDevs[0];
-        //    }
-        //    if (!physDev) {
-        //        throw std::runtime_error("Failed to find vulkan device");
-        //    }
+        physDev = selectPhysicalDevice(physDevs);
 
         auto queueFamilyProps = physDev.getQueueFamilyProperties();
 
@@ -204,6 +297,13 @@ public:
 
     void destroy() {
         dev.destroy();
+        if (messenger) {
+            auto destroyMessenger = reinterpret_cast<PFN_vkDestroyDebugUtilsMessengerEXT>(
+                vkGetInstanceProcAddr(instance, "vkDestroyDebugUtilsMessengerEXT")
+            );
+            if (destroyMessenger)
+                destroyMessenger(instance, messenger, nullptr);
+        }
         instance.destroy();
     }
 };
