@@ -139,7 +139,10 @@ How each choice acts:
   renders on (SteamVR's textures are shared as opaque fds, usable only on
   the GPU that created them). SteamVR and games pick their GPU from their
   launch options, not from ALVR: with a Render GPU set, the dashboard prints
-  the launch options for that GPU when it starts SteamVR
+  the launch options for that GPU when it starts SteamVR. On Linux, if Steam
+  is not already running, ALVR starts Steam from its `steam.sh` entry point
+  with environment variables for the selected GPU, bypassing desktop wrappers
+  that may force another GPU.
   (`__GLX_VENDOR_LIBRARY_NAME=nvidia __NV_PRIME_RENDER_OFFLOAD=1 VK_DRIVER_FILES=...`
   for NVIDIA's driver, `DRI_PRIME=vvvv:dddd MESA_VK_DEVICE_SELECT=vvvv:dddd`
   for Mesa drivers). `ALVR_VULKAN_DEVICE` still overrides the setting.
@@ -181,7 +184,11 @@ started with (a PRIME-offload wrapper such as one setting
 SteamVR and games inherit:
 
 - the dashboard, when it launches SteamVR, logs Steam's GPU-restricting
-  environment and warns if it forces a GPU other than the chosen Render GPU;
+  environment and warns if it forces a GPU other than the chosen Render GPU.
+  The Launch/Restart buttons offer to close and restart Steam with ALVR's GPU
+  environment when they detect a conflict; this also closes active Steam games.
+  The dashboard asks before doing so. Automatic dashboard startup defers a
+  conflicting launch to this confirmation rather than restarting Steam itself;
 - the streamer warns "Render GPU setting ... matches no Vulkan device, so it
   cannot be honoured; GPU-restricting environment inherited from
   Steam/SteamVR: ..." at every encoder build;
@@ -220,7 +227,9 @@ opaque texture handles failed with `ErrorInvalidExternalHandle`. With only
 Vulkan corrected, `vrwebhelper` still loaded NVIDIA GLX and the menu was white;
 selecting Mesa GLX/EGL restored the menu, confirmed by the user. Changing
 variables in a second Steam invocation does not change an already running
-Steam's environment. The user's NVIDIA Steam wrapper was left untouched.
+Steam's environment, so ALVR now offers a graceful Steam restart when the user
+asks to apply a conflicting Render GPU. The user's NVIDIA Steam wrapper was
+left untouched.
 
 If the Quest remains in loading clouds after a restart, relaunch the client
 with its LAUNCHER intent, rather than only starting NativeActivity:
