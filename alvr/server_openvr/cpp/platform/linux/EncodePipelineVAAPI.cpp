@@ -305,7 +305,11 @@ alvr::EncodePipelineVAAPI::EncodePipelineVAAPI(
     }
 
     encoder_frame = av_frame_alloc();
-    if (vendor == Vendor::Intel || getenv("ALVR_VAAPI_IMPORT_SURFACE")) {
+    // The import path below encodes a fresh VA surface that nothing renders
+    // into (its output import was never finished), so it streamed black on
+    // Intel. Intel now maps the Vulkan output like AMD; the renderer keeps
+    // that image uncompressed. ALVR_VAAPI_IMPORT_SURFACE=1 restores it.
+    if (getenv("ALVR_VAAPI_IMPORT_SURFACE")) {
         // TODO: Fix output import
         Info("Importing VA surface");
         DrmImage drm;
