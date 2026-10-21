@@ -55,6 +55,12 @@ encoder worker error/idle path; pending resources are not freed without
 confirmed completion. Constructor capability/format failures use normal
 frames instead.
 
+After a rejected prediction, that fallback real frame re-anchors the capture
+cadence. One warm-up presentation is left before retaining the next real
+frame. This avoids a recurring rejection when two retained timestamps are
+only one presentation apart. GPU recovery coverage is prepared in the
+offscreen checker; it has not yet executed this revised path.
+
 This is controlled half-input-rate prediction, not automatic SteamVR app
 throttling. At a stable 72 presentations/s it selects 36 real inputs/s and
 attempts 36 predictions/s. It does not halve the game's rendering cost,

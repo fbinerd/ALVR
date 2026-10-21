@@ -450,6 +450,11 @@ bool NativeMotion::predict(
             );
         s.retained = 0;
         s.captureThisFrame = true;
+        // This fallback real frame becomes the new even presentation. Leave
+        // one warm-up presentation before retaining the next real frame;
+        // otherwise the next two retained timestamps are only one tick apart
+        // and every following prediction can reject its one-tick horizon.
+        s.presentations = 1;
         return false;
     }
     if (releaseInput)
