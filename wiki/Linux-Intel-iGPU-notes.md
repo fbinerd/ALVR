@@ -192,8 +192,43 @@ The streamer logs its decision once per encoder build, e.g.
 `Encoder: VAAPI on /dev/dri/renderD128 (render GPU node /dev/dri/renderD128)`
 or `Encoder: NVENC on /dev/dri/renderD129, a different GPU (host-memory
 upload) (render GPU node /dev/dri/renderD128)`. The Intel-render + RTX 3060
-NVENC route has compiled, but its live image and performance measurements
-are pending.
+NVENC route was verified on 2026-10-21 (source `caad0f4c`): correct headset
+image, NVIDIA encoder utilization 31-43%, and the compositor reporting Intel.
+At 1440x1504 per eye, HEVC/72 Hz/90 Mbps, encode averaged 12.2-12.5 ms;
+the menu workloads sampled ran below 72 fps. I1, the maximum sustained 72 Hz
+resolution and both previous GPU paths still need controlled regression tests;
+the user ended the live session before those checks.
+
+For this machine, start the real Steam executable after closing the existing
+Steam process, using the Intel device's actual PCI identity (`8086:a782`,
+not `8086:a780`). The following profile selects both the Vulkan compositor
+and the OpenGL/EGL menu helpers:
+
+```sh
+env -u VK_ICD_FILENAMES -u __NV_PRIME_RENDER_OFFLOAD -u __VK_LAYER_NV_optimus \
+  -u VK_LOADER_LAYERS_DISABLE \
+  VK_DRIVER_FILES=/usr/share/vulkan/icd.d/intel_icd.json \
+  DRI_PRIME=pci-0000_00_02_0 MESA_VK_DEVICE_SELECT=8086:a782! \
+  __GLX_VENDOR_LIBRARY_NAME=mesa \
+  __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/50_mesa.json \
+  "$HOME/.steam/root/steam.sh" steam://rungameid/250820
+```
+
+CUDA/NVENC remains available even though the Vulkan ICD list contains only
+Intel. With ALVR on Intel but the compositor on NVIDIA, importing SteamVR's
+opaque texture handles failed with `ErrorInvalidExternalHandle`. With only
+Vulkan corrected, `vrwebhelper` still loaded NVIDIA GLX and the menu was white;
+selecting Mesa GLX/EGL restored the menu, confirmed by the user. Changing
+variables in a second Steam invocation does not change an already running
+Steam's environment. The user's NVIDIA Steam wrapper was left untouched.
+
+If the Quest remains in loading clouds after a restart, relaunch the client
+with its LAUNCHER intent, rather than only starting NativeActivity:
+
+```sh
+adb shell am force-stop alvr.client.dev
+adb shell monkey -p alvr.client.dev -c android.intent.category.LAUNCHER 1
+```
 
 Next steps this opens: measure the Intel-render + RTX 3060 NVENC route at the
 I1 preset and the largest Intel-supported resolution at 72 Hz; then investigate
