@@ -223,11 +223,14 @@ struct Options {
     unsigned iterations = 1;
     bool saveImages = false;
     double maxPredictMs = 0;
+    uint32_t maxLumaDimension = alvr::motion::NativeMotion::DefaultLumaDimension;
 };
 Options parse(int argc, char** argv) {
     if (argc < 2)
-        throw std::runtime_error("Usage: image_test OUTPUT [--suite smoke|quality|stream] "
-                                 "[--iterations N] [--save-images] [--max-predict-ms N]");
+        throw std::runtime_error(
+            "Usage: image_test OUTPUT [--suite smoke|quality|stream] "
+            "[--iterations N] [--save-images] [--max-predict-ms N] [--luma-max N]"
+        );
     Options o;
     o.output = argv[1];
     unsigned requestedIterations = 0;
@@ -247,6 +250,14 @@ Options parse(int argc, char** argv) {
             if (end != text.size() || number < 1 || number > 120)
                 throw std::runtime_error("Iterations must be an integer in [1,120]");
             requestedIterations = unsigned(number);
+        } else if (arg == "--luma-max") {
+            std::string text = value();
+            size_t end;
+            auto number = std::stoul(text, &end);
+            if (end != text.size() || (number && (number < 64 || number > 2048 || number % 4)))
+                throw std::runtime_error("Luma cap must be zero or a multiple of four in [64,2048]"
+                );
+            o.maxLumaDimension = uint32_t(number);
         } else if (arg == "--save-images")
             o.saveImages = true;
         else if (arg == "--max-predict-ms") {
@@ -360,42 +371,68 @@ bool runCase(
     std::ofstream& timings,
     std::ofstream& summary
 ) {
+    // Reference rendering, image scoring, CSV flushing and PPM I/O used to
+    // idle the GPU between predictions. Precompute/retain one case at a time
+    // and perform those CPU operations outside the measured GPU sequence.
+    struct Sample {
+        fixture::Pixels latest, expected, image;
+        unsigned realFrame = 0;
+        uint64_t target = 0;
+        double targetTime = 0, predictionMs = 0, captureMs = 0;
+        alvr::motion::NativeMotion::PredictionTiming stages;
+    };
+    if (uint64_t(o.size.bytes()) * o.iterations * 3 > 1536ull * 1024 * 1024)
+        throw std::runtime_error("Fixture batch exceeds 1.5 GiB; reduce --iterations");
+    std::vector<Sample> samples(o.iterations);
+    for (unsigned sample = 0; sample < o.iterations; ++sample) {
+        auto& record = samples[sample];
+        record.realFrame = 2 + sample * 2;
+        int64_t jitter = scene == Scene::Jitter ? (int(sample % 3) - 1) * 250'000 : 0;
+        record.target = uint64_t(int64_t(First + (record.realFrame + 1) * Tick) + jitter);
+        record.targetTime = double(record.target - First) / double(Tick);
+        record.latest = fixture::render(o.size, scene, double(record.realFrame));
+        record.expected = fixture::render(o.size, scene, record.targetTime);
+    }
     Images gpu(ctx, o.size);
     gpu.initialize();
     alvr::motion::NativeMotion motion(
-        ctx, { o.size.width(), o.size.height }, vk::Format::eR8G8B8A8Unorm
+        ctx, { o.size.width(), o.size.height }, vk::Format::eR8G8B8A8Unorm, o.maxLumaDimension
     );
-    auto latest = prime(motion, gpu, scene);
-    bool quality = true;
-    std::vector<double> predictionMs, captureMs, pairMs, flowMs, warpMs;
+    (void)prime(motion, gpu, scene);
     for (unsigned sample = 0; sample < o.iterations; ++sample) {
-        unsigned realFrame = 2 + sample * 2;
-        double captureDuration = 0;
+        auto& record = samples[sample];
+        unsigned realFrame = record.realFrame;
         if (sample) {
-            latest = fixture::render(o.size, scene, double(realFrame));
-            gpu.transfer(&latest);
+            gpu.transfer(&record.latest);
             require(
                 !motion.predict(gpu.image, gpu.view, gpu.layout, First + realFrame * Tick),
                 "Prediction on a real capture presentation"
             );
             auto start = Clock::now();
             motion.capture(gpu.image, gpu.layout, First + realFrame * Tick);
-            captureDuration = elapsed(start);
+            record.captureMs = elapsed(start);
         }
-        // Jitter is deliberately inside the documented half-interval tolerance.
-        int64_t jitter = scene == Scene::Jitter ? (int(sample % 3) - 1) * 250'000 : 0;
-        uint64_t target = uint64_t(int64_t(First + (realFrame + 1) * Tick) + jitter);
-        double targetTime = double(target - First) / double(Tick);
-        auto expected = fixture::render(o.size, scene, targetTime);
         unsigned releases = 0;
         auto start = Clock::now();
         bool predicted
-            = motion.predict(gpu.image, gpu.view, gpu.layout, target, [&] { ++releases; });
-        double predictionDuration = elapsed(start);
+            = motion.predict(gpu.image, gpu.view, gpu.layout, record.target, [&] { ++releases; });
+        record.predictionMs = elapsed(start);
         require(predicted, "Missing alternating prediction");
-        auto stages = motion.lastPredictionTiming();
+        record.stages = motion.lastPredictionTiming();
         require(releases == 1, "Prediction must release input exactly once");
-        auto image = gpu.transfer(nullptr);
+        record.image = gpu.transfer(nullptr);
+    }
+    bool quality = true;
+    std::vector<double> predictionMs, captureMs, pairMs, flowMs, warpMs, opticalGpuMs, warpGpuMs;
+    for (unsigned sample = 0; sample < o.iterations; ++sample) {
+        auto const& record = samples[sample];
+        auto const& latest = record.latest;
+        auto const& image = record.image;
+        auto const& expected = record.expected;
+        auto const& stages = record.stages;
+        unsigned realFrame = record.realFrame;
+        double targetTime = record.targetTime;
+        double predictionDuration = record.predictionMs, captureDuration = record.captureMs;
         bool sampleQuality = true;
         for (unsigned eye = 0; eye < 2; ++eye) {
             auto result = fixture::score(
@@ -418,7 +455,8 @@ bool runCase(
         bool cold = sample == 0;
         timings << fixture::name(scene) << ',' << sample << ',' << cold << ',' << predictionDuration
                 << ',' << captureDuration << ',' << predictionDuration + captureDuration << ','
-                << sampleQuality << ',' << stages.flowMs << ',' << stages.warpMs << '\n';
+                << sampleQuality << ',' << stages.flowMs << ',' << stages.warpMs << ','
+                << stages.opticalGpuMs << ',' << stages.warpGpuMs << '\n';
         metrics.flush();
         timings.flush();
         // First prediction is cold; do not hide it in a steady-state percentile.
@@ -426,6 +464,10 @@ bool runCase(
             predictionMs.push_back(predictionDuration);
             flowMs.push_back(stages.flowMs);
             warpMs.push_back(stages.warpMs);
+            if (stages.opticalGpuMs >= 0)
+                opticalGpuMs.push_back(stages.opticalGpuMs);
+            if (stages.warpGpuMs >= 0)
+                warpGpuMs.push_back(stages.warpGpuMs);
             if (!cold) {
                 captureMs.push_back(captureDuration);
                 pairMs.push_back(predictionDuration + captureDuration);
@@ -449,7 +491,11 @@ bool runCase(
             << " capture_p95_ms=" << percentile(captureMs, .95)
             << " pair_p95_ms=" << percentile(pairMs, .95)
             << " flow_wall_p95_ms=" << percentile(flowMs, .95)
-            << " warp_wall_p95_ms=" << percentile(warpMs, .95) << '\n';
+            << " warp_wall_p95_ms=" << percentile(warpMs, .95)
+            << " optical_gpu_p95_ms=" << (opticalGpuMs.empty() ? -1 : percentile(opticalGpuMs, .95))
+            << " warp_gpu_p95_ms=" << (warpGpuMs.empty() ? -1 : percentile(warpGpuMs, .95))
+            << " optical_gpu_samples=" << opticalGpuMs.size()
+            << " warp_gpu_samples=" << warpGpuMs.size() << '\n';
     summary.flush();
     std::cout << fixture::name(scene) << " quality=" << quality << " budget=" << budget
               << " predict_p95_ms=" << percentile(predictionMs, .95) << '\n';
@@ -465,14 +511,17 @@ int main(int argc, char** argv) {
             throw std::runtime_error("Cannot create result files");
         summary << std::setprecision(8) << "suite=" << o.suite << " eye_width=" << o.size.eyeWidth
                 << " height=" << o.size.height << " iterations=" << o.iterations
-                << " max_predict_ms=" << o.maxPredictMs << '\n';
+                << " max_predict_ms=" << o.maxPredictMs
+                << " luma_max_dimension=" << o.maxLumaDimension << '\n';
         summary << "timing=CPU_wall_including_GPU_completion_excluding_upload_readback_encoder\n"
-                << "first_sample=cold_excluded_from_steady_unless_only_sample\n";
+                << "first_sample=cold_excluded_from_steady_unless_only_sample\n"
+                << "sequence=unpaced_GPU_burst_references_before_scoring_after\n"
+                << "device_timing=optical_queue_including_pack_copy_and_render_warp_separately\n";
         summary.flush();
         metrics << "case,sample,eye,region,pixels,repeated_mae,predicted_mae,quality_pass,"
                    "static_pixel_mismatches\n";
         timings << "case,sample,cold,predict_ms,capture_ms,pair_ms,quality_pass,flow_wall_ms,"
-                   "warp_wall_ms\n";
+                   "warp_wall_ms,optical_gpu_ms,warp_gpu_ms\n";
         alvr::VkContext ctx(std::vector<uint8_t> {});
         if (!ctx.meta.opticalFlowEnabled || ctx.meta.vendor != alvr::Vendor::Nvidia)
             throw std::runtime_error(

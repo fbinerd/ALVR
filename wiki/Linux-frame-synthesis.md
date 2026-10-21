@@ -36,7 +36,12 @@ Encoder technology Automatic resolves to NVENC. SteamVR must render on the
 same GPU; an Intel-only Steam environment can defeat the selection.
 
 The encoder worker retains every other composed frame in owned GPU memory.
-It extracts half-resolution luma separately for each eye and estimates both
+It extracts luma separately for each eye, at most half the output dimensions,
+with its largest dimension capped at 512. The ratio is preserved with dimensions
+rounded down to multiples of four. For 2048x2144 output per eye the estimator
+uses 488x512 luma instead of 1024x1072. Color/output resolution is unchanged.
+Larger downsampling footprints use four color samples to reduce aliasing.
+The estimator still computes both
 motion directions using the borrowed-device backend from the research repo.
 On an intervening presentation, a shader inverse-warps the latest color
 image forward using backward motion and forward/backward consistency checks.
@@ -143,6 +148,22 @@ The predictor also reports separate flow-estimation and warp-submission CPU
 wall durations (both include their completion waits). These are not Vulkan
 timestamp queries and can include CPU scheduling or other queued GPU work;
 their percentile maxima need not occur in the same sample.
+Optional queue timestamp queries additionally report device durations. The
+optical duration sums four optical-queue runs including their packed-output
+copies; it excludes input and final copies on the render queue. Warp duration
+covers render-queue barriers and compute, excluding CPU recording/submission.
+An unsupported queue or unavailable result reports -1 with zero summary
+samples, rather than inventing a zero-cost operation. Both intervals can
+include device scheduling/preemption; neither accounts for encoding/display.
+
+The checker precomputes reference images, executes an unpaced GPU
+sequence, then scores/writes images and CSVs. Host batch memory is bounded
+at 1.5 GiB of cached pixel payload per scene; other allocations are additional.
+Larger iteration counts require smaller dimensions.
+Uploads/readbacks remain between samples but outside prediction timing.
+This avoids CPU reference/scoring gaps lowering device clocks between
+predictions. It is a throughput check, not a paced or game-loaded deadline
+test. Prior results with per-sample CPU work are not directly comparable.
 
 Commit before the final check build. The builder records source revision,
 tracked dirtiness and binary/shader hashes. The runner refuses dirty build
@@ -162,6 +183,13 @@ bash tests/run_linux_native_motion.sh /path/to/ignored/output \
 bash tests/run_linux_native_motion.sh /path/to/ignored/output \
   /path/to/new/stream-results --suite stream --max-predict-ms 13.888889
 ```
+
+Use `--luma-max 0` to retain the original half-resolution estimator as a
+same-binary timing/quality baseline. The default is 512; other caps must be
+multiples of four in [64,2048]. Small fixtures below the cap are unchanged.
+Compare 0 versus 512 under this same burst protocol; prior interleaved-CPU
+timings cannot establish the speedup. A lower cap can lose fine motion or
+disocclusion detail, so all nine quality gates still apply.
 
 Use `--iterations N` to choose 1-120 samples per case. `--save-images` writes
 the first sample's previous/latest/expected/predicted PPMs in case folders;
@@ -191,11 +219,17 @@ pixels. At 2048x2144 per eye it preserved stationary pixels but failed slow
 translation: predicted MAE 1.52871/1.59969 versus repeated 1.3463/1.3575.
 Warm prediction p95 ranged 17.398–37.283 ms under uncontrolled desktop load,
 exceeding the 13.888889 ms test gate. The tile solver, cheaper identity check
-and temporal subpixel approximation described above are pending GPU tests.
-Headset output, pose association and full-resolution budget remain unknown.
+and temporal subpixel approximation at `f56f9221` passed all nine image scenes
+at both sizes. Its stream prediction p95 still ranged 17.289–33.296 ms under
+variable clocks. The new luma cap/filter, burst measurement and device-query
+instrumentation are pending GPU tests. Headset output, pose association and
+full-resolution budget remain unknown.
 The RTX 3060 is present again; persistent Render GPU and Encoder GPU selectors
 were set to NVIDIA with a session backup. No ALVR/SteamVR launch occurred
 during implementation of the expanded checker.
 
 **Primary API reference:** [Khronos Vulkan `VK_NV_optical_flow`](https://docs.vulkan.org/refpages/latest/refpages/source/VK_NV_optical_flow.html)
 and [optical-flow queue and image requirements](https://docs.vulkan.org/spec/latest/chapters/VK_NV_optical_flow/optical_flow.html).
+Timestamp queries follow the queue capability and stage requirements of
+[`vkCmdWriteTimestamp2`](https://docs.vulkan.org/refpages/latest/refpages/source/vkCmdWriteTimestamp2.html)
+and [`vkCmdResetQueryPool`](https://docs.vulkan.org/refpages/latest/refpages/source/vkCmdResetQueryPool.html).
