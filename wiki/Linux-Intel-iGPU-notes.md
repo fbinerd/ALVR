@@ -157,6 +157,20 @@ How each choice acts:
   Software are placeholders: they log "not implemented yet" and no encoder
   is created. The old "Force software encoding" switch maps to Software.
 
+**When a choice cannot be honoured** because of variables Steam was
+started with (a PRIME-offload wrapper such as one setting
+`VK_DRIVER_FILES=/usr/share/vulkan/icd.d/nvidia_icd.json`,
+`__VK_LAYER_NV_optimus=NVIDIA_only`, `__NV_PRIME_RENDER_OFFLOAD=1`), which
+SteamVR and games inherit:
+
+- the dashboard, when it launches SteamVR, logs Steam's GPU-restricting
+  environment and warns if it forces a GPU other than the chosen Render GPU;
+- the streamer warns "Render GPU setting ... matches no Vulkan device, so it
+  cannot be honoured; GPU-restricting environment inherited from
+  Steam/SteamVR: ..." at every encoder build;
+- an Encoder GPU hidden from Vulkan is still found by its DRM node, and the
+  log names the restricting variables.
+
 The streamer logs its decision once per encoder build, e.g.
 `Encoder: VAAPI on /dev/dri/renderD128 (render GPU node /dev/dri/renderD128)`.
 
