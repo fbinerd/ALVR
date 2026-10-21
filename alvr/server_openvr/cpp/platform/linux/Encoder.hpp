@@ -215,6 +215,10 @@ class Encoder {
         auto const* settings = Settings_Instance();
         EncoderTarget resolved;
 
+        if (!VkContext::renderGpuWarning.empty()) {
+            Warn("%s", VkContext::renderGpuWarning.c_str());
+        }
+
         std::string renderNode = renderNodeOf(vkCtx.physDev);
         resolved.devicePath = renderNode.empty() ? "/dev/dri/renderD128" : renderNode;
         resolved.vendor = vkCtx.meta.vendor;
