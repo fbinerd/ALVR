@@ -67,6 +67,12 @@ struct RendererCreateInfo {
     vk::Format format;
     vk::Extent2D inputEyeExtent;
     vk::Extent2D outputExtent;
+    // How the output image is shared with the encoder: an opaque fd for
+    // NVENC (CUDA interop on the same GPU), a dma-buf for VAAPI.
+    HandleType outputHandle = HandleType::DmaBuf;
+    // The encoder runs on another GPU: export the output with the LINEAR
+    // DRM modifier, the only layout two different GPUs reliably agree on.
+    bool linearOutput = false;
 };
 
 // One eye of a submitted layer: SteamVR's texture by its shared handle, the

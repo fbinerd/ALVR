@@ -2,13 +2,16 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cctype>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
 #include <functional>
 #include <iostream>
 #include <optional>
 #include <stdexcept>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -27,6 +30,10 @@
 #include "utils.hpp"
 
 #include "alvr_server/Logger.h"
+#include "alvr_server/Settings.h"
+#include "alvr_server/bindings.h"
+#include "alvr_server/Settings.h"
+#include "alvr_server/bindings.h"
 
 extern "C" {
 #include <libavutil/log.h>
@@ -59,6 +66,137 @@ public:
 
 private:
     vk::Queue queue;
+
+public:
+    static std::optional<usize>
+    findPhysicalDevice(std::vector<vk::PhysicalDevice> const& devs, std::string_view selector) {
+        if (selector.empty()) return std::nullopt;
+        std::string wanted(selector);
+        std::transform(wanted.begin(),wanted.end(),wanted.begin(),[](unsigned char c){return std::tolower(c);});
+        for (usize i=0;i<devs.size();++i) {
+            std::string name=devs[i].getProperties().deviceName.data();
+            std::transform(name.begin(),name.end(),name.begin(),[](unsigned char c){return std::tolower(c);});
+            if (wanted==std::to_string(i) || name.find(wanted)!=std::string::npos) return i;
+        }
+        return std::nullopt;
+    }
+
+private:
+    static vk::PhysicalDevice selectPhysicalDevice(std::vector<vk::PhysicalDevice> const& devs) {
+        if (devs.empty()) throw std::runtime_error("No Vulkan device found");
+        for (usize i=0;i<devs.size();++i) {
+            auto props=devs[i].getProperties();
+            Info("Vulkan device %zu: %s (%s)",i,props.deviceName.data(),vk::to_string(props.deviceType).c_str());
+        }
+        Settings const* settings=Settings_Instance();
+        struct Source {char const* label;char const* selector;};
+        Source const sources[]={
+            {"ALVR_VULKAN_DEVICE",std::getenv("ALVR_VULKAN_DEVICE")},
+            {"Render GPU setting",settings?settings->m_renderGpu:nullptr},
+        };
+        for (auto const& source:sources) {
+            if (!source.selector || !source.selector[0]) continue;
+            if (auto index=findPhysicalDevice(devs,source.selector)) {
+                Info("Using Vulkan device %zu (%s)",*index,source.label);
+                return devs[*index];
+            }
+            Warn("%s \"%s\" matches no Vulkan device",source.label,source.selector);
+        }
+        for (auto type:{vk::PhysicalDeviceType::eDiscreteGpu,vk::PhysicalDeviceType::eIntegratedGpu})
+            for (usize i=0;i<devs.size();++i)
+                if (devs[i].getProperties().deviceType==type) {
+                    Info("Using Vulkan device %zu (automatic)",i);return devs[i];
+                }
+        return devs[0];
+    }
+<<<<<<< HEAD
+=======
+    VkDebugUtilsMessengerEXT messenger = VK_NULL_HANDLE;
+
+    static VkBool32
+    validationMessage(VkDebugUtilsMessageSeverityFlagBitsEXT severity, VkDebugUtilsMessageTypeFlagsEXT, const VkDebugUtilsMessengerCallbackDataEXT* data, void*) {
+        if (severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT)
+            Error("Vulkan validation: %s", data->pMessage);
+        else
+            Warn("Vulkan validation: %s", data->pMessage);
+        return VK_FALSE;
+    }
+
+public:
+    // Finds the device a user-written selector names: its index in the
+    // list, or part of its name (case-insensitive). Shared by the render-GPU
+    // and encoder-GPU settings.
+    static std::optional<usize>
+    findPhysicalDevice(std::vector<vk::PhysicalDevice> const& devs, std::string_view selector) {
+        if (selector.empty()) {
+            return std::nullopt;
+        }
+        std::string wanted(selector);
+        std::transform(wanted.begin(), wanted.end(), wanted.begin(), ::tolower);
+        for (usize i = 0; i < devs.size(); ++i) {
+            std::string name = devs[i].getProperties().deviceName.data();
+            std::transform(name.begin(), name.end(), name.begin(), ::tolower);
+            if (wanted == std::to_string(i) || name.find(wanted) != std::string::npos) {
+                return i;
+            }
+        }
+        return std::nullopt;
+    }
+
+private:
+    // The render GPU: ALVR's Vulkan device must be the GPU SteamVR renders
+    // on, because SteamVR shares its textures as opaque fds, which import
+    // only on the GPU that created them, and SteamVR does not tell the driver
+    // which one that is. Order: ALVR_VULKAN_DEVICE, then the "Render GPU"
+    // setting (video.encoder_config.linux_gpu.render_gpu), then automatic:
+    // the first discrete GPU, then the first integrated one (never a CPU
+    // implementation such as llvmpipe when hardware exists), then devs[0].
+    static vk::PhysicalDevice selectPhysicalDevice(std::vector<vk::PhysicalDevice> const& devs) {
+        if (devs.empty()) {
+            throw std::runtime_error("No Vulkan device found");
+        }
+        for (usize i = 0; i < devs.size(); ++i) {
+            auto props = devs[i].getProperties();
+            Info(
+                "Vulkan device %zu: %s (%s)",
+                i,
+                props.deviceName.data(),
+                vk::to_string(props.deviceType).c_str()
+            );
+        }
+
+        struct Source {
+            char const* label;
+            char const* selector;
+        };
+        Settings const* settings = Settings_Instance();
+        Source const sources[] = {
+            { "ALVR_VULKAN_DEVICE", std::getenv("ALVR_VULKAN_DEVICE") },
+            { "Render GPU setting", settings ? settings->m_renderGpu : nullptr },
+        };
+        for (auto const& source : sources) {
+            if (!source.selector || !source.selector[0]) {
+                continue;
+            }
+            if (auto index = findPhysicalDevice(devs, source.selector)) {
+                Info("Using Vulkan device %zu (%s)", *index, source.label);
+                return devs[*index];
+            }
+            Warn("%s \"%s\" matches no Vulkan device", source.label, source.selector);
+        }
+
+        for (auto type :
+             { vk::PhysicalDeviceType::eDiscreteGpu, vk::PhysicalDeviceType::eIntegratedGpu }) {
+            for (usize i = 0; i < devs.size(); ++i) {
+                if (devs[i].getProperties().deviceType == type) {
+                    Info("Using Vulkan device %zu (automatic)", i);
+                    return devs[i];
+                }
+            }
+        }
+        return devs[0];
+    }
+>>>>>>> f8fd23df (feat(linux): let the user choose render GPU, encoder GPU and encoder technology)
 
     void sharedInit() {
         auto devProps = physDev.getProperties2();
@@ -103,7 +241,7 @@ public:
         instance = vk::createInstance(instanceCI);
         auto physDevs = instance.enumeratePhysicalDevices();
 
-        physDev = physDevs[0];
+        physDev = selectPhysicalDevice(physDevs);
         //    for (auto dev : physDevs) {
         //        vk::PhysicalDeviceVulkan11Properties props11{};
         //        vk::PhysicalDeviceProperties2 props {

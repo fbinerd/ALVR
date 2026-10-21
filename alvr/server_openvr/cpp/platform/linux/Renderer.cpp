@@ -239,7 +239,11 @@ inline Image createImage(
 }
 
 Output createOutputImage(
-    VkContext const& ctx, vk::Extent2D extent, vk::Format format, HandleType handleType
+    VkContext const& ctx,
+    vk::Extent2D extent,
+    vk::Format format,
+    HandleType handleType,
+    bool linearOnly
 ) {
     Image img;
     Output out;
@@ -287,6 +291,10 @@ Output createOutputImage(
 
         for (auto& prop : modProps) {
             if (!filter_modifier(prop.drmFormatModifier)) {
+                continue;
+            }
+            // DRM_FORMAT_MOD_LINEAR is 0: the cross-GPU encoder path needs it.
+            if (linearOnly && prop.drmFormatModifier != 0) {
                 continue;
             }
 
@@ -501,7 +509,8 @@ Renderer::Renderer(
         vkCtx,
         createInfo.outputExtent,
         stagingImgCI.format,
-        vkCtx.meta.vendor == Vendor::Nvidia ? HandleType::OpaqueFd : HandleType::DmaBuf
+        createInfo.outputHandle,
+        createInfo.linearOutput
     );
 
     vk::QueryPoolCreateInfo poolCI {

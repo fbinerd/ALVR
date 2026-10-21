@@ -291,6 +291,9 @@ pub fn compute_restart_settings_hash(
     enc.encoding_gamma.map(f32::to_bits).hash(&mut h);
     enc.software.force_software_encoding.hash(&mut h);
     enc.software.thread_count.hash(&mut h);
+    enc.linux_gpu.render_gpu.hash(&mut h);
+    enc.linux_gpu.encoder_gpu.hash(&mut h);
+    (enc.linux_gpu.encoder_backend as u32).hash(&mut h);
     // HDR
     hdr.enable.hash(&mut h);
     hdr.force_hdr_srgb_correction.hash(&mut h);
