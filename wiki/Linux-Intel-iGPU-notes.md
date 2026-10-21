@@ -143,10 +143,16 @@ How each choice acts:
   (`__GLX_VENDOR_LIBRARY_NAME=nvidia __NV_PRIME_RENDER_OFFLOAD=1 VK_DRIVER_FILES=...`
   for NVIDIA's driver, `DRI_PRIME=vvvv:dddd MESA_VK_DEVICE_SELECT=vvvv:dddd`
   for Mesa drivers). `ALVR_VULKAN_DEVICE` still overrides the setting.
-- **Encoder GPU** different from the render GPU: the renderer exports its
-  output image as a dma-buf with the LINEAR modifier and VAAPI on the other
-  GPU imports it. Only VAAPI can do this; NVENC needs the render GPU. This
-  path is written but **not tested** (one GPU on the test machine).
+- **Encoder GPU** different from the render GPU: VAAPI only (NVENC needs
+  the render GPU). Handing the output over as a linear dma-buf failed
+  (the Intel GPU could not read the NVIDIA-exported buffer), so the
+  renderer copies each finished frame into host memory with a GPU
+  transfer and VAAPI uploads it into a surface of the encoder GPU.
+  Measured on RTX 3060 (render) + UHD 770 (encode), 2304x1184: 59 fps,
+  encode ~4.6 ms, NVENC idle, correct image. If SteamVR's environment
+  limits Vulkan to one driver (e.g. `VK_DRIVER_FILES=nvidia_icd.json`),
+  the streamer still finds the encoder GPU's `/dev/dri/renderD*` node by
+  PCI vendor (intel / nvidia, geforce / amd, radeon in the selector).
 - **Encoder technology**: VAAPI and NVENC are implemented. Vulkan Video and
   Software are placeholders: they log "not implemented yet" and no encoder
   is created. The old "Force software encoding" switch maps to Software.
@@ -156,9 +162,9 @@ The streamer logs its decision once per encoder build, e.g.
 
 Next steps this opens: a Vulkan Video pipeline (enable FFmpeg's
 `h264_vulkan` / `hevc_vulkan` / `av1_vulkan` encoders, NV12 encode-source
-images, a video encode queue), the Linux software pipeline, and testing the
-cross-GPU hand-over (dma-buf from a discrete GPU's memory may need a
-system-memory copy for an iGPU to read it).
+images, a video encode queue), the Linux software pipeline, and a zero-copy
+cross-GPU hand-over (host-memory dma-buf or VA user-pointer surfaces)
+instead of the CPU upload.
 
 ## Diagnostics reference
 
