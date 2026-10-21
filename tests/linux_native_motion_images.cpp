@@ -475,9 +475,9 @@ int main(int argc, char** argv) {
         bool passed = true;
         std::vector<Scene> scenes { Scene::Translation };
         if (o.suite != "smoke")
-            scenes = { Scene::Stationary,  Scene::Translation, Scene::SlowTranslation,
-                       Scene::FineTexture, Scene::Rotation,    Scene::Foreground,
-                       Scene::Jitter };
+            scenes = { Scene::Stationary,   Scene::Translation,  Scene::SlowTranslation,
+                       Scene::SlowVertical, Scene::SlowDiagonal, Scene::FineTexture,
+                       Scene::Rotation,     Scene::Foreground,   Scene::Jitter };
         for (auto scene : scenes)
             passed &= runCase(ctx, o, scene, metrics, timings, summary);
         if (o.suite != "smoke")

@@ -44,14 +44,22 @@ Pixels with invalid motion repeat the newest pixel. The eye boundaries are
 clamped independently. The output goes through the existing single NVENC
 submission and timestamp channel at the existing presentation cadence.
 
-Fallback pixels are fetched exactly. Before resampling a valid prediction,
-the shader compares 3x3 neighborhoods in previous/latest color at both the
-target and proposed source, with coordinates clamped per eye. If both patches
-are identical, it preserves the current texel. This protects unchanged color
-from noisy estimated flow without a flow-magnitude cutoff. Checking the
-source as well keeps a moving foreground edge eligible when it enters an
-unchanged target neighborhood. This change awaits GPU quality validation;
-noise or lighting changes between real frames do not qualify as identical.
+Fallback pixels are fetched exactly. The warp solves the four corners of an
+8x8 output tile once. When all corners pass the existing consistency checks
+and their displacements vary by at most 0.5 output pixels, it interpolates
+the displacement across that tile. Motion boundaries, invalid corners and
+partial/seam tiles retain per-pixel inversion. This reduces repeated flow
+sampling for smooth motion; performance and boundary quality need GPU tests.
+
+Before resampling, the shader compares previous/latest color at the current
+texel and at the actual proposed source. Identity at both sites preserves the
+exact current texel. For valid source motion up to one pixel per real-frame
+interval and a color change of at most 16/255 per channel, it instead predicts
+`latest + horizon * (latest - previous)`, clamped to the color range. This
+first-order temporal approximation avoids spatial filtering of subpixel
+detail; larger motion/changes use the spatial warp. It can amplify noise or
+overshoot changing edges. Both changes await GPU validation, including slow
+horizontal, vertical and diagonal fixtures at both resolutions.
 
 Two retained real frames are required before predicting. A predicted frame
 may extend at most 0.55 of the measured real-frame interval beyond the latest
@@ -68,7 +76,7 @@ After a rejected prediction, that fallback real frame re-anchors the capture
 cadence. One warm-up presentation is left before retaining the next real
 frame. This avoids a recurring rejection when two retained timestamps are
 only one presentation apart. GPU recovery coverage is prepared in the
-offscreen checker; it has not yet executed this revised path.
+offscreen checker; all four recovery cases passed on the RTX 3060 at `798f39a7`.
 
 This is controlled half-input-rate prediction, not automatic SteamVR app
 throttling. At a stable 72 presentations/s it selects 36 real inputs/s and
@@ -106,7 +114,7 @@ target time directly, independently of the predictor. Suites:
 | Suite | Per-eye size | Predictions per case | Cases |
 | --- | --- | --- | --- |
 | `smoke` (default) | 512x384 | 1 | Opposite translations |
-| `quality` | 512x384 | 6 | Stationary, translation, subpixel translation, fine texture, rotation, foreground occlusion, timestamp jitter |
+| `quality` | 512x384 | 6 | Stationary, translation, subpixel horizontal/vertical/diagonal translation, fine texture, rotation, foreground occlusion, timestamp jitter |
 | `stream` | 2048x2144 | 12 | Same cases at representative stream dimensions |
 
 `quality` and `stream` also verify four timestamp rejection/recovery cases
@@ -118,7 +126,8 @@ including the seam. Image-quality gates require improvement in both the whole
 interior and the changed-pixel region of each eye. Stationary images require
 exact RGBA preservation at every pixel including edges; the CSV reports
 `static_pixel_mismatches`. Subpixel translation advances 0.25 output pixels
-per presentation at both resolutions, covering possible slow-motion freezes.
+per presentation along each selected axis at both resolutions, covering
+possible slow-motion freezes or directional bias.
 Newly revealed foreground-background pixels are reported
 separately; that region is diagnostic, not independently gated, because its
 visibility is not available from latest color alone.
@@ -134,6 +143,10 @@ measurements. The fixture runs unpaced; desktop GPU load can affect results.
 Commit before the final check build. The builder records source revision,
 tracked dirtiness and binary/shader hashes. The runner refuses dirty build
 metadata or reused output directories and preserves failure/timeout logs.
+When available, `nvidia-smi` records read-only utilization, memory, graphics
+clock and power telemetry in `gpu-telemetry.csv` during execution, alongside
+wall-clock start/end files. Sampler errors are kept separately; telemetry
+does not isolate the GPU or measure per-dispatch device time.
 It does not open SteamVR, ALVR or a headset app. Announce every test first;
 GPU execution requires the user-confirmed Luna handoff.
 
@@ -149,7 +162,7 @@ bash tests/run_linux_native_motion.sh /path/to/ignored/output \
 Use `--iterations N` to choose 1-120 samples per case. `--save-images` writes
 the first sample's previous/latest/expected/predicted PPMs in case folders;
 it is on by default only for `smoke`. At stream dimensions, these files can
-consume about 740 MB across seven cases. The runner has a bounded 300-second
+consume about 950 MB across nine cases. The runner has a bounded 300-second
 timeout. A partial run or failure lacks a successful final `passed=1`;
 inspect `exit-status.txt` and the log before interpreting metrics.
 
@@ -169,8 +182,13 @@ left/right repeated MAE 18.5085/18.4292, predicted MAE 0.696263/0.541704,
 fix and expanded checker. The expanded suite at `6e2ce564` passed the five
 moving scenes and all four timestamp recovery contracts, but failed stationary
 images: predicted MAE 0.563584/0.633863 versus exact repetition. The identity
-patch guard and added subpixel case await their next Luna run. Headset output,
-pose association and full-resolution budget remain unknown.
+patch guard at `798f39a7` passed all seven small-image cases with exact static
+pixels. At 2048x2144 per eye it preserved stationary pixels but failed slow
+translation: predicted MAE 1.52871/1.59969 versus repeated 1.3463/1.3575.
+Warm prediction p95 ranged 17.398–37.283 ms under uncontrolled desktop load,
+exceeding the 13.888889 ms test gate. The tile solver, cheaper identity check
+and temporal subpixel approximation described above are pending GPU tests.
+Headset output, pose association and full-resolution budget remain unknown.
 The RTX 3060 is present again; persistent Render GPU and Encoder GPU selectors
 were set to NVIDIA with a session backup. No ALVR/SteamVR launch occurred
 during implementation of the expanded checker.

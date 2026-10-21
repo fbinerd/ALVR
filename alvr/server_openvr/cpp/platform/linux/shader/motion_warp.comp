@@ -12,6 +12,10 @@ layout(push_constant) uniform Params {
     uint eyeWidth,height,lumaWidth,lumaHeight;
     float time;
 } p;
+// The flow grid represents eight output pixels. Solve four tile corners once
+// rather than repeating the iterative inversion for every output pixel.
+shared vec2 cornerDisplacement[4];
+shared uint cornerValid[4];
 ivec2 vectorAt(bool reverse,bool right,ivec2 q) {
     if (right) return reverse?texelFetch(backwardRight,q,0).xy:texelFetch(forwardRight,q,0).xy;
     return reverse?texelFetch(backwardLeft,q,0).xy:texelFetch(forwardLeft,q,0).xy;
@@ -48,29 +52,60 @@ vec4 colorAt(bool recent,bool right,vec2 q) {
     vec2 uv=(q+0.5)/vec2(2*p.eyeWidth,p.height);
     return recent?texture(latestImage,uv):texture(previousImage,uv);
 }
-bool unchangedPatch(bool right,vec2 q) {
-    ivec2 center=ivec2(floor(q+0.5));
-    for (int y=-1;y<=1;y++) for (int x=-1;x<=1;x++) {
-        ivec2 at=clamp(center+ivec2(x,y),ivec2(0),ivec2(p.eyeWidth-1,p.height-1));
-        at.x+=right?int(p.eyeWidth):0;
-        if (any(notEqual(texelFetch(previousImage,at,0),texelFetch(latestImage,at,0))))
-            return false;
-    }
-    return true;
-}
 void main() {
     uvec2 xy=gl_GlobalInvocationID.xy;
+    uvec2 base=gl_WorkGroupID.xy*8;
+    bool tileRight=base.x>=p.eyeWidth;
+    // A partial tile or a tile crossing the eye seam takes the exact path.
+    bool fullTile=base.y+7<p.height
+        && base.x+7<(tileRight?2*p.eyeWidth:p.eyeWidth);
+    if (gl_LocalInvocationIndex<4) {
+        uint i=gl_LocalInvocationIndex;
+        vec2 at=vec2(base.x%p.eyeWidth+(i%2)*7,base.y+(i/2)*7), source;
+        bool valid=false;
+        if (fullTile) valid=sourceAt(at,1.0-p.time,true,tileRight,source);
+        cornerValid[i]=valid?1:0;
+        cornerDisplacement[i]=valid?source-at:vec2(0);
+    }
+    // Inactive edge invocations must participate before returning.
+    barrier();
     if (xy.x>=2*p.eyeWidth || xy.y>=p.height) return;
     bool right=xy.x>=p.eyeWidth;
     vec2 target=vec2(xy.x%p.eyeWidth,xy.y), q;
-    // Exact fetch keeps fallback/static pixels unchanged. Optical-flow noise
-    // must not resample color when both local histories are identical. Check
-    // the proposed source too, so a moving edge can still enter static ground.
-    // There is no flow-magnitude dead zone: subpixel motion with changed color
-    // history remains eligible for prediction.
+    bool smoothTile=fullTile;
+    for (int i=0;i<4;i++)
+        smoothTile=smoothTile && cornerValid[i]!=0
+            && length(cornerDisplacement[i]-cornerDisplacement[0])<=0.5;
+    bool valid;
+    if (smoothTile) {
+        vec2 f=vec2(gl_LocalInvocationID.xy)/7.0;
+        q=target+mix(mix(cornerDisplacement[0],cornerDisplacement[1],f.x),
+                     mix(cornerDisplacement[2],cornerDisplacement[3],f.x),f.y);
+        valid=inside(q);
+    } else {
+        // Motion boundaries and failed corner checks retain per-pixel inversion.
+        valid=sourceAt(target,1.0-p.time,true,right,q);
+    }
     vec4 color=texelFetch(latestImage,ivec2(xy),0);
-    if (sourceAt(target,1.0-p.time,true,right,q)
-        && !(unchangedPatch(right,target) && unchangedPatch(right,q)))
-        color=colorAt(true,right,q);
+    if (valid) {
+        vec4 previous=texelFetch(previousImage,ivec2(xy),0);
+        vec4 source=colorAt(true,right,q);
+        // Comparing the actual sampled source detects an entering moving edge;
+        // identity at both sites preserves the exact current texel. This replaces
+        // two 3x3 patch scans per output pixel.
+        bool unchanged=all(equal(previous,color))
+            && all(equal(colorAt(false,right,q),source));
+        if (!unchanged) {
+            float horizon=p.time-1.0;
+            vec3 delta=color.rgb-previous.rgb;
+            // For at most one source pixel of motion and a small color change,
+            // a first-order temporal prediction avoids filtering away subpixel
+            // detail. Large changes/occlusions use the spatial warp instead.
+            if (horizon>0 && length(q-target)<=horizon
+                && max(max(abs(delta.r),abs(delta.g)),abs(delta.b))<=16.0/255.0)
+                color.rgb=clamp(color.rgb+horizon*delta,vec3(0),vec3(1));
+            else color=source;
+        }
+    }
     imageStore(outputImage,ivec2(xy),color);
 }

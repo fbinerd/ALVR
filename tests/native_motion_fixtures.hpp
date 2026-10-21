@@ -20,6 +20,8 @@ enum class Scene {
     Translation,
     Stationary,
     SlowTranslation,
+    SlowVertical,
+    SlowDiagonal,
     FineTexture,
     Rotation,
     Foreground,
@@ -33,6 +35,10 @@ inline const char* name(Scene scene) {
         return "stationary";
     case Scene::SlowTranslation:
         return "slow_translation";
+    case Scene::SlowVertical:
+        return "slow_vertical";
+    case Scene::SlowDiagonal:
+        return "slow_diagonal";
     case Scene::FineTexture:
         return "fine_texture";
     case Scene::Rotation:
@@ -85,10 +91,14 @@ inline Pixels render(Size size, Scene scene, double time) {
                 }
             } else if (scene != Scene::Stationary) {
                 // Keep slow motion subpixel at both suite dimensions.
-                float displacement = scene == Scene::SlowTranslation
-                    ? float(time * .25)
-                    : float(time * 4 * size.eyeWidth / 512.0);
-                sx -= direction * displacement;
+                bool slow = scene == Scene::SlowTranslation || scene == Scene::SlowVertical
+                    || scene == Scene::SlowDiagonal;
+                float displacement
+                    = slow ? float(time * .25) : float(time * 4 * size.eyeWidth / 512.0);
+                if (scene != Scene::SlowVertical)
+                    sx -= direction * displacement;
+                if (scene == Scene::SlowVertical || scene == Scene::SlowDiagonal)
+                    sy -= direction * displacement;
             }
             uint8_t value = uint8_t(std::clamp(texture(sx, sy, seed, cell), 0.f, 255.f));
             size_t at = (size_t(y) * size.width() + x) * 4;
