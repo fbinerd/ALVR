@@ -191,6 +191,7 @@ private:
     // disarms for the session so a wedged writer degrades the stream once
     // instead of taxing every frame.
     uint32_t m_gpuWaitConsecTimeouts = 0;
+    uint32_t m_timelineConsecTimeouts = 0;
     bool m_gpuWaitPollDisarmed = false;
 
     // Written by the event loop thread in SetViewParams, read by the worker.

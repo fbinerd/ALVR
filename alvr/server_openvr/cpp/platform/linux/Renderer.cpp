@@ -8,6 +8,7 @@
 #include <unistd.h>
 #include <vulkan/vulkan_structs.hpp>
 
+#include "alvr_server/Logger.h"
 #include "alvr_server/bindings.h"
 
 namespace alvr::render::detail {
@@ -810,7 +811,21 @@ void Renderer::render(VkContext& vkCtx, std::vector<Layer> const& layers) {
     };
 
     vkCtx.useQueue([&](auto& queue) { queue.submit(submitInfo, fence); });
-    assert(vkCtx.dev.waitForFences(fence, true, UINT64_MAX) == vk::Result::eSuccess);
+    // Not inside assert(): the wait must happen in every build. Waited in
+    // one-second slices so a stall is reported instead of hanging silently.
+    for (int waitedS = 0;; ++waitedS) {
+        auto result = vkCtx.dev.waitForFences(fence, true, 1'000'000'000);
+        if (result == vk::Result::eSuccess) {
+            if (waitedS > 0) {
+                Warn("Renderer: GPU work finished after %d s", waitedS);
+            }
+            break;
+        }
+        if (result != vk::Result::eTimeout) {
+            throw std::runtime_error("Renderer: fence wait failed");
+        }
+        Warn("Renderer: GPU work still pending after %d s", waitedS + 1);
+    }
     vkCtx.dev.resetFences(fence);
 }
 

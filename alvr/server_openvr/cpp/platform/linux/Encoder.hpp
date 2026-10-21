@@ -254,12 +254,15 @@ public:
     // the import only works on the GPU SteamVR renders on, like the texture
     // imports. Tested on NVIDIA; RADV and ANV implement opaque-fd timeline
     // import.
-    bool waitTimeline(u64 handle, std::function<int()> const& dupFd, u64 value, u64 timeoutNs) {
+    enum class TimelineWait { Reached, TimedOut, Unavailable };
+
+    TimelineWait
+    waitTimeline(u64 handle, std::function<int()> const& dupFd, u64 value, u64 timeoutNs) {
         auto it = timelines.find(handle);
         if (it == timelines.end()) {
             int fd = dupFd();
             if (fd < 0) {
-                return false;
+                return TimelineWait::Unavailable;
             }
             vk::SemaphoreTypeCreateInfo typeInfo {
                 .semaphoreType = vk::SemaphoreType::eTimeline,
@@ -275,7 +278,7 @@ public:
                 != vk::Result::eSuccess) {
                 close(fd);
                 vkCtx.dev.destroy(sem);
-                return false;
+                return TimelineWait::Unavailable;
             }
             it = timelines.emplace(handle, sem).first;
         }
@@ -284,7 +287,11 @@ public:
             .pSemaphores = &it->second,
             .pValues = &value,
         };
-        return vkCtx.dev.waitSemaphores(waitInfo, timeoutNs) == vk::Result::eSuccess;
+        auto result = vkCtx.dev.waitSemaphores(waitInfo, timeoutNs);
+        if (result == vk::Result::eSuccess) {
+            return TimelineWait::Reached;
+        }
+        return result == vk::Result::eTimeout ? TimelineWait::TimedOut : TimelineWait::Unavailable;
     }
 
     // Frees what was imported for textures and semaphores SteamVR destroyed.

@@ -50,6 +50,8 @@ constexpr int GuardSleepMs = 4;
 // Cap on the wait for a texture's timeline semaphore, in frame intervals.
 // On timeout the frame is read anyway, as it would have been without it.
 constexpr int64_t TimelineWaitCapFrames = 2;
+// Consecutive unfinished frames skipped before reading one anyway.
+constexpr uint32_t TimelineSkipLimitFrames = 36;
 
 // The negotiated refresh rate expressed as a frame period.
 static std::chrono::nanoseconds frameInterval() {
@@ -292,24 +294,45 @@ void OvrDirectModeComponent::EncodeWorkerLoop() {
                       frameInterval() * TimelineWaitCapFrames
                 )
                       .count();
+            bool unfinished = false;
             for (auto const& wait : job.waits) {
                 if (wait.semaphore == 0) {
                     continue;
                 }
                 uint64_t const semaphore = wait.semaphore;
-                if (!enc.waitTimeline(
-                        semaphore,
-                        [semaphore] { return steamvrsync::Sync::Get().DupFd(semaphore); },
-                        wait.value,
-                        timelineCapNs
-                    )) {
+                auto const waited = enc.waitTimeline(
+                    semaphore,
+                    [semaphore] { return steamvrsync::Sync::Get().DupFd(semaphore); },
+                    wait.value,
+                    timelineCapNs
+                );
+                if (waited == alvr::Encoder::TimelineWait::TimedOut) {
+                    unfinished = true;
+                } else if (waited == alvr::Encoder::TimelineWait::Unavailable) {
                     Warn(
-                        "SteamVR texture semaphore %llx not reached or not importable; "
-                        "reading the frame anyway\n",
+                        "SteamVR texture semaphore %llx not importable; reading the frame "
+                        "anyway\n",
                         (unsigned long long)semaphore
                     );
                 }
             }
+            // A frame SteamVR has not finished writing would be sent half
+            // drawn (flicker on slow GPUs, e.g. integrated Intel in SteamVR
+            // Home): skip it, the client keeps reprojecting the last one. If
+            // the semaphore never seems to be reached, read anyway after a
+            // while rather than freeze the stream.
+            if (unfinished) {
+                if (++m_timelineConsecTimeouts < TimelineSkipLimitFrames) {
+                    MarkRead(job.frame);
+                    continue;
+                }
+                Warn(
+                    "SteamVR texture semaphores not reached for %u frames; reading the "
+                    "frame anyway\n",
+                    m_timelineConsecTimeouts
+                );
+            }
+            m_timelineConsecTimeouts = 0;
 
             // Rotationally reproject the frame from the pose it was rendered
             // with to the newest tracking pose, then stamp it with that pose's
