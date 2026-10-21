@@ -405,7 +405,8 @@ bool runCase(
             auto row = [&](char const* region, fixture::Error const& error) {
                 metrics << fixture::name(scene) << ',' << sample << ',' << eye << ',' << region
                         << ',' << error.pixels << ',' << error.baselineMae() << ','
-                        << error.predictionMae() << ',' << result.improved() << '\n';
+                        << error.predictionMae() << ',' << result.improved() << ','
+                        << result.staticMismatches << '\n';
             };
             row("all", result.all);
             row("changed", result.changed);
@@ -463,7 +464,8 @@ int main(int argc, char** argv) {
         summary << "timing=CPU_wall_including_GPU_completion_excluding_upload_readback_encoder\n"
                 << "first_sample=cold_excluded_from_steady_unless_only_sample\n";
         summary.flush();
-        metrics << "case,sample,eye,region,pixels,repeated_mae,predicted_mae,quality_pass\n";
+        metrics << "case,sample,eye,region,pixels,repeated_mae,predicted_mae,quality_pass,"
+                   "static_pixel_mismatches\n";
         timings << "case,sample,cold,predict_ms,capture_ms,pair_ms,quality_pass\n";
         alvr::VkContext ctx(std::vector<uint8_t> {});
         if (!ctx.meta.opticalFlowEnabled || ctx.meta.vendor != alvr::Vendor::Nvidia)
@@ -473,8 +475,9 @@ int main(int argc, char** argv) {
         bool passed = true;
         std::vector<Scene> scenes { Scene::Translation };
         if (o.suite != "smoke")
-            scenes = { Scene::Stationary, Scene::Translation, Scene::FineTexture,
-                       Scene::Rotation,   Scene::Foreground,  Scene::Jitter };
+            scenes = { Scene::Stationary,  Scene::Translation, Scene::SlowTranslation,
+                       Scene::FineTexture, Scene::Rotation,    Scene::Foreground,
+                       Scene::Jitter };
         for (auto scene : scenes)
             passed &= runCase(ctx, o, scene, metrics, timings, summary);
         if (o.suite != "smoke")

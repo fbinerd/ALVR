@@ -16,13 +16,23 @@ struct Size {
     uint32_t width() const { return eyeWidth * 2; }
     size_t bytes() const { return size_t(width()) * height * 4; }
 };
-enum class Scene { Translation, Stationary, FineTexture, Rotation, Foreground, Jitter };
+enum class Scene {
+    Translation,
+    Stationary,
+    SlowTranslation,
+    FineTexture,
+    Rotation,
+    Foreground,
+    Jitter
+};
 inline const char* name(Scene scene) {
     switch (scene) {
     case Scene::Translation:
         return "translation";
     case Scene::Stationary:
         return "stationary";
+    case Scene::SlowTranslation:
+        return "slow_translation";
     case Scene::FineTexture:
         return "fine_texture";
     case Scene::Rotation:
@@ -74,7 +84,11 @@ inline Pixels render(Size size, Scene scene, double time) {
                     cell = 6.f;
                 }
             } else if (scene != Scene::Stationary) {
-                sx -= float(direction * time * 4 * size.eyeWidth / 512.0);
+                // Keep slow motion subpixel at both suite dimensions.
+                float displacement = scene == Scene::SlowTranslation
+                    ? float(time * .25)
+                    : float(time * 4 * size.eyeWidth / 512.0);
+                sx -= direction * displacement;
             }
             uint8_t value = uint8_t(std::clamp(texture(sx, sy, seed, cell), 0.f, 255.f));
             size_t at = (size_t(y) * size.width() + x) * 4;
@@ -101,8 +115,9 @@ struct Error {
 struct Score {
     Error all, changed, revealed;
     bool validPixels = true;
+    size_t staticMismatches = 0;
     bool improved() const {
-        if (!validPixels || !all.pixels)
+        if (!validPixels || staticMismatches || !all.pixels)
             return false;
         if (all.baselineMae() <= .25)
             return all.predictionMae() <= .25;
@@ -130,6 +145,12 @@ inline Score score(
             result.validPixels &= predicted[at + 3] == 255;
             result.validPixels
                 &= eye ? predicted[at + 2] >= predicted[at] : predicted[at] >= predicted[at + 2];
+            if (scene == Scene::Stationary) {
+                bool differs = false;
+                for (unsigned c = 0; c < 4; ++c)
+                    differs |= predicted[at + c] != expected[at + c];
+                result.staticMismatches += differs;
+            }
             if (x < border || y < border || x + border >= size.eyeWidth
                 || y + border >= size.height)
                 continue;

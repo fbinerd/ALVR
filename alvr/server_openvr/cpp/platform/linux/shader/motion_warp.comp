@@ -48,14 +48,29 @@ vec4 colorAt(bool recent,bool right,vec2 q) {
     vec2 uv=(q+0.5)/vec2(2*p.eyeWidth,p.height);
     return recent?texture(latestImage,uv):texture(previousImage,uv);
 }
+bool unchangedPatch(bool right,vec2 q) {
+    ivec2 center=ivec2(floor(q+0.5));
+    for (int y=-1;y<=1;y++) for (int x=-1;x<=1;x++) {
+        ivec2 at=clamp(center+ivec2(x,y),ivec2(0),ivec2(p.eyeWidth-1,p.height-1));
+        at.x+=right?int(p.eyeWidth):0;
+        if (any(notEqual(texelFetch(previousImage,at,0),texelFetch(latestImage,at,0))))
+            return false;
+    }
+    return true;
+}
 void main() {
     uvec2 xy=gl_GlobalInvocationID.xy;
     if (xy.x>=2*p.eyeWidth || xy.y>=p.height) return;
     bool right=xy.x>=p.eyeWidth;
     vec2 target=vec2(xy.x%p.eyeWidth,xy.y), q;
-    // Prediction uses the newest image and backward flow, with the forward
-    // direction checking visibility. Rejected samples repeat the latest pixel.
-    vec4 color=sourceAt(target,1.0-p.time,true,right,q)?colorAt(true,right,q)
-        :colorAt(true,right,target);
+    // Exact fetch keeps fallback/static pixels unchanged. Optical-flow noise
+    // must not resample color when both local histories are identical. Check
+    // the proposed source too, so a moving edge can still enter static ground.
+    // There is no flow-magnitude dead zone: subpixel motion with changed color
+    // history remains eligible for prediction.
+    vec4 color=texelFetch(latestImage,ivec2(xy),0);
+    if (sourceAt(target,1.0-p.time,true,right,q)
+        && !(unchangedPatch(right,target) && unchangedPatch(right,q)))
+        color=colorAt(true,right,q);
     imageStore(outputImage,ivec2(xy),color);
 }

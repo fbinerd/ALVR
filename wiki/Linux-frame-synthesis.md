@@ -44,6 +44,15 @@ Pixels with invalid motion repeat the newest pixel. The eye boundaries are
 clamped independently. The output goes through the existing single NVENC
 submission and timestamp channel at the existing presentation cadence.
 
+Fallback pixels are fetched exactly. Before resampling a valid prediction,
+the shader compares 3x3 neighborhoods in previous/latest color at both the
+target and proposed source, with coordinates clamped per eye. If both patches
+are identical, it preserves the current texel. This protects unchanged color
+from noisy estimated flow without a flow-magnitude cutoff. Checking the
+source as well keeps a moving foreground edge eligible when it enters an
+unchanged target neighborhood. This change awaits GPU quality validation;
+noise or lighting changes between real frames do not qualify as identical.
+
 Two retained real frames are required before predicting. A predicted frame
 may extend at most 0.55 of the measured real-frame interval beyond the latest
 frame; duplicate/reversed timestamps and intervals longer than 100 ms reset
@@ -97,7 +106,7 @@ target time directly, independently of the predictor. Suites:
 | Suite | Per-eye size | Predictions per case | Cases |
 | --- | --- | --- | --- |
 | `smoke` (default) | 512x384 | 1 | Opposite translations |
-| `quality` | 512x384 | 6 | Stationary, translation, fine texture, rotation, foreground occlusion, timestamp jitter |
+| `quality` | 512x384 | 6 | Stationary, translation, subpixel translation, fine texture, rotation, foreground occlusion, timestamp jitter |
 | `stream` | 2048x2144 | 12 | Same cases at representative stream dimensions |
 
 `quality` and `stream` also verify four timestamp rejection/recovery cases
@@ -106,8 +115,11 @@ pause. A rejected call must preserve output and retain the real input; a
 successful prediction must release that input exactly once. Every output
 pixel is checked for opaque alpha and for the eye's distinct color tint,
 including the seam. Image-quality gates require improvement in both the whole
-interior and the changed-pixel region of each eye. Stationary images must stay
-within 0.25 RGB MAE. Newly revealed foreground-background pixels are reported
+interior and the changed-pixel region of each eye. Stationary images require
+exact RGBA preservation at every pixel including edges; the CSV reports
+`static_pixel_mismatches`. Subpixel translation advances 0.25 output pixels
+per presentation at both resolutions, covering possible slow-motion freezes.
+Newly revealed foreground-background pixels are reported
 separately; that region is diagnostic, not independently gated, because its
 visibility is not available from latest color alone.
 
@@ -137,7 +149,7 @@ bash tests/run_linux_native_motion.sh /path/to/ignored/output \
 Use `--iterations N` to choose 1-120 samples per case. `--save-images` writes
 the first sample's previous/latest/expected/predicted PPMs in case folders;
 it is on by default only for `smoke`. At stream dimensions, these files can
-consume about 630 MB across six cases. The runner has a bounded 300-second
+consume about 740 MB across seven cases. The runner has a bounded 300-second
 timeout. A partial run or failure lacks a successful final `passed=1`;
 inspect `exit-status.txt` and the log before interpreting metrics.
 
@@ -154,7 +166,10 @@ ALVR Vulkan/FFmpeg headers. The CPU timestamp eligibility check passed on
 2026-10-21. The first smoke fixture passed on RTX 3060 at source `bf103800`:
 left/right repeated MAE 18.5085/18.4292, predicted MAE 0.696263/0.541704,
 8.45 ms flow+warp at 512x384 per eye. That result predates the cadence recovery
-fix and expanded checker; those GPU checks remain pending. Headset output,
+fix and expanded checker. The expanded suite at `6e2ce564` passed the five
+moving scenes and all four timestamp recovery contracts, but failed stationary
+images: predicted MAE 0.563584/0.633863 versus exact repetition. The identity
+patch guard and added subpixel case await their next Luna run. Headset output,
 pose association and full-resolution budget remain unknown.
 The RTX 3060 is present again; persistent Render GPU and Encoder GPU selectors
 were set to NVIDIA with a session backup. No ALVR/SteamVR launch occurred
