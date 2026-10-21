@@ -172,6 +172,41 @@ class Encoder {
         return vendorId;
     }
 
+    // PCI vendor a GPU selector names ("Intel(R) Graphics", "NVIDIA GeForce
+    // RTX 3060", "AMD Radeon ..."), or 0.
+    static u32 vendorIdOfSelector(std::string selector) {
+        std::transform(selector.begin(), selector.end(), selector.begin(), ::tolower);
+        if (selector.find("intel") != std::string::npos) {
+            return 0x8086;
+        }
+        if (selector.find("nvidia") != std::string::npos
+            || selector.find("geforce") != std::string::npos) {
+            return 0x10de;
+        }
+        if (selector.find("amd") != std::string::npos
+            || selector.find("radeon") != std::string::npos) {
+            return 0x1002;
+        }
+        return 0;
+    }
+
+    // First DRM render node whose PCI vendor is vendorId, preferring one
+    // other than `avoid`, or "".
+    static std::string renderNodeOfVendor(u32 vendorId, std::string const& avoid) {
+        std::string fallback;
+        for (int i = 128; i < 136; ++i) {
+            auto path = "/dev/dri/renderD" + std::to_string(i);
+            if (access(path.c_str(), F_OK) != 0 || vendorIdOfNode(path) != vendorId) {
+                continue;
+            }
+            if (path != avoid) {
+                return path;
+            }
+            fallback = path;
+        }
+        return fallback;
+    }
+
     // Encoder GPU and technology from the "Encoder GPU" / "Encoder
     // technology" settings (video.encoder_config.linux_gpu). With nothing
     // set this is ALVR's default: the render GPU's node, NVENC on NVIDIA,
@@ -196,15 +231,28 @@ class Encoder {
                 auto devs = vkCtx.instance.enumeratePhysicalDevices();
                 auto index = VkContext::findPhysicalDevice(devs, selector);
                 std::string node = index ? renderNodeOf(devs[*index]) : "";
-                if (node.empty()) {
+                if (!node.empty()) {
+                    resolved.devicePath = node;
+                    resolved.vendor = vendorOfId(devs[*index].getProperties().vendorID);
+                } else if (u32 vendorId = vendorIdOfSelector(selector); vendorId != 0
+                           && !(node = renderNodeOfVendor(vendorId, renderNode)).empty()) {
+                    // SteamVR's environment may hide that GPU from Vulkan
+                    // (e.g. VK_DRIVER_FILES limited to NVIDIA's ICD). VAAPI only
+                    // needs its DRM render node, found here by PCI vendor.
+                    resolved.devicePath = node;
+                    resolved.vendor = vendorOfId(vendorId);
+                    Info(
+                        "Encoder GPU \"%s\" is not visible to Vulkan here; using DRM node %s "
+                        "by vendor",
+                        selector.c_str(),
+                        node.c_str()
+                    );
+                } else {
                     Warn(
                         "Encoder GPU \"%s\" matches no GPU with a DRM render node; using the "
                         "render GPU",
                         selector.c_str()
                     );
-                } else {
-                    resolved.devicePath = node;
-                    resolved.vendor = vendorOfId(devs[*index].getProperties().vendorID);
                 }
             }
             resolved.crossDevice = resolved.devicePath != renderNode;
