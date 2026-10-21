@@ -80,6 +80,12 @@ public:
     // process ("" if none). SteamVR and its driver inherit them from Steam,
     // so they can defeat a GPU chosen in ALVR's settings; warnings about an
     // unmet GPU choice include this list.
+    // Why a requested render GPU was not honoured ("" if it was, or none was
+    // requested). The device is chosen once at driver start, when the log is
+    // not yet streamed to the dashboard, so the encoder repeats this warning
+    // every time it is built (Encoder::resolveTarget).
+    inline static std::string renderGpuWarning;
+
     static std::string gpuOverrideEnvironment() {
         static char const* const names[] = {
             "VK_DRIVER_FILES",
@@ -165,13 +171,11 @@ private:
                 return devs[*index];
             }
             std::string env = gpuOverrideEnvironment();
-            Warn(
-                "%s \"%s\" matches no Vulkan device, so it cannot be honoured; GPU-restricting "
-                "environment inherited from Steam/SteamVR: %s",
-                source.label,
-                source.selector,
-                env.empty() ? "none" : env.c_str()
-            );
+            renderGpuWarning = std::string(source.label) + " \"" + source.selector
+                + "\" matches no Vulkan device, so it cannot be honoured; GPU-restricting "
+                  "environment inherited from Steam/SteamVR: "
+                + (env.empty() ? "none" : env);
+            Warn("%s", renderGpuWarning.c_str());
         }
 
         for (auto type :
