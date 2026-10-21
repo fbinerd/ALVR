@@ -254,7 +254,8 @@ Output createOutputImage(
     vk::Extent2D extent,
     vk::Format format,
     HandleType handleType,
-    bool linearOnly
+    bool linearOnly,
+    bool transferSrc
 ) {
     Image img;
     Output out;
@@ -271,8 +272,9 @@ Output createOutputImage(
         .arrayLayers = 1,
         .samples = vk::SampleCountFlagBits::e1,
         .usage = vk::ImageUsageFlagBits::eStorage | vk::ImageUsageFlagBits::eSampled
-            | (std::getenv("ALVR_DEBUG_PIXELS") ? vk::ImageUsageFlagBits::eTransferSrc
-                                                 : vk::ImageUsageFlags {}),
+            | (std::getenv("ALVR_DEBUG_PIXELS") || transferSrc
+                   ? vk::ImageUsageFlagBits::eTransferSrc
+                   : vk::ImageUsageFlags {}),
         .sharingMode = vk::SharingMode::eExclusive,
         .initialLayout = vk::ImageLayout::eUndefined,
     };
@@ -525,8 +527,57 @@ Renderer::Renderer(
         createInfo.outputExtent,
         stagingImgCI.format,
         createInfo.outputHandle,
-        createInfo.linearOutput
+        createInfo.linearOutput,
+        createInfo.hostOutputCopy
     );
+
+    if (createInfo.hostOutputCopy) {
+        // 4 bytes per texel: the UNORM RGBA/BGRA output used with VAAPI.
+        u32 const pitch = createInfo.outputExtent.width * 4;
+        vk::DeviceSize const size = vk::DeviceSize(pitch) * createInfo.outputExtent.height;
+        hostBuf = vkCtx.dev.createBuffer({
+            .size = size,
+            .usage = vk::BufferUsageFlagBits::eTransferDst,
+            .sharingMode = vk::SharingMode::eExclusive,
+        });
+        auto req = vkCtx.dev.getBufferMemoryRequirements(hostBuf);
+        // Cached host memory: the encoder reads every byte with the CPU, and
+        // uncached (write-combined) memory is very slow to read.
+        u32 typeIndex;
+        try {
+            typeIndex = memoryTypeIndex(
+                vkCtx,
+                vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent
+                    | vk::MemoryPropertyFlagBits::eHostCached,
+                req.memoryTypeBits
+            );
+        } catch (std::exception const&) {
+            typeIndex = memoryTypeIndex(
+                vkCtx,
+                vk::MemoryPropertyFlagBits::eHostVisible
+                    | vk::MemoryPropertyFlagBits::eHostCoherent,
+                req.memoryTypeBits
+            );
+        }
+        hostMem = vkCtx.dev.allocateMemory({
+            .allocationSize = req.size,
+            .memoryTypeIndex = typeIndex,
+        });
+        vkCtx.dev.bindBufferMemory(hostBuf, hostMem, 0);
+        host = HostOutput {
+            .pixels = vkCtx.dev.mapMemory(hostMem, 0, size),
+            .rowPitch = pitch,
+            .width = createInfo.outputExtent.width,
+            .height = createInfo.outputExtent.height,
+        };
+        hostCopy = true;
+        Info(
+            "Renderer: output copied to host memory for a cross-GPU encoder (%ux%u, %.1f MB)",
+            host.width,
+            host.height,
+            size / 1e6
+        );
+    }
 
     vk::QueryPoolCreateInfo poolCI {
         .queryType = vk::QueryType::eTimestamp,
@@ -884,6 +935,46 @@ void Renderer::render(VkContext& vkCtx, std::vector<Layer> const& layers) {
         prev = nextOut;
     }
 
+    if (hostCopy) {
+        // Whole output image to host memory for the cross-GPU encoder.
+        vk::MemoryBarrier toTransfer {
+            .srcAccessMask = vk::AccessFlagBits::eShaderWrite,
+            .dstAccessMask = vk::AccessFlagBits::eTransferRead,
+        };
+        cmdBuf.pipelineBarrier(
+            vk::PipelineStageFlagBits::eComputeShader,
+            vk::PipelineStageFlagBits::eTransfer,
+            {},
+            toTransfer,
+            {},
+            {}
+        );
+        vk::BufferImageCopy region {
+            .bufferOffset = 0,
+            .bufferRowLength = 0,
+            .bufferImageHeight = 0,
+            .imageSubresource { .aspectMask = vk::ImageAspectFlagBits::eColor,
+                                .mipLevel = 0,
+                                .baseArrayLayer = 0,
+                                .layerCount = 1 },
+            .imageOffset { .x = 0, .y = 0, .z = 0 },
+            .imageExtent { .width = host.width, .height = host.height, .depth = 1 },
+        };
+        cmdBuf.copyImageToBuffer(output.image.image, output.image.layout, hostBuf, region);
+        vk::MemoryBarrier toHost {
+            .srcAccessMask = vk::AccessFlagBits::eTransferWrite,
+            .dstAccessMask = vk::AccessFlagBits::eHostRead,
+        };
+        cmdBuf.pipelineBarrier(
+            vk::PipelineStageFlagBits::eTransfer,
+            vk::PipelineStageFlagBits::eHost,
+            {},
+            toHost,
+            {},
+            {}
+        );
+    }
+
     if (probe) {
         vk::MemoryBarrier toTransfer {
             .srcAccessMask = vk::AccessFlagBits::eShaderWrite,
@@ -1103,6 +1194,11 @@ void Renderer::destroy(VkContext const& ctx) {
         pipe.destroy(ctx);
     }
 
+    if (hostBuf) {
+        ctx.dev.unmapMemory(hostMem);
+        ctx.dev.destroy(hostBuf);
+        ctx.dev.free(hostMem);
+    }
     if (debugBuf) {
         ctx.dev.unmapMemory(debugMem);
         ctx.dev.destroy(debugBuf);

@@ -75,7 +75,14 @@ std::unique_ptr<alvr::EncodePipeline> alvr::EncodePipeline::Create(
         try {
             alvr::HWContext hwCtx(vk_ctx);
             auto vaapi = std::make_unique<alvr::EncodePipelineVAAPI>(
-                hwCtx, target.devicePath, target.vendor, input_frame, width, height
+                hwCtx,
+                target.devicePath,
+                target.vendor,
+                input_frame,
+                width,
+                height,
+                target.hostPixels,
+                target.hostRowPitch
             );
             Info("Using VAAPI encoder");
             return vaapi;
