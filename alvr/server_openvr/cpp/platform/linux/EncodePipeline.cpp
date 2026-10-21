@@ -50,16 +50,18 @@ std::unique_ptr<alvr::EncodePipeline> alvr::EncodePipeline::Create(
 ) {
     switch (target.backend) {
     case EncoderBackend::Nvenc:
-        // CUDA interop imports the renderer's opaque-fd image, which exists
-        // only on the render GPU.
-        if (target.crossDevice) {
-            Error("NVENC can only encode on the render GPU; choose VAAPI or the same GPU");
-            return nullptr;
-        }
         try {
             alvr::HWContext hwCtx(vk_ctx);
             auto nvenc = std::make_unique<alvr::EncodePipelineNvEnc>(
-                hwCtx, vk_ctx, input_frame, width, height
+                hwCtx,
+                vk_ctx,
+                input_frame,
+                width,
+                height,
+                target.crossDevice,
+                target.devicePath,
+                target.hostPixels,
+                target.hostRowPitch
             );
             Info("Using NvEnc encoder");
             return nvenc;

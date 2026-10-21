@@ -280,7 +280,7 @@ class Encoder {
             "Encoder: %s on %s%s (render GPU node %s)",
             encoderBackendName(resolved.backend),
             resolved.devicePath.c_str(),
-            resolved.crossDevice ? ", a different GPU (linear dma-buf hand-over)" : "",
+            resolved.crossDevice ? ", a different GPU (host-memory upload)" : "",
             renderNode.empty() ? "unknown" : renderNode.c_str()
         );
         target = resolved;
@@ -329,7 +329,7 @@ public:
         }
 
         resolveTarget();
-        rendererCI.outputHandle = target.backend == EncoderBackend::Nvenc
+        rendererCI.outputHandle = target.backend == EncoderBackend::Nvenc && !target.crossDevice
             ? render::HandleType::OpaqueFd
             : render::HandleType::DmaBuf;
         rendererCI.linearOutput = target.crossDevice;

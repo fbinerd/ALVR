@@ -16,7 +16,15 @@ class EncodePipelineNvEnc : public EncodePipeline {
 public:
     ~EncodePipelineNvEnc();
     EncodePipelineNvEnc(
-        HWContext& vk_ctx, VkContext& v_ctx, VkFrame& input_frame, uint32_t width, uint32_t height
+        HWContext& vk_ctx,
+        VkContext& v_ctx,
+        VkFrame& input_frame,
+        uint32_t width,
+        uint32_t height,
+        bool hostMode = false,
+        std::string const& devicePath = {},
+        void const* hostPixels = nullptr,
+        unsigned hostRowPitch = 0
     );
 
     void PushFrame(uint64_t targetTimestampNs, bool idr) override;
@@ -30,5 +38,8 @@ private:
     AVBufferRef* hw_ctx = nullptr;
     std::unique_ptr<AVFrame, std::function<void(AVFrame*)>> vk_frame;
     AVFrame* hw_frame = nullptr;
+    bool host_mode = false;
+    void const* host_pixels = nullptr;
+    unsigned host_row_pitch = 0;
 };
 }

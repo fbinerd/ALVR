@@ -118,7 +118,7 @@ SteamVR Home (steamtours) reports Vulkan errors under the Khronos layer:
 synchronisation hazards on its desktop window. Other SteamVR processes:
 `VUID-VkSemaphoreTypeCreateInfo-timelineSemaphore-03252`.
 
-## GPU and encoder selection (branch `linux-gpu-encoder-selection`)
+## GPU and encoder selection (branches `linux-gpu-encoder-selection`, `linux-cross-gpu-nvenc`)
 
 Dashboard: Settings > Presets (last three rows): drop-down menus "Render
 GPU", "Encoder GPU" and "Encoder technology". The GPU menus list the GPUs
@@ -143,11 +143,15 @@ How each choice acts:
   (`__GLX_VENDOR_LIBRARY_NAME=nvidia __NV_PRIME_RENDER_OFFLOAD=1 VK_DRIVER_FILES=...`
   for NVIDIA's driver, `DRI_PRIME=vvvv:dddd MESA_VK_DEVICE_SELECT=vvvv:dddd`
   for Mesa drivers). `ALVR_VULKAN_DEVICE` still overrides the setting.
-- **Encoder GPU** different from the render GPU: VAAPI only (NVENC needs
-  the render GPU). Handing the output over as a linear dma-buf failed
-  (the Intel GPU could not read the NVIDIA-exported buffer), so the
-  renderer copies each finished frame into host memory with a GPU
-  transfer and VAAPI uploads it into a surface of the encoder GPU.
+- **Encoder GPU** different from the render GPU: the renderer copies each
+  finished frame into host memory with a GPU transfer, then the selected
+  encoder uploads it into a surface on its own GPU. This path supports both
+  VAAPI and NVENC. The NVENC path matches the encoder DRM node's PCI bus id to
+  a CUDA ordinal through the CUDA driver; if that lookup is unavailable, it
+  logs and falls back to ordinal 0. Same-GPU NVENC continues to import the
+  Vulkan frame through the existing CUDA/Vulkan interop path. Handing the
+  output over as a linear dma-buf failed (the Intel GPU could not read the
+  NVIDIA-exported buffer), which is why cross-GPU encoding uses the host copy.
   Measured on RTX 3060 (render) + UHD 770 (encode), 2304x1184: 59 fps,
   encode ~4.6 ms, NVENC idle, correct image. If SteamVR's environment
   limits Vulkan to one driver (e.g. `VK_DRIVER_FILES=nvidia_icd.json`),
@@ -165,7 +169,8 @@ How each choice acts:
   The Quality and Balanced presets gave the same encode time at native
   size. 1440x1504 is the highest of these sizes that holds 72 Hz in this
   mode (VDEnc delivered ~72 Mbps of the 90 asked).
-- **Encoder technology**: VAAPI and NVENC are implemented. Vulkan Video and
+- **Encoder technology**: VAAPI and NVENC are implemented for same-GPU and
+  host-memory cross-GPU operation. Vulkan Video and
   Software are placeholders: they log "not implemented yet" and no encoder
   is created. The old "Force software encoding" switch maps to Software.
 
@@ -184,9 +189,15 @@ SteamVR and games inherit:
   log names the restricting variables.
 
 The streamer logs its decision once per encoder build, e.g.
-`Encoder: VAAPI on /dev/dri/renderD128 (render GPU node /dev/dri/renderD128)`.
+`Encoder: VAAPI on /dev/dri/renderD128 (render GPU node /dev/dri/renderD128)`
+or `Encoder: NVENC on /dev/dri/renderD129, a different GPU (host-memory
+upload) (render GPU node /dev/dri/renderD128)`. The Intel-render + RTX 3060
+NVENC route has compiled, but its live image and performance measurements
+are pending.
 
-Next steps this opens: a Vulkan Video pipeline (enable FFmpeg's
+Next steps this opens: measure the Intel-render + RTX 3060 NVENC route at the
+I1 preset and the largest Intel-supported resolution at 72 Hz; then investigate
+a Vulkan Video pipeline (enable FFmpeg's
 `h264_vulkan` / `hevc_vulkan` / `av1_vulkan` encoders, NV12 encode-source
 images, a video encode queue), the Linux software pipeline, and a zero-copy
 cross-GPU hand-over (host-memory dma-buf or VA user-pointer surfaces)

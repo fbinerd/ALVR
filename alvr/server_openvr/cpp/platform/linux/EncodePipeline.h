@@ -46,8 +46,8 @@ struct EncoderTarget {
     std::string devicePath;
     // Vendor of the encoder GPU.
     Vendor vendor = Vendor::Intel;
-    // The encoder GPU is not the render GPU. VAAPI only: the renderer copies
-    // each frame into host memory (hostPixels) and the encoder uploads it.
+    // The encoder GPU is not the render GPU: the renderer copies each frame
+    // into host memory (hostPixels) and the encoder uploads it.
     bool crossDevice = false;
     // Set by the Encoder after the renderer exists (crossDevice only).
     void const* hostPixels = nullptr;

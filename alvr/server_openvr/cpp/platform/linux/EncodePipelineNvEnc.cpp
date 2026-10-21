@@ -4,7 +4,10 @@
 #include "ffmpeg_helper.h"
 #include <ALVR-common/packet_types.h>
 #include <chrono>
+#include <dlfcn.h>
+#include <filesystem>
 #include <memory>
+#include <string>
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -69,12 +72,46 @@ void set_hwframe_ctx(AVCodecContext* ctx, AVBufferRef* hw_device_ctx, AVPixelFor
     av_buffer_unref(&hw_frames_ref);
 }
 
+int cudaOrdinalForDrmNode(std::string const& node) {
+    using CuInit = int (*)(unsigned);
+    using CuDeviceGetByPCIBusId = int (*)(int*, char const*);
+    void* library = dlopen("libcuda.so.1", RTLD_LAZY | RTLD_LOCAL);
+    if (!library)
+        return -1;
+    auto init = reinterpret_cast<CuInit>(dlsym(library, "cuInit"));
+    auto getByBusId
+        = reinterpret_cast<CuDeviceGetByPCIBusId>(dlsym(library, "cuDeviceGetByPCIBusId"));
+    int ordinal = -1;
+    try {
+        auto drmEntry = std::filesystem::path(node).filename();
+        auto device = std::filesystem::canonical(
+            std::filesystem::path("/sys/class/drm") / drmEntry / "device"
+        );
+        auto pci = device.filename().string();
+        // CUDA uses the same domain:bus:device.function spelling as sysfs.
+        if (init && getByBusId && init(0) == 0 && getByBusId(&ordinal, pci.c_str()) != 0)
+            ordinal = -1;
+    } catch (...) {
+        ordinal = -1;
+    }
+    dlclose(library);
+    return ordinal;
+}
+
 // Last target the bitrate manager delivered; see initEncoding.
 int64_t last_known_bitrate_bps = 0;
 
 } // namespace
 alvr::EncodePipelineNvEnc::EncodePipelineNvEnc(
-    HWContext& vk_ctx, VkContext& v_ctx, VkFrame& input_frame, uint32_t width, uint32_t height
+    HWContext& vk_ctx,
+    VkContext& v_ctx,
+    VkFrame& input_frame,
+    uint32_t width,
+    uint32_t height,
+    bool hostMode,
+    std::string const& devicePath,
+    void const* hostPixels,
+    unsigned hostRowPitch
 )
     : v_ctx(v_ctx)
     , frame_ctx(vk_ctx.avCtx, input_frame.imageInfo()) {
@@ -84,9 +121,28 @@ alvr::EncodePipelineNvEnc::EncodePipelineNvEnc(
     auto surface_format = nvenc_surface_format(input_frame_ctx->sw_format);
 
     int err;
-    vk_frame = input_frame.make_av_frame(frame_ctx);
-
-    err = av_hwdevice_ctx_create_derived(&hw_ctx, AV_HWDEVICE_TYPE_CUDA, vk_ctx.avCtx, 0);
+    host_mode = hostMode;
+    host_pixels = hostPixels;
+    host_row_pitch = hostRowPitch;
+    int cudaOrdinal = hostMode ? cudaOrdinalForDrmNode(devicePath) : -1;
+    if (hostMode) {
+        if (cudaOrdinal < 0) {
+            cudaOrdinal = 0;
+            Info(
+                "Could not match encoder DRM node %s to a CUDA device; falling back to CUDA "
+                "ordinal 0",
+                devicePath.c_str()
+            );
+        } else {
+            Info("Matched encoder DRM node %s to CUDA ordinal %d", devicePath.c_str(), cudaOrdinal);
+        }
+        err = av_hwdevice_ctx_create(
+            &hw_ctx, AV_HWDEVICE_TYPE_CUDA, std::to_string(cudaOrdinal).c_str(), nullptr, 0
+        );
+    } else {
+        vk_frame = input_frame.make_av_frame(frame_ctx);
+        err = av_hwdevice_ctx_create_derived(&hw_ctx, AV_HWDEVICE_TYPE_CUDA, vk_ctx.avCtx, 0);
+    }
     if (err < 0) {
         throw alvr::AvException("Failed to create a CUDA device:", err);
     }
@@ -221,32 +277,53 @@ void alvr::EncodePipelineNvEnc::SetParams(FfiDynamicEncoderParams params) {
 }
 
 void alvr::EncodePipelineNvEnc::PushFrame(uint64_t targetTimestampNs, bool idr) {
-    AVVkFrame* vkf = reinterpret_cast<AVVkFrame*>(vk_frame->data[0]);
-    vkf->sem_value[0]++;
+    int err;
+    AVFrame* source = nullptr;
+    if (host_mode) {
+        source = av_frame_alloc();
+        source->format = nvenc_surface_format(
+            frame_ctx.ctx ? ((AVHWFramesContext*)frame_ctx.ctx->data)->sw_format : AV_PIX_FMT_RGBA
+        );
+        source->width = encoder_ctx->width;
+        source->height = encoder_ctx->height;
+        source->data[0] = const_cast<uint8_t*>(static_cast<uint8_t const*>(host_pixels));
+        source->linesize[0] = int(host_row_pitch);
+    } else {
+        AVVkFrame* vkf = reinterpret_cast<AVVkFrame*>(vk_frame->data[0]);
+        vkf->sem_value[0]++;
 
-    VkTimelineSemaphoreSubmitInfo timelineInfo = {};
-    timelineInfo.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
-    timelineInfo.signalSemaphoreValueCount = 1;
-    timelineInfo.pSignalSemaphoreValues = &vkf->sem_value[0];
+        VkTimelineSemaphoreSubmitInfo timelineInfo = {};
+        timelineInfo.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
+        timelineInfo.signalSemaphoreValueCount = 1;
+        timelineInfo.pSignalSemaphoreValues = &vkf->sem_value[0];
 
-    vk::PipelineStageFlags waitStage = vk::PipelineStageFlagBits::eBottomOfPipe;
+        vk::PipelineStageFlags waitStage = vk::PipelineStageFlagBits::eBottomOfPipe;
 
-    vk::SubmitInfo submitInfo = {};
-    submitInfo.pNext = &timelineInfo;
-    // submitInfo.waitSemaphoreCount = 1;
-    // submitInfo.pWaitSemaphores = &r->GetOutput().semaphore;
-    submitInfo.pWaitDstStageMask = &waitStage;
-    submitInfo.signalSemaphoreCount = 1;
-    submitInfo.pSignalSemaphores = reinterpret_cast<vk::Semaphore*>(&vkf->sem[0]);
-    v_ctx.useQueue([&](auto& queue) { queue.submit(submitInfo); });
+        vk::SubmitInfo submitInfo = {};
+        submitInfo.pNext = &timelineInfo;
+        // submitInfo.waitSemaphoreCount = 1;
+        // submitInfo.pWaitSemaphores = &r->GetOutput().semaphore;
+        submitInfo.pWaitDstStageMask = &waitStage;
+        submitInfo.signalSemaphoreCount = 1;
+        submitInfo.pSignalSemaphores = reinterpret_cast<vk::Semaphore*>(&vkf->sem[0]);
+        v_ctx.useQueue([&](auto& queue) { queue.submit(submitInfo); });
 
-    int err = av_hwframe_get_buffer(encoder_ctx->hw_frames_ctx, hw_frame, 0);
+        source = vk_frame.get();
+    }
+
+    err = av_hwframe_get_buffer(encoder_ctx->hw_frames_ctx, hw_frame, 0);
     if (err < 0) {
         throw alvr::AvException("Failed to allocate CUDA frame", err);
     }
-    err = av_hwframe_transfer_data(hw_frame, vk_frame.get(), 0);
+    err = av_hwframe_transfer_data(hw_frame, source, 0);
+    if (host_mode)
+        av_frame_free(&source);
     if (err < 0) {
-        throw alvr::AvException("Failed to transfer Vulkan image to CUDA frame", err);
+        throw alvr::AvException(
+            host_mode ? "Failed to upload host frame to CUDA"
+                      : "Failed to transfer Vulkan image to CUDA frame",
+            err
+        );
     }
 
     hw_frame->pict_type = idr ? AV_PICTURE_TYPE_I : AV_PICTURE_TYPE_NONE;
