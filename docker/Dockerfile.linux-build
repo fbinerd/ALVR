@@ -23,6 +23,7 @@ RUN apt-get update && apt-get install -y \
     cmake \
     clang \
     libclang-dev \
+    glslang-tools \
     && rm -rf /var/lib/apt/lists/*
 
 # Rust toolchain pinned by rust-toolchain.toml, passed in by build-linux.sh.

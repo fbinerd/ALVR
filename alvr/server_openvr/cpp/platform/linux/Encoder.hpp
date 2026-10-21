@@ -9,6 +9,7 @@
 
 #include "EncodePipeline.h"
 #include "Renderer.hpp"
+#include "motion/NativeMotion.hpp"
 
 #include "alvr_server/IDRScheduler.h"
 #include "alvr_server/Settings.h"
@@ -104,6 +105,7 @@ class Encoder {
     VkContext vkCtx;
 
     Optional<render::Renderer> renderer;
+    std::unique_ptr<motion::NativeMotion> nativeMotion;
 
     std::unique_ptr<EncodePipeline> encoder;
     std::unique_ptr<VkFrame> frame;
@@ -292,6 +294,7 @@ public:
         : vkCtx(std::vector<u8> {}) { }
 
     void createImages(render::RendererCreateInfo rendererCI) {
+        nativeMotion.reset();
         if (renderer.hasValue()) {
             renderer.get().destroy(vkCtx);
             renderer.reset();
@@ -339,6 +342,21 @@ public:
 
         outExtent = rendererCI.outputExtent;
         renderer.emplace(vkCtx, rendererCI, pipeCIs);
+        if (vkCtx.meta.opticalFlowEnabled) {
+            if (settings->m_enableFoveatedEncoding || target.crossDevice
+                || target.backend != EncoderBackend::Nvenc) {
+                Warn("Native motion controlled mode requires same-GPU NVENC and foveated encoding disabled; using normal frames");
+            } else {
+                try {
+                    auto output = renderer.get().getOutput();
+                    nativeMotion = std::make_unique<motion::NativeMotion>(
+                        vkCtx, outExtent, static_cast<vk::Format>(output.imageCI.format)
+                    );
+                } catch (std::exception const& e) {
+                    Warn("Native motion unavailable: %s; using normal frames", e.what());
+                }
+            }
+        }
         if (target.crossDevice) {
             auto host = renderer.get().hostOutput();
             target.hostPixels = host.pixels;
@@ -380,6 +398,7 @@ public:
 
         encoder.reset();
         frame.reset();
+        nativeMotion.reset();
         if (renderer.hasValue()) {
             renderer.get().destroy(vkCtx);
             renderer.reset();
@@ -467,8 +486,18 @@ public:
         renderer.get().warpParams = warp;
         ReportPresent(targetTimestampNs, 0);
         updateFoveationCenters(targetTimestampNs);
-        renderer.get().render(vkCtx, layers);
-        afterRead();
+        auto output = renderer.get().getOutput();
+        bool predicted = nativeMotion && nativeMotion->predict(
+            output.image.image, output.image.view, output.image.layout, targetTimestampNs, afterRead
+        );
+        if (!predicted) {
+            renderer.get().render(vkCtx, layers);
+            afterRead();
+            if (nativeMotion) {
+                output = renderer.get().getOutput();
+                nativeMotion->capture(output.image.image, output.image.layout, targetTimestampNs);
+            }
+        }
         ReportComposed(targetTimestampNs, 0);
 
         encoder->SetParams(GetDynamicEncoderParams());
@@ -528,6 +557,7 @@ public:
         // does not destroy its semaphore on a dead device.
         encoder.reset();
         frame.reset();
+        nativeMotion.reset();
 
         if (renderer.hasValue()) {
             renderer.get().destroy(vkCtx);

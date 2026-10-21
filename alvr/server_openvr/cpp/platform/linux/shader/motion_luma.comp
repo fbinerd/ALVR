@@ -1,0 +1,13 @@
+#version 450
+layout(local_size_x=8,local_size_y=8) in;
+layout(binding=0) uniform sampler2D colorImage;
+layout(binding=1,r8) uniform writeonly image2D lumaImage;
+layout(push_constant) uniform Params { uint eye; } p;
+void main() {
+    ivec2 q=ivec2(gl_GlobalInvocationID.xy), size=imageSize(lumaImage);
+    if (any(greaterThanEqual(q,size))) return;
+    vec2 uv=(vec2(q)+0.5)/vec2(size);
+    uv.x=(uv.x+float(p.eye))*0.5;
+    vec3 rgb=texture(colorImage,uv).rgb;
+    imageStore(lumaImage,q,vec4(dot(rgb,vec3(0.2126,0.7152,0.0722))));
+}

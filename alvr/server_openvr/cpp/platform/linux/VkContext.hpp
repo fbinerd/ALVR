@@ -327,7 +327,9 @@ public:
             }
 
             if (!dependencies || !supportedOpticalFlow.opticalFlow
-                || !supportedSync2.synchronization2 || !opticalFlowFamily) {
+                || !supportedSync2.synchronization2 || !opticalFlowFamily
+                || !supportedFeatures.features.shaderStorageImageExtendedFormats
+                || !supportedFeatures.features.shaderStorageImageWriteWithoutFormat) {
                 Warn("ALVR_NATIVE_MOTION=1 requested, but this Vulkan device lacks optical-flow support, dependencies, or a compatible queue; motion synthesis stays off");
             } else {
                 meta.opticalFlowEnabled = true;
@@ -384,6 +386,8 @@ public:
             .features = {
                 .robustBufferAccess = true,
                 .samplerAnisotropy = true,
+                .shaderStorageImageExtendedFormats = meta.opticalFlowEnabled,
+                .shaderStorageImageWriteWithoutFormat = meta.opticalFlowEnabled,
             },
         };
         vk::DeviceCreateInfo devCI {

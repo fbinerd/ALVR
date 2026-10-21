@@ -1,0 +1,61 @@
+#version 450
+// Inverse warp with bidirectional consistency, derived from our CPU reference.
+layout(local_size_x=8,local_size_y=8) in;
+layout(binding=0) uniform sampler2D previousImage;
+layout(binding=1) uniform sampler2D latestImage;
+layout(binding=2) uniform isampler2D forwardLeft;
+layout(binding=3) uniform isampler2D backwardLeft;
+layout(binding=4) uniform isampler2D forwardRight;
+layout(binding=5) uniform isampler2D backwardRight;
+layout(binding=6) uniform writeonly image2D outputImage;
+layout(push_constant) uniform Params {
+    uint eyeWidth,height,lumaWidth,lumaHeight;
+    float time;
+} p;
+ivec2 vectorAt(bool reverse,bool right,ivec2 q) {
+    if (right) return reverse?texelFetch(backwardRight,q,0).xy:texelFetch(forwardRight,q,0).xy;
+    return reverse?texelFetch(backwardLeft,q,0).xy:texelFetch(forwardLeft,q,0).xy;
+}
+vec2 flowAt(bool reverse,bool right,vec2 q) {
+    vec2 scale=vec2(p.lumaWidth,p.lumaHeight)/vec2(p.eyeWidth,p.height);
+    vec2 grid=vec2(p.lumaWidth/4,p.lumaHeight/4);
+    vec2 v=clamp((q+0.5)*scale/4.0-0.5,vec2(0),grid-1);
+    ivec2 a=ivec2(v), b=min(a+1,ivec2(grid)-1);
+    vec2 f=fract(v);
+    vec2 t=mix(mix(vec2(vectorAt(reverse,right,a)),vec2(vectorAt(reverse,right,ivec2(b.x,a.y))),f.x),
+               mix(vec2(vectorAt(reverse,right,ivec2(a.x,b.y))),vec2(vectorAt(reverse,right,b)),f.x),f.y);
+    return t/32.0/scale;
+}
+bool inside(vec2 q) {
+    return !any(isnan(q)) && !any(isinf(q)) && all(greaterThanEqual(q,vec2(0)))
+        && all(lessThanEqual(q,vec2(p.eyeWidth-1,p.height-1)));
+}
+bool sourceAt(vec2 target,float distance,bool reverse,bool right,out vec2 q) {
+    q=target;
+    for (int i=0;i<5;i++) {
+        if (!inside(q)) return false;
+        q=target-distance*flowAt(reverse,right,q);
+    }
+    if (!inside(q)) return false;
+    vec2 v=flowAt(reverse,right,q), other=q+v;
+    // Thresholds are in full-resolution pixels; allow for a half-size estimator.
+    return inside(other) && length(q+distance*v-target)<=1.0
+        && length(v+flowAt(!reverse,right,other))<=2.0;
+}
+vec4 colorAt(bool recent,bool right,vec2 q) {
+    q=clamp(q,vec2(0),vec2(p.eyeWidth-1,p.height-1));
+    q.x+=right?float(p.eyeWidth):0.0;
+    vec2 uv=(q+0.5)/vec2(2*p.eyeWidth,p.height);
+    return recent?texture(latestImage,uv):texture(previousImage,uv);
+}
+void main() {
+    uvec2 xy=gl_GlobalInvocationID.xy;
+    if (xy.x>=2*p.eyeWidth || xy.y>=p.height) return;
+    bool right=xy.x>=p.eyeWidth;
+    vec2 target=vec2(xy.x%p.eyeWidth,xy.y), q;
+    // Prediction uses the newest image and backward flow, with the forward
+    // direction checking visibility. Rejected samples repeat the latest pixel.
+    vec4 color=sourceAt(target,1.0-p.time,true,right,q)?colorAt(true,right,q)
+        :colorAt(true,right,target);
+    imageStore(outputImage,ivec2(xy),color);
+}

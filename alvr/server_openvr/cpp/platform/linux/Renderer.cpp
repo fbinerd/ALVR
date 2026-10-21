@@ -515,7 +515,7 @@ Renderer::Renderer(
         stagingImgCI.format,
         createInfo.outputHandle,
         createInfo.linearOutput,
-        createInfo.hostOutputCopy
+        createInfo.hostOutputCopy || vkCtx.meta.opticalFlowEnabled
     );
 
     if (createInfo.hostOutputCopy) {

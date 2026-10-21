@@ -1,5 +1,38 @@
 use std::{env, path::PathBuf};
 
+// Generate build-local SPIR-V and an aligned C++ array. No generated shader
+// binary is stored in the checkout; Windows/macOS do not build this path.
+fn compile_native_motion_shaders(out_dir: &std::path::Path) {
+    let compiler = env::var("GLSLANG_VALIDATOR").unwrap_or_else(|_| "glslangValidator".into());
+    let mut header =
+        String::from("#pragma once\n#include <cstdint>\nnamespace alvr::motion::shader {\n");
+    println!("cargo:rerun-if-env-changed=GLSLANG_VALIDATOR");
+    for (name, file) in [("luma", "motion_luma.comp"), ("warp", "motion_warp.comp")] {
+        let source = PathBuf::from("cpp/platform/linux/shader").join(file);
+        let binary = out_dir.join(format!("{file}.spv"));
+        println!("cargo:rerun-if-changed={}", source.display());
+        let status = std::process::Command::new(&compiler)
+            .args(["-V", "--target-env", "vulkan1.2", "-o"])
+            .arg(&binary)
+            .arg(&source)
+            .status()
+            .expect("Native motion shaders require glslangValidator (glslang-tools)");
+        assert!(status.success(), "Failed to compile {}", source.display());
+        let bytes = std::fs::read(binary).unwrap();
+        assert_eq!(bytes.len() % 4, 0);
+        header.push_str(&format!("inline constexpr uint32_t {name}[] = {{\n"));
+        for word in bytes.chunks_exact(4) {
+            header.push_str(&format!(
+                "0x{:08x},",
+                u32::from_le_bytes(word.try_into().unwrap())
+            ));
+        }
+        header.push_str("\n};\n");
+    }
+    header.push_str("}\n");
+    std::fs::write(out_dir.join("NativeMotionShaders.hpp"), header).unwrap();
+}
+
 fn get_vulkan_headers_path(platform_name: &str) -> PathBuf {
     alvr_filesystem::deps_dir()
         .join(if platform_name == "linux" {
@@ -34,6 +67,10 @@ fn get_linux_x264_path() -> PathBuf {
 fn main() {
     let platform_name = env::var("CARGO_CFG_TARGET_OS").unwrap();
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
+
+    if platform_name == "linux" {
+        compile_native_motion_shaders(&out_dir);
+    }
 
     let platform_subpath = match platform_name.as_str() {
         "windows" => "cpp/platform/win32",
@@ -76,6 +113,7 @@ fn main() {
         .flag_if_supported("-std=c++20")
         .flag_if_supported("-fdiagnostics-color=always")
         .include(alvr_filesystem::workspace_dir().join("openvr/headers"))
+        .include(&out_dir)
         .include("cpp");
 
     if platform_name == "windows" {
