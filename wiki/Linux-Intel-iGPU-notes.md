@@ -120,8 +120,12 @@ synchronisation hazards on its desktop window. Other SteamVR processes:
 
 ## GPU and encoder selection (branch `linux-gpu-encoder-selection`)
 
-Dashboard: Settings > Video > Encoder > "GPU and encoder selection (Linux)".
-Every option defaults to automatic, which is ALVR's default behaviour.
+Dashboard: Settings > Presets (last three rows): drop-down menus "Render
+GPU", "Encoder GPU" and "Encoder technology". The GPU menus list the GPUs
+Vulkan reports on this machine (CPU implementations such as llvmpipe are
+left out); "Automatic" forces nothing and leaves ALVR's default behaviour,
+any GPU entry forces that GPU. The same settings, with free text, are in
+Settings > Video > Encoder config > "GPU and encoder selection (Linux)".
 
 | Setting | Default (automatic) | Values |
 | --- | --- | --- |

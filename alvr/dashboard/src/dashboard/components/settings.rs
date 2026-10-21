@@ -33,6 +33,12 @@ pub struct SettingsTab {
     microphone_preset: PresetControl,
     hand_tracking_interaction_preset: PresetControl,
     eye_face_tracking_preset: PresetControl,
+    #[cfg(target_os = "linux")]
+    render_gpu_preset: PresetControl,
+    #[cfg(target_os = "linux")]
+    encoder_gpu_preset: PresetControl,
+    #[cfg(target_os = "linux")]
+    encoder_technology_preset: PresetControl,
     top_level_entries: Vec<TopLevelEntry>,
     session_settings_json: Option<json::Value>,
     last_update_instant: Instant,
@@ -80,6 +86,14 @@ impl SettingsTab {
                 builtin_schema::hand_tracking_interaction_schema(),
             ),
             eye_face_tracking_preset: PresetControl::new(builtin_schema::eye_face_tracking_schema()),
+            #[cfg(target_os = "linux")]
+            render_gpu_preset: PresetControl::new(builtin_schema::render_gpu_schema()),
+            #[cfg(target_os = "linux")]
+            encoder_gpu_preset: PresetControl::new(builtin_schema::encoder_gpu_schema()),
+            #[cfg(target_os = "linux")]
+            encoder_technology_preset: PresetControl::new(
+                builtin_schema::encoder_technology_schema(),
+            ),
             top_level_entries,
             session_settings_json: None,
             last_update_instant: Instant::now(),
@@ -105,6 +119,15 @@ impl SettingsTab {
             .update_session_settings(&settings_json);
         self.eye_face_tracking_preset
             .update_session_settings(&settings_json);
+        #[cfg(target_os = "linux")]
+        {
+            self.render_gpu_preset
+                .update_session_settings(&settings_json);
+            self.encoder_gpu_preset
+                .update_session_settings(&settings_json);
+            self.encoder_technology_preset
+                .update_session_settings(&settings_json);
+        }
 
         self.session_settings_json = Some(settings_json);
     }
@@ -179,6 +202,18 @@ impl SettingsTab {
 
                             path_value_pairs.extend(self.eye_face_tracking_preset.ui(ui));
                             ui.end_row();
+
+                            #[cfg(target_os = "linux")]
+                            {
+                                path_value_pairs.extend(self.render_gpu_preset.ui(ui));
+                                ui.end_row();
+
+                                path_value_pairs.extend(self.encoder_gpu_preset.ui(ui));
+                                ui.end_row();
+
+                                path_value_pairs.extend(self.encoder_technology_preset.ui(ui));
+                                ui.end_row();
+                            }
                         })
                 });
         } else {
