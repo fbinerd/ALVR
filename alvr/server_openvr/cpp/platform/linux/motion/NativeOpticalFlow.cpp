@@ -34,8 +34,9 @@ namespace {
     };
 #define DEVICE_FUNCTIONS(X)                                                                        \
     X(CreateImage)                                                                                 \
-    X(DestroyImage) X(GetImageMemoryRequirements) X(AllocateMemory) X(FreeMemory)                  \
-        X(BindImageMemory) X(CreateImageView) X(DestroyImageView) X(CreateBuffer) X(DestroyBuffer) \
+    X(DestroyImage)                                                                                \
+    X(GetImageMemoryRequirements) X(AllocateMemory) X(FreeMemory) X(BindImageMemory)               \
+        X(CreateImageView) X(DestroyImageView) X(CreateBuffer) X(DestroyBuffer)                    \
             X(GetBufferMemoryRequirements) X(BindBufferMemory) X(CreateCommandPool)                \
                 X(DestroyCommandPool) X(AllocateCommandBuffers) X(ResetCommandBuffer)              \
                     X(BeginCommandBuffer) X(EndCommandBuffer) X(CreateFence) X(DestroyFence)       \
@@ -44,12 +45,15 @@ namespace {
                                 X(CmdCopyBufferToImage) X(CreateOpticalFlowSessionNV)              \
                                     X(DestroyOpticalFlowSessionNV)                                 \
                                         X(BindOpticalFlowSessionImageNV)                           \
-                                            X(CmdOpticalFlowExecuteNV)
+                                            X(CmdOpticalFlowExecuteNV) X(CreateQueryPool)          \
+                                                X(DestroyQueryPool) X(CmdResetQueryPool)           \
+                                                    X(GetQueryPoolResults)
     struct Dispatch {
 #define FIELD(n) PFN_vk##n n = nullptr;
         DEVICE_FUNCTIONS(FIELD)
 #undef FIELD
         PFN_vkCmdPipelineBarrier2 CmdPipelineBarrier2 = nullptr;
+        PFN_vkCmdWriteTimestamp2 CmdWriteTimestamp2 = nullptr;
         void load(const Context& c) {
 #define LOAD(n)                                                                                    \
     n = reinterpret_cast<PFN_vk##n>(c.device_proc(c.device, "vk" #n));                             \
@@ -66,6 +70,13 @@ namespace {
                 );
             if (!CmdPipelineBarrier2)
                 throw std::runtime_error("missing synchronization2 entry point");
+            CmdWriteTimestamp2 = reinterpret_cast<PFN_vkCmdWriteTimestamp2>(
+                c.device_proc(c.device, "vkCmdWriteTimestamp2KHR")
+            );
+            if (!CmdWriteTimestamp2)
+                CmdWriteTimestamp2 = reinterpret_cast<PFN_vkCmdWriteTimestamp2>(
+                    c.device_proc(c.device, "vkCmdWriteTimestamp2")
+                );
         }
     };
 #undef DEVICE_FUNCTIONS
@@ -85,6 +96,9 @@ struct NativeOpticalFlow::State {
     std::array<VkCommandBuffer, 3> commands {};
     std::array<VkFence, 3> fences {};
     VkSemaphore inputs_ready = VK_NULL_HANDLE, results_ready = VK_NULL_HANDLE;
+    VkQueryPool queries = VK_NULL_HANDLE;
+    uint32_t timestamp_bits = 0;
+    double timestamp_period = 0, optical_gpu_ms = -1;
     bool idle = true, poisoned = false;
     int last_submitted = -1;
 
@@ -119,6 +133,8 @@ struct NativeOpticalFlow::State {
             f.DestroySemaphore(c.device, inputs_ready, nullptr);
         if (results_ready)
             f.DestroySemaphore(c.device, results_ready, nullptr);
+        if (queries)
+            f.DestroyQueryPool(c.device, queries, nullptr);
         if (render_pool)
             f.DestroyCommandPool(c.device, render_pool, nullptr);
         if (optical_pool)
@@ -285,6 +301,8 @@ struct NativeOpticalFlow::State {
         VkPhysicalDeviceProperties2 props { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2 };
         props.pNext = &caps;
         c.properties(c.physical, &props);
+        timestamp_bits = families[c.optical_family].timestampValidBits;
+        timestamp_period = props.properties.limits.timestampPeriod;
         if (!caps.costSupported
             || !(caps.supportedOutputGridSizes & VK_OPTICAL_FLOW_GRID_SIZE_4X4_BIT_NV)
             || w < caps.minWidth || h < caps.minHeight || w > caps.maxWidth || h > caps.maxHeight
@@ -389,6 +407,14 @@ struct NativeOpticalFlow::State {
             f.CreateSemaphore(c.device, &si, nullptr, &results_ready),
             "create native result semaphore"
         );
+        if (timestamp_bits && timestamp_period > 0 && f.CmdWriteTimestamp2) {
+            VkQueryPoolCreateInfo qi { VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO };
+            qi.queryType = VK_QUERY_TYPE_TIMESTAMP;
+            qi.queryCount = 2;
+            checked(
+                f.CreateQueryPool(c.device, &qi, nullptr, &queries), "create optical timestamp pool"
+            );
+        }
     }
     void image_barrier(
         VkCommandBuffer cmd,
@@ -530,6 +556,10 @@ struct NativeOpticalFlow::State {
     }
     void estimate() {
         begin(1);
+        if (queries) {
+            f.CmdResetQueryPool(commands[1], queries, 0, 2);
+            f.CmdWriteTimestamp2(commands[1], VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, queries, 0);
+        }
         for (auto* i : { &motion, &cost })
             own_barrier(
                 commands[1],
@@ -561,6 +591,8 @@ struct NativeOpticalFlow::State {
                 commands[1], images[i]->handle, images[i]->layout, packed[i].handle, 1, &copy
             );
         }
+        if (queries)
+            f.CmdWriteTimestamp2(commands[1], VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, queries, 1);
         checked(f.EndCommandBuffer(commands[1]), "end native estimate");
     }
     void finish(const ImageResource& a, const ImageResource& b, VkImageLayout after) {
@@ -653,6 +685,7 @@ bool NativeOpticalFlow::execute(
     try {
         if (s.poisoned || !s.idle)
             throw std::runtime_error("native estimator faulted or busy");
+        s.optical_gpu_ms = -1;
         s.validate(input, false);
         s.validate(reference, false);
         s.validate(motion, true);
@@ -694,6 +727,25 @@ bool NativeOpticalFlow::execute(
                 2, s.c.render_queue, s.results_ready, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_NULL_HANDLE
             );
             s.wait();
+            if (s.queries) {
+                std::array<uint64_t, 2> ticks {};
+                if (s.f.GetQueryPoolResults(
+                        s.c.device,
+                        s.queries,
+                        0,
+                        2,
+                        sizeof(ticks),
+                        ticks.data(),
+                        sizeof(uint64_t),
+                        VK_QUERY_RESULT_64_BIT
+                    )
+                    == VK_SUCCESS) {
+                    uint64_t mask = s.timestamp_bits == 64 ? UINT64_MAX
+                                                           : (uint64_t(1) << s.timestamp_bits) - 1;
+                    s.optical_gpu_ms
+                        = double((ticks[1] - ticks[0]) & mask) * s.timestamp_period / 1e6;
+                }
+            }
         } catch (...) {
             s.poisoned = true;
             throw;
@@ -725,5 +777,9 @@ bool NativeOpticalFlow::quiesce(std::string& error) noexcept {
 bool NativeOpticalFlow::faulted() const {
     std::lock_guard lock(state->mutex);
     return state->poisoned;
+}
+double NativeOpticalFlow::opticalGpuMilliseconds() const {
+    std::lock_guard lock(state->mutex);
+    return state->optical_gpu_ms;
 }
 } // namespace alvr::motion

@@ -12,7 +12,7 @@ layout(push_constant) uniform Params {
     uint eyeWidth,height,lumaWidth,lumaHeight;
     float time;
 } p;
-// The flow grid represents eight output pixels. Solve four tile corners once
+// The flow grid is coarser than output pixels. Solve four tile corners once
 // rather than repeating the iterative inversion for every output pixel.
 shared vec2 cornerDisplacement[4];
 shared uint cornerValid[4];

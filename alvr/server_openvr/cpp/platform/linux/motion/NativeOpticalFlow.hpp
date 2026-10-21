@@ -82,5 +82,8 @@ public:
     // allocations rather than freeing live resources. It never destroys the device.
     bool quiesce(std::string& error) noexcept;
     bool faulted() const;
+    // Last successful optical-queue execution plus packed-output copy, device
+    // milliseconds. Excludes input/final copies on render queue; -1 unavailable.
+    double opticalGpuMilliseconds() const;
 };
 } // namespace alvr::motion

@@ -13,11 +13,18 @@ class NativeMotion {
     std::unique_ptr<State> state;
 
 public:
-    // CPU wall time including GPU completion, not device timestamp queries.
+    // Wall durations include completion waits. Device durations are -1 when
+    // the relevant queue does not support timestamps or results are unavailable.
     struct PredictionTiming {
         double flowMs = 0, warpMs = 0;
+        double opticalGpuMs = -1, warpGpuMs = -1;
     };
-    NativeMotion(VkContext&, vk::Extent2D, vk::Format);
+    // The cap applies only to estimator luma, not color/output. Zero retains
+    // the original half-resolution estimator for controlled comparisons.
+    static constexpr uint32_t DefaultLumaDimension = 512;
+    NativeMotion(
+        VkContext&, vk::Extent2D, vk::Format, uint32_t maxLumaDimension = DefaultLumaDimension
+    );
     ~NativeMotion();
     NativeMotion(const NativeMotion&) = delete;
     NativeMotion& operator=(const NativeMotion&) = delete;

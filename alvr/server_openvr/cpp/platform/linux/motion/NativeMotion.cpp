@@ -38,6 +38,9 @@ struct NativeMotion::State {
     vk::CommandPool pool {};
     vk::CommandBuffer command {};
     vk::Fence fence {};
+    vk::QueryPool warpQueries {};
+    uint32_t warpTimestampBits = 0;
+    double timestampPeriod = 0;
     vk::Sampler linearSampler {}, nearestSampler {};
     vk::DescriptorSetLayout lumaDescriptors {}, warpDescriptors {};
     vk::PipelineLayout lumaLayout {}, warpLayout {};
@@ -49,11 +52,22 @@ struct NativeMotion::State {
     bool captureThisFrame = true, flowDirty = false, idle = true;
     PredictionTiming timing;
 
-    State(VkContext& c, vk::Extent2D size, vk::Format f)
+    State(VkContext& c, vk::Extent2D size, vk::Format f, uint32_t maxLumaDimension)
         : ctx(c)
         , extent(size)
         , format(f) {
         lumaExtent = vk::Extent2D { (size.width / 4) & ~3u, (size.height / 2) & ~3u };
+        if (maxLumaDimension && (maxLumaDimension < 64 || maxLumaDimension % 4))
+            throw std::runtime_error(
+                "Native motion luma cap must be zero or a multiple of four >=64"
+            );
+        uint32_t largest = std::max(lumaExtent.width, lumaExtent.height);
+        if (maxLumaDimension && largest > maxLumaDimension) {
+            lumaExtent.width
+                = uint32_t(uint64_t(lumaExtent.width) * maxLumaDimension / largest) & ~3u;
+            lumaExtent.height
+                = uint32_t(uint64_t(lumaExtent.height) * maxLumaDimension / largest) & ~3u;
+        }
     }
 
     ~State() {
@@ -109,6 +123,7 @@ struct NativeMotion::State {
         ctx.dev.destroy(linearSampler);
         ctx.dev.destroy(nearestSampler);
         ctx.dev.destroy(fence);
+        ctx.dev.destroy(warpQueries);
         ctx.dev.destroy(pool);
     }
 
@@ -249,6 +264,14 @@ struct NativeMotion::State {
             .commandBufferCount = 1,
         })[0];
         fence = ctx.dev.createFence({});
+        auto families = ctx.physDev.getQueueFamilyProperties();
+        warpTimestampBits = families.at(ctx.meta.queueFamily).timestampValidBits;
+        timestampPeriod = ctx.physDev.getProperties().limits.timestampPeriod;
+        if (warpTimestampBits && timestampPeriod > 0)
+            warpQueries = ctx.dev.createQueryPool(vk::QueryPoolCreateInfo {
+                .queryType = vk::QueryType::eTimestamp,
+                .queryCount = 2,
+            });
         vk::SamplerCreateInfo sampler {
             .magFilter = vk::Filter::eLinear,
             .minFilter = vk::Filter::eLinear,
@@ -402,6 +425,8 @@ struct NativeMotion::State {
     void estimate() {
         if (!flowDirty)
             return;
+        double opticalGpuMs = 0;
+        bool allTimed = true;
         for (unsigned eye = 0; eye < 2; ++eye)
             for (unsigned reverse = 0; reverse < 2; ++reverse) {
                 auto a = resource(lumas[reverse ? latest : 1 - latest][eye]);
@@ -414,13 +439,20 @@ struct NativeMotion::State {
                     throw std::runtime_error("Native motion flow failed: " + error);
                 flows[eye][reverse].layout = static_cast<vk::ImageLayout>(motion.layout);
                 costs[eye].layout = static_cast<vk::ImageLayout>(cost.layout);
+                double deviceMs = estimators[eye]->opticalGpuMilliseconds();
+                allTimed &= deviceMs >= 0;
+                if (deviceMs >= 0)
+                    opticalGpuMs += deviceMs;
             }
+        timing.opticalGpuMs = allTimed ? opticalGpuMs : -1;
         flowDirty = false;
     }
 };
 
-NativeMotion::NativeMotion(VkContext& ctx, vk::Extent2D extent, vk::Format format)
-    : state(std::make_unique<State>(ctx, extent, format)) {
+NativeMotion::NativeMotion(
+    VkContext& ctx, vk::Extent2D extent, vk::Format format, uint32_t maxLumaDimension
+)
+    : state(std::make_unique<State>(ctx, extent, format, maxLumaDimension)) {
     state->initialize();
 }
 NativeMotion::~NativeMotion() = default;
@@ -460,10 +492,15 @@ bool NativeMotion::predict(
     }
     if (releaseInput)
         releaseInput();
+    s.timing = {};
     auto start = std::chrono::steady_clock::now();
     s.estimate();
     auto flowEnd = std::chrono::steady_clock::now();
     s.begin();
+    if (s.warpQueries) {
+        s.command.resetQueryPool(s.warpQueries, 0, 2);
+        s.command.writeTimestamp(vk::PipelineStageFlagBits::eTopOfPipe, s.warpQueries, 0);
+    }
     s.barrier(output, layout, vk::ImageLayout::eGeneral);
     WarpPush push {
         s.extent.width / 2, s.extent.height, s.lumaExtent.width, s.lumaExtent.height, *time
@@ -483,12 +520,30 @@ bool NativeMotion::predict(
         s.extent
     );
     s.barrier(output, vk::ImageLayout::eGeneral, layout);
+    if (s.warpQueries)
+        s.command.writeTimestamp(vk::PipelineStageFlagBits::eBottomOfPipe, s.warpQueries, 1);
     s.submit();
     auto warpEnd = std::chrono::steady_clock::now();
-    s.timing = {
-        std::chrono::duration<double, std::milli>(flowEnd - start).count(),
-        std::chrono::duration<double, std::milli>(warpEnd - flowEnd).count(),
-    };
+    s.timing.flowMs = std::chrono::duration<double, std::milli>(flowEnd - start).count();
+    s.timing.warpMs = std::chrono::duration<double, std::milli>(warpEnd - flowEnd).count();
+    if (s.warpQueries) {
+        std::array<uint64_t, 2> ticks {};
+        if (vkGetQueryPoolResults(
+                s.ctx.dev,
+                s.warpQueries,
+                0,
+                2,
+                sizeof(ticks),
+                ticks.data(),
+                sizeof(uint64_t),
+                VK_QUERY_RESULT_64_BIT
+            )
+            == VK_SUCCESS) {
+            uint64_t mask
+                = s.warpTimestampBits == 64 ? UINT64_MAX : (uint64_t(1) << s.warpTimestampBits) - 1;
+            s.timing.warpGpuMs = double((ticks[1] - ticks[0]) & mask) * s.timestampPeriod / 1e6;
+        }
+    }
     if (++s.predictions == 1 || s.predictions % 360 == 0) {
         auto elapsed
             = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start)
