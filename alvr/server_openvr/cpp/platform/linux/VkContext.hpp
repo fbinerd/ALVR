@@ -29,6 +29,8 @@
 #include "utils.hpp"
 
 #include "alvr_server/Logger.h"
+#include "alvr_server/Settings.h"
+#include "alvr_server/bindings.h"
 
 extern "C" {
 #include <libavutil/log.h>
@@ -72,11 +74,35 @@ private:
         return VK_FALSE;
     }
 
-    // SteamVR shares its textures as opaque fds, which import only on the
-    // GPU that created them, and SteamVR does not tell the driver which one
-    // that is. With several GPUs, the first one listed is often the
-    // integrated one, so a discrete GPU is preferred. ALVR_VULKAN_DEVICE
-    // overrides the choice with an index or part of the device name.
+public:
+    // Finds the device a user-written selector names: its index in the
+    // list, or part of its name (case-insensitive). Shared by the render-GPU
+    // and encoder-GPU settings.
+    static std::optional<usize>
+    findPhysicalDevice(std::vector<vk::PhysicalDevice> const& devs, std::string_view selector) {
+        if (selector.empty()) {
+            return std::nullopt;
+        }
+        std::string wanted(selector);
+        std::transform(wanted.begin(), wanted.end(), wanted.begin(), ::tolower);
+        for (usize i = 0; i < devs.size(); ++i) {
+            std::string name = devs[i].getProperties().deviceName.data();
+            std::transform(name.begin(), name.end(), name.begin(), ::tolower);
+            if (wanted == std::to_string(i) || name.find(wanted) != std::string::npos) {
+                return i;
+            }
+        }
+        return std::nullopt;
+    }
+
+private:
+    // The render GPU: ALVR's Vulkan device must be the GPU SteamVR renders
+    // on, because SteamVR shares its textures as opaque fds, which import
+    // only on the GPU that created them, and SteamVR does not tell the driver
+    // which one that is. Order: ALVR_VULKAN_DEVICE, then the "Render GPU"
+    // setting (video.encoder_config.linux_gpu.render_gpu), then automatic:
+    // the first discrete GPU, then the first integrated one (never a CPU
+    // implementation such as llvmpipe when hardware exists), then devs[0].
     static vk::PhysicalDevice selectPhysicalDevice(std::vector<vk::PhysicalDevice> const& devs) {
         if (devs.empty()) {
             throw std::runtime_error("No Vulkan device found");
@@ -91,28 +117,31 @@ private:
             );
         }
 
-        if (char const* wanted = std::getenv("ALVR_VULKAN_DEVICE")) {
-            std::string_view name(wanted);
-            for (usize i = 0; i < devs.size(); ++i) {
-                std::string deviceName = devs[i].getProperties().deviceName.data();
-                std::string lowerName = deviceName, lowerWanted(name);
-                std::transform(lowerName.begin(), lowerName.end(), lowerName.begin(), ::tolower);
-                std::transform(
-                    lowerWanted.begin(), lowerWanted.end(), lowerWanted.begin(), ::tolower
-                );
-                if (name == std::to_string(i) || lowerName.find(lowerWanted) != std::string::npos) {
-                    Info("Using Vulkan device %zu (ALVR_VULKAN_DEVICE)", i);
-                    return devs[i];
-                }
+        struct Source {
+            char const* label;
+            char const* selector;
+        };
+        Settings const* settings = Settings_Instance();
+        Source const sources[] = {
+            { "ALVR_VULKAN_DEVICE", std::getenv("ALVR_VULKAN_DEVICE") },
+            { "Render GPU setting", settings ? settings->m_renderGpu : nullptr },
+        };
+        for (auto const& source : sources) {
+            if (!source.selector || !source.selector[0]) {
+                continue;
             }
-            Warn("ALVR_VULKAN_DEVICE=%s matches no Vulkan device", wanted);
+            if (auto index = findPhysicalDevice(devs, source.selector)) {
+                Info("Using Vulkan device %zu (%s)", *index, source.label);
+                return devs[*index];
+            }
+            Warn("%s \"%s\" matches no Vulkan device", source.label, source.selector);
         }
 
         for (auto type :
              { vk::PhysicalDeviceType::eDiscreteGpu, vk::PhysicalDeviceType::eIntegratedGpu }) {
             for (usize i = 0; i < devs.size(); ++i) {
                 if (devs[i].getProperties().deviceType == type) {
-                    Info("Using Vulkan device %zu", i);
+                    Info("Using Vulkan device %zu (automatic)", i);
                     return devs[i];
                 }
             }

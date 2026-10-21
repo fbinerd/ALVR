@@ -118,6 +118,44 @@ SteamVR Home (steamtours) reports Vulkan errors under the Khronos layer:
 synchronisation hazards on its desktop window. Other SteamVR processes:
 `VUID-VkSemaphoreTypeCreateInfo-timelineSemaphore-03252`.
 
+## GPU and encoder selection (branch `linux-gpu-encoder-selection`)
+
+Dashboard: Settings > Video > Encoder > "GPU and encoder selection (Linux)".
+Every option defaults to automatic, which is ALVR's default behaviour.
+
+| Setting | Default (automatic) | Values |
+| --- | --- | --- |
+| Render GPU | first discrete GPU, then first integrated GPU | device index or part of the name ("Vulkan device N: name" in the log) |
+| Encoder GPU | the render GPU | DRM render node (`/dev/dri/renderD129`), device index or part of the name |
+| Encoder technology | NVENC on NVIDIA, VAAPI otherwise (from the encoder GPU) | Automatic, VAAPI, NVENC, Vulkan Video, Software |
+
+How each choice acts:
+
+- **Render GPU** sets ALVR's Vulkan device, which must be the GPU SteamVR
+  renders on (SteamVR's textures are shared as opaque fds, usable only on
+  the GPU that created them). SteamVR and games pick their GPU from their
+  launch options, not from ALVR: with a Render GPU set, the dashboard prints
+  the launch options for that GPU when it starts SteamVR
+  (`__GLX_VENDOR_LIBRARY_NAME=nvidia __NV_PRIME_RENDER_OFFLOAD=1 VK_DRIVER_FILES=...`
+  for NVIDIA's driver, `DRI_PRIME=vvvv:dddd MESA_VK_DEVICE_SELECT=vvvv:dddd`
+  for Mesa drivers). `ALVR_VULKAN_DEVICE` still overrides the setting.
+- **Encoder GPU** different from the render GPU: the renderer exports its
+  output image as a dma-buf with the LINEAR modifier and VAAPI on the other
+  GPU imports it. Only VAAPI can do this; NVENC needs the render GPU. This
+  path is written but **not tested** (one GPU on the test machine).
+- **Encoder technology**: VAAPI and NVENC are implemented. Vulkan Video and
+  Software are placeholders: they log "not implemented yet" and no encoder
+  is created. The old "Force software encoding" switch maps to Software.
+
+The streamer logs its decision once per encoder build, e.g.
+`Encoder: VAAPI on /dev/dri/renderD128 (render GPU node /dev/dri/renderD128)`.
+
+Next steps this opens: a Vulkan Video pipeline (enable FFmpeg's
+`h264_vulkan` / `hevc_vulkan` / `av1_vulkan` encoders, NV12 encode-source
+images, a video encode queue), the Linux software pipeline, and testing the
+cross-GPU hand-over (dma-buf from a discrete GPU's memory may need a
+system-memory copy for an iGPU to read it).
+
 ## Diagnostics reference
 
 | Switch | Where | What it logs |

@@ -58,6 +58,21 @@ struct FactoryInitData {
     early_hmd_initialization: bool,
 }
 
+// Copies an optional setting string into a NUL-terminated C array for the
+// C++ Settings struct; None, or text that does not fit, gives "".
+fn c_string_array(value: Option<&str>) -> [c_char; 256] {
+    let mut out = [0 as c_char; 256];
+    if let Some(text) = value {
+        let bytes = text.trim().as_bytes();
+        if bytes.len() < out.len() && !bytes.contains(&0) {
+            for (dst, src) in out.iter_mut().zip(bytes) {
+                *dst = *src as c_char;
+            }
+        }
+    }
+    out
+}
+
 fn make_settings(negotiated: Option<&ServerNegotiatedStreamingConfig>) -> Settings {
     let settings = alvr_server_core::settings();
     let video = &settings.video;
@@ -193,6 +208,9 @@ fn make_settings(negotiated: Option<&ServerNegotiatedStreamingConfig>) -> Settin
         m_entropyCoding: video.encoder_config.entropy_coding as u32,
         m_forceSwEncoding: video.encoder_config.software.force_software_encoding,
         m_swThreadCount: video.encoder_config.software.thread_count,
+        m_renderGpu: c_string_array(video.encoder_config.linux_gpu.render_gpu.as_deref()),
+        m_encoderGpu: c_string_array(video.encoder_config.linux_gpu.encoder_gpu.as_deref()),
+        m_encoderBackend: video.encoder_config.linux_gpu.encoder_backend as u32,
         m_nvencTuningPreset: nvenc.tuning_preset as u32,
         m_nvencMultiPass: nvenc.multi_pass as u32,
         m_nvencAdaptiveQuantizationMode: nvenc.adaptive_quantization_mode as u32,
