@@ -153,6 +153,18 @@ How each choice acts:
   limits Vulkan to one driver (e.g. `VK_DRIVER_FILES=nvidia_icd.json`),
   the streamer still finds the encoder GPU's `/dev/dri/renderD*` node by
   PCI vendor (intel / nvidia, geforce / amd, radeon in the selector).
+  The upload, not the encoder, limits the resolution: Quest 2 at 72 Hz,
+  HEVC, 90 Mbps CBR, measured per eye:
+
+  | per eye | encode median / p90 | streamer fps |
+  |---|---|---|
+  | 1832x1920 (native) | 16.5 / 19.3 ms | ~51 |
+  | 1600x1680 | 12.6 / 14.5 ms | ~69 |
+  | 1440x1504 | 10.2 / 12.2 ms | 72 |
+
+  The Quality and Balanced presets gave the same encode time at native
+  size. 1440x1504 is the highest of these sizes that holds 72 Hz in this
+  mode (VDEnc delivered ~72 Mbps of the 90 asked).
 - **Encoder technology**: VAAPI and NVENC are implemented. Vulkan Video and
   Software are placeholders: they log "not implemented yet" and no encoder
   is created. The old "Force software encoding" switch maps to Software.
