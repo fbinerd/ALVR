@@ -32,22 +32,45 @@ namespace {
         VkBuffer handle = VK_NULL_HANDLE;
         VkDeviceMemory memory = VK_NULL_HANDLE;
     };
-#define DEVICE_FUNCTIONS(X)                                                                        \
-    X(CreateImage)                                                                                 \
-    X(DestroyImage)                                                                                \
-    X(GetImageMemoryRequirements) X(AllocateMemory) X(FreeMemory) X(BindImageMemory)               \
-        X(CreateImageView) X(DestroyImageView) X(CreateBuffer) X(DestroyBuffer)                    \
-            X(GetBufferMemoryRequirements) X(BindBufferMemory) X(CreateCommandPool)                \
-                X(DestroyCommandPool) X(AllocateCommandBuffers) X(ResetCommandBuffer)              \
-                    X(BeginCommandBuffer) X(EndCommandBuffer) X(CreateFence) X(DestroyFence)       \
-                        X(ResetFences) X(WaitForFences) X(CreateSemaphore) X(DestroySemaphore)     \
-                            X(QueueSubmit) X(CmdCopyImage) X(CmdCopyImageToBuffer)                 \
-                                X(CmdCopyBufferToImage) X(CreateOpticalFlowSessionNV)              \
-                                    X(DestroyOpticalFlowSessionNV)                                 \
-                                        X(BindOpticalFlowSessionImageNV)                           \
-                                            X(CmdOpticalFlowExecuteNV) X(CreateQueryPool)          \
-                                                X(DestroyQueryPool) X(CmdResetQueryPool)           \
-                                                    X(GetQueryPoolResults)
+// clang-format off
+#define DEVICE_FUNCTIONS(X) \
+    X(CreateImage) \
+    X(DestroyImage) \
+    X(GetImageMemoryRequirements) \
+    X(AllocateMemory) \
+    X(FreeMemory) \
+    X(BindImageMemory) \
+    X(CreateImageView) \
+    X(DestroyImageView) \
+    X(CreateBuffer) \
+    X(DestroyBuffer) \
+    X(GetBufferMemoryRequirements) \
+    X(BindBufferMemory) \
+    X(CreateCommandPool) \
+    X(DestroyCommandPool) \
+    X(AllocateCommandBuffers) \
+    X(ResetCommandBuffer) \
+    X(BeginCommandBuffer) \
+    X(EndCommandBuffer) \
+    X(CreateFence) \
+    X(DestroyFence) \
+    X(ResetFences) \
+    X(WaitForFences) \
+    X(CreateSemaphore) \
+    X(DestroySemaphore) \
+    X(QueueSubmit) \
+    X(CmdCopyImage) \
+    X(CmdCopyImageToBuffer) \
+    X(CmdCopyBufferToImage) \
+    X(CreateOpticalFlowSessionNV) \
+    X(DestroyOpticalFlowSessionNV) \
+    X(BindOpticalFlowSessionImageNV) \
+    X(CmdOpticalFlowExecuteNV) \
+    X(CreateQueryPool) \
+    X(DestroyQueryPool) \
+    X(CmdResetQueryPool) \
+    X(GetQueryPoolResults)
+    // clang-format on
     struct Dispatch {
 #define FIELD(n) PFN_vk##n n = nullptr;
         DEVICE_FUNCTIONS(FIELD)
@@ -89,8 +112,10 @@ struct NativeOpticalFlow::State {
     uint32_t width = 0, height = 0, fw = 0, fh = 0;
     VkDeviceSize bytes = 0;
     VkPhysicalDeviceMemoryProperties memory {};
-    Image input, reference, motion, cost;
-    std::array<Buffer, 2> packed {};
+    Image input, reference, motion, cost, backwardMotion, backwardCost;
+    bool bothDirections = false;
+    unsigned outputCount() const { return bothDirections ? 4 : 2; }
+    std::array<Buffer, 4> packed {};
     VkOpticalFlowSessionNV session = VK_NULL_HANDLE;
     VkCommandPool render_pool = VK_NULL_HANDLE, optical_pool = VK_NULL_HANDLE;
     std::array<VkCommandBuffer, 3> commands {};
@@ -112,7 +137,7 @@ struct NativeOpticalFlow::State {
         }
         if (session)
             f.DestroyOpticalFlowSessionNV(c.device, session, nullptr);
-        for (auto* i : { &input, &reference, &motion, &cost }) {
+        for (auto* i : { &input, &reference, &motion, &cost, &backwardMotion, &backwardCost }) {
             if (i->view)
                 f.DestroyImageView(c.device, i->view, nullptr);
             if (i->handle)
@@ -270,7 +295,9 @@ struct NativeOpticalFlow::State {
         if (c.set_loader_data)
             checked(c.set_loader_data(c.device, out), "initialize layer command-buffer dispatch");
     }
-    void initialize(uint32_t w, uint32_t h, VkOpticalFlowPerformanceLevelNV performance) {
+    void
+    initialize(uint32_t w, uint32_t h, VkOpticalFlowPerformanceLevelNV performance, bool both) {
+        bothDirections = both;
         if (!c.physical || !c.device || !c.render_queue || !c.optical_queue || !c.device_proc
             || !c.memory_properties || !c.properties || !c.queue_properties || !c.image_properties
             || !c.optical_formats || !c.optical_flow_enabled || !c.synchronization2_enabled
@@ -303,7 +330,7 @@ struct NativeOpticalFlow::State {
         c.properties(c.physical, &props);
         timestamp_bits = families[c.optical_family].timestampValidBits;
         timestamp_period = props.properties.limits.timestampPeriod;
-        if (!caps.costSupported
+        if (!caps.costSupported || (bothDirections && !caps.bidirectionalFlowSupported)
             || !(caps.supportedOutputGridSizes & VK_OPTICAL_FLOW_GRID_SIZE_4X4_BIT_NV)
             || w < caps.minWidth || h < caps.minHeight || w > caps.maxWidth || h > caps.maxHeight
             || !supports(VK_OPTICAL_FLOW_USAGE_INPUT_BIT_NV, VK_FORMAT_R8_UNORM)
@@ -324,8 +351,21 @@ struct NativeOpticalFlow::State {
             motion, fw, fh, VK_FORMAT_R16G16_S10_5_NV, VK_OPTICAL_FLOW_USAGE_OUTPUT_BIT_NV, false
         );
         make_image(cost, fw, fh, VK_FORMAT_R32_UINT, VK_OPTICAL_FLOW_USAGE_COST_BIT_NV, false);
-        for (auto& b : packed)
-            make_buffer(b);
+        if (bothDirections) {
+            make_image(
+                backwardMotion,
+                fw,
+                fh,
+                VK_FORMAT_R16G16_S10_5_NV,
+                VK_OPTICAL_FLOW_USAGE_OUTPUT_BIT_NV,
+                false
+            );
+            make_image(
+                backwardCost, fw, fh, VK_FORMAT_R32_UINT, VK_OPTICAL_FLOW_USAGE_COST_BIT_NV, false
+            );
+        }
+        for (unsigned i = 0; i < outputCount(); ++i)
+            make_buffer(packed[i]);
         VkOpticalFlowSessionCreateInfoNV info {
             VK_STRUCTURE_TYPE_OPTICAL_FLOW_SESSION_CREATE_INFO_NV
         };
@@ -337,6 +377,8 @@ struct NativeOpticalFlow::State {
         info.outputGridSize = VK_OPTICAL_FLOW_GRID_SIZE_4X4_BIT_NV;
         info.performanceLevel = performance;
         info.flags = VK_OPTICAL_FLOW_SESSION_CREATE_ENABLE_COST_BIT_NV;
+        if (bothDirections)
+            info.flags |= VK_OPTICAL_FLOW_SESSION_CREATE_BOTH_DIRECTIONS_BIT_NV;
         checked(
             f.CreateOpticalFlowSessionNV(c.device, &info, nullptr, &session),
             "create borrowed native session"
@@ -381,6 +423,28 @@ struct NativeOpticalFlow::State {
             ),
             "bind native cost"
         );
+        if (bothDirections) {
+            checked(
+                f.BindOpticalFlowSessionImageNV(
+                    c.device,
+                    session,
+                    VK_OPTICAL_FLOW_SESSION_BINDING_POINT_BACKWARD_FLOW_VECTOR_NV,
+                    backwardMotion.view,
+                    VK_IMAGE_LAYOUT_GENERAL
+                ),
+                "bind native backward motion"
+            );
+            checked(
+                f.BindOpticalFlowSessionImageNV(
+                    c.device,
+                    session,
+                    VK_OPTICAL_FLOW_SESSION_BINDING_POINT_BACKWARD_COST_NV,
+                    backwardCost.view,
+                    VK_IMAGE_LAYOUT_GENERAL
+                ),
+                "bind native backward cost"
+            );
+        }
         VkCommandPoolCreateInfo pool { VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO };
         pool.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
         pool.queueFamilyIndex = c.render_family;
@@ -560,10 +624,11 @@ struct NativeOpticalFlow::State {
             f.CmdResetQueryPool(commands[1], queries, 0, 2);
             f.CmdWriteTimestamp2(commands[1], VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, queries, 0);
         }
-        for (auto* i : { &motion, &cost })
+        Image* images[] = { &motion, &cost, &backwardMotion, &backwardCost };
+        for (unsigned i = 0; i < outputCount(); ++i)
             own_barrier(
                 commands[1],
-                *i,
+                *images[i],
                 VK_IMAGE_LAYOUT_GENERAL,
                 VK_PIPELINE_STAGE_2_COPY_BIT,
                 VK_ACCESS_2_TRANSFER_READ_BIT,
@@ -573,8 +638,7 @@ struct NativeOpticalFlow::State {
         VkOpticalFlowExecuteInfoNV run { VK_STRUCTURE_TYPE_OPTICAL_FLOW_EXECUTE_INFO_NV };
         run.flags = VK_OPTICAL_FLOW_EXECUTE_DISABLE_TEMPORAL_HINTS_BIT_NV;
         f.CmdOpticalFlowExecuteNV(commands[1], session, &run);
-        Image* images[] = { &motion, &cost };
-        for (uint32_t i = 0; i < 2; ++i) {
+        for (unsigned i = 0; i < outputCount(); ++i) {
             own_barrier(
                 commands[1],
                 *images[i],
@@ -595,10 +659,9 @@ struct NativeOpticalFlow::State {
             f.CmdWriteTimestamp2(commands[1], VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, queries, 1);
         checked(f.EndCommandBuffer(commands[1]), "end native estimate");
     }
-    void finish(const ImageResource& a, const ImageResource& b, VkImageLayout after) {
+    void finish(const std::array<ImageResource*, 4>& targets, VkImageLayout after) {
         begin(2);
-        const ImageResource* targets[] = { &a, &b };
-        for (uint32_t i = 0; i < 2; ++i) {
+        for (unsigned i = 0; i < outputCount(); ++i) {
             const auto& dst = *targets[i];
             image_barrier(
                 commands[2],
@@ -665,11 +728,11 @@ struct NativeOpticalFlow::State {
 };
 
 NativeOpticalFlow::NativeOpticalFlow(
-    const Context& c, uint32_t w, uint32_t h, VkOpticalFlowPerformanceLevelNV perf
+    const Context& c, uint32_t w, uint32_t h, VkOpticalFlowPerformanceLevelNV perf, bool both
 )
     : state(std::make_unique<State>(c)) {
     Scope scope(c);
-    state->initialize(w, h, perf);
+    state->initialize(w, h, perf, both);
 }
 NativeOpticalFlow::~NativeOpticalFlow() = default;
 bool NativeOpticalFlow::execute(
@@ -678,7 +741,9 @@ bool NativeOpticalFlow::execute(
     ImageResource& motion,
     ImageResource& cost,
     std::string& error,
-    VkImageLayout after
+    VkImageLayout after,
+    ImageResource* backwardMotion,
+    ImageResource* backwardCost
 ) noexcept {
     auto& s = *state;
     std::lock_guard lock(s.mutex);
@@ -688,29 +753,35 @@ bool NativeOpticalFlow::execute(
         s.optical_gpu_ms = -1;
         s.validate(input, false);
         s.validate(reference, false);
-        s.validate(motion, true);
-        s.validate(cost, true);
-        if (input.image == reference.image || motion.image == cost.image
-            || input.image == motion.image || input.image == cost.image
-            || reference.image == motion.image || reference.image == cost.image
+        if (s.bothDirections != bool(backwardMotion) || s.bothDirections != bool(backwardCost))
+            throw std::runtime_error("native backward outputs do not match session mode");
+        std::array<ImageResource*, 4> outputs { &motion, &cost, backwardMotion, backwardCost };
+        if (input.image == reference.image
             || (after != VK_IMAGE_LAYOUT_GENERAL
                 && after != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
                 && after != VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL
-                && after != VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL)
-            || (after == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
-                && (!(motion.usage & VK_IMAGE_USAGE_SAMPLED_BIT)
-                    || !(cost.usage & VK_IMAGE_USAGE_SAMPLED_BIT)))
-            || (after == VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL
-                && (!(motion.usage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT)
-                    || !(cost.usage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT))))
-            throw std::runtime_error("invalid native resource alias or destination layout");
+                && after != VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL))
+            throw std::runtime_error("invalid native input alias or destination layout");
+        for (unsigned i = 0; i < s.outputCount(); ++i) {
+            auto const& out = *outputs[i];
+            s.validate(out, true);
+            if (out.image == input.image || out.image == reference.image
+                || (after == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+                    && !(out.usage & VK_IMAGE_USAGE_SAMPLED_BIT))
+                || (after == VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL
+                    && !(out.usage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT)))
+                throw std::runtime_error("invalid native output alias or destination usage");
+            for (unsigned j = 0; j < i; ++j)
+                if (out.image == outputs[j]->image)
+                    throw std::runtime_error("native output images alias");
+        }
         Scope scope(s.c);
         // Record all phases before submission so ordinary validation/recording
         // errors cannot leave a semaphore chain half submitted.
         s.poisoned = true;
         s.prepare_inputs(input, reference);
         s.estimate();
-        s.finish(motion, cost, after);
+        s.finish(outputs, after);
         checked(
             s.f.ResetFences(s.c.device, s.fences.size(), s.fences.data()), "reset native fences"
         );
@@ -751,7 +822,8 @@ bool NativeOpticalFlow::execute(
             throw;
         }
         s.poisoned = false;
-        motion.layout = cost.layout = after;
+        for (unsigned i = 0; i < s.outputCount(); ++i)
+            outputs[i]->layout = after;
         error.clear();
         return true;
     } catch (const std::exception& e) {

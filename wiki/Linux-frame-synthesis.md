@@ -287,6 +287,41 @@ A timing-only failure permits the opposite-order comparison. Stop on any
 quality, release, recovery or equality failure. Keep logs and telemetry for
 all runs. No ALVR, SteamVR or Quest process is involved in this protocol.
 
+### Experimental bidirectional estimator
+
+`--compare-bidirectional-flow` compares the existing two separate directions
+against a session with `VK_OPTICAL_FLOW_SESSION_CREATE_BOTH_DIRECTIONS_BIT_NV`.
+Both variants keep exact flow exit enabled, the same luma cap and all image
+thresholds. They are labeled `separate` and `bidirectional` in metrics/images.
+This mode is mutually exclusive with `--compare-flow-iterations` and
+`--fixed-flow-iterations`. The same alternating order, warm-up accounting,
+memory cap and byte-equality gate apply. Comparison summary keys now use
+`candidate_wins`, `candidate_minus_control_p50_ms`, `control_first_*` and
+`candidate_first_*` for either kind of comparison.
+
+The experimental session requires `bidirectionalFlowSupported`, allocates
+backward vector/cost images and buffers, and binds the backward output slots.
+It copies both directions back through the same semaphore/fence chain.
+There are two execute chains per stereo pair instead of four; device work
+does not necessarily halve. All outputs are checked for aliases and legal
+usage/layout, and their metadata changes only after successful completion.
+Existing single-direction API calls retain their default behavior. The
+`NativeMotion` constructor's bidirectional argument defaults to false; the
+encoder does not select this experiment automatically. No FFI or settings
+layout changes are involved.
+
+The API's [session flags](https://docs.vulkan.org/refpages/latest/refpages/source/VkOpticalFlowSessionCreateFlagBitsNV.html)
+require backward vector output and, when cost generation is enabled, backward
+cost output. Unsupported devices reject this test explicitly. Paired quality
+must pass before attempting stream-size timings with both initial orders.
+
+```bash
+bash tests/run_linux_native_motion.sh /path/to/checker /path/to/bidir-quality \
+  --suite quality --compare-bidirectional-flow --warmup-samples 2 --luma-max 512 --save-images
+```
+
+Do not infer stream readiness or output equivalence from compilation alone.
+
 ## Verification record
 
 **Fact:** the two shaders compile for Vulkan 1.2. The backend, native-motion

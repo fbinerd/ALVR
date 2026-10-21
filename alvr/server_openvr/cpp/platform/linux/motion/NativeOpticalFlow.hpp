@@ -57,7 +57,8 @@ public:
         const Context&,
         uint32_t width,
         uint32_t height,
-        VkOpticalFlowPerformanceLevelNV = VK_OPTICAL_FLOW_PERFORMANCE_LEVEL_SLOW_NV
+        VkOpticalFlowPerformanceLevelNV = VK_OPTICAL_FLOW_PERFORMANCE_LEVEL_SLOW_NV,
+        bool bothDirections = false
     );
     ~NativeOpticalFlow();
     NativeOpticalFlow(const NativeOpticalFlow&) = delete;
@@ -73,8 +74,14 @@ public:
         ImageResource& motion,
         ImageResource& cost,
         std::string& error,
-        VkImageLayout output_layout = VK_IMAGE_LAYOUT_GENERAL
+        VkImageLayout output_layout = VK_IMAGE_LAYOUT_GENERAL,
+        ImageResource* backwardMotion = nullptr,
+        ImageResource* backwardCost = nullptr
     ) noexcept;
+
+    // With bothDirections enabled at construction, both backward outputs are
+    // mandatory and receive reference -> input motion/cost in the same operation.
+    // They follow the same packed-format, lifetime and output-layout contract.
 
     // After submission failure/timeout, do not reuse the estimator. The owner
     // must keep the device/images alive until this confirms submitted work ended.

@@ -33,7 +33,7 @@ struct NativeMotion::State {
     std::array<Image, 2> colors;
     std::array<std::array<Image, 2>, 2> lumas; // retained frame / eye
     std::array<std::array<Image, 2>, 2> flows; // eye / forward, backward
-    std::array<Image, 2> costs;
+    std::array<Image, 2> costs, backwardCosts;
     std::array<std::unique_ptr<NativeOpticalFlow>, 2> estimators;
     vk::CommandPool pool {};
     vk::CommandBuffer command {};
@@ -50,7 +50,7 @@ struct NativeMotion::State {
     uint64_t presentations = 0, predictions = 0, captures = 0, rejected = 0;
     unsigned retained = 0, latest = 0;
     bool captureThisFrame = true, flowDirty = false, idle = true;
-    bool allowExactFlowExit;
+    bool allowExactFlowExit, bidirectionalFlow;
     PredictionTiming timing;
 
     State(
@@ -58,12 +58,14 @@ struct NativeMotion::State {
         vk::Extent2D size,
         vk::Format f,
         uint32_t maxLumaDimension,
-        bool exactFlowExit
+        bool exactFlowExit,
+        bool bothDirections
     )
         : ctx(c)
         , extent(size)
         , format(f)
-        , allowExactFlowExit(exactFlowExit) {
+        , allowExactFlowExit(exactFlowExit)
+        , bidirectionalFlow(bothDirections) {
         lumaExtent = vk::Extent2D { (size.width / 4) & ~3u, (size.height / 2) & ~3u };
         if (maxLumaDimension && (maxLumaDimension < 64 || maxLumaDimension % 4))
             throw std::runtime_error(
@@ -119,6 +121,8 @@ struct NativeMotion::State {
             for (auto& image : pair)
                 destroy(image);
         for (auto& image : costs)
+            destroy(image);
+        for (auto& image : backwardCosts)
             destroy(image);
         ctx.dev.destroy(lumaPipeline);
         ctx.dev.destroy(warpPipeline);
@@ -218,11 +222,10 @@ struct NativeMotion::State {
         auto result = ctx.dev.createComputePipeline(
             {},
             vk::ComputePipelineCreateInfo {
-                .stage
-                = { .stage = vk::ShaderStageFlagBits::eCompute,
-                    .module = shader,
-                    .pName = "main",
-                    .pSpecializationInfo = specialization },
+                .stage = { .stage = vk::ShaderStageFlagBits::eCompute,
+                           .module = shader,
+                           .pName = "main",
+                           .pSpecializationInfo = specialization },
                 .layout = layout,
             }
         );
@@ -266,6 +269,9 @@ struct NativeMotion::State {
                 makeImage(image, flowSize, vk::Format::eR16G16Sint, sampled | transferDst);
         for (auto& image : costs)
             makeImage(image, flowSize, vk::Format::eR16G16Sint, sampled | transferDst);
+        if (bidirectionalFlow)
+            for (auto& image : backwardCosts)
+                makeImage(image, flowSize, vk::Format::eR16G16Sint, sampled | transferDst);
         pool = ctx.dev.createCommandPool(vk::CommandPoolCreateInfo {
             .flags = vk::CommandPoolCreateFlagBits::eResetCommandBuffer,
             .queueFamilyIndex = ctx.meta.queueFamily,
@@ -344,16 +350,18 @@ struct NativeMotion::State {
                 native,
                 lumaExtent.width,
                 lumaExtent.height,
-                VK_OPTICAL_FLOW_PERFORMANCE_LEVEL_FAST_NV
+                VK_OPTICAL_FLOW_PERFORMANCE_LEVEL_FAST_NV,
+                bidirectionalFlow
             );
         Info(
             "Native motion controlled mode: alternate real/predicted, %ux%u per eye, luma %ux%u; "
-            "exact flow exit %s; experimental pose association",
+            "exact flow exit %s; bidirectional flow %s; experimental pose association",
             extent.width / 2,
             extent.height,
             lumaExtent.width,
             lumaExtent.height,
-            allowExactFlowExit ? "enabled" : "disabled"
+            allowExactFlowExit ? "enabled" : "disabled",
+            bidirectionalFlow ? "enabled" : "disabled"
         );
     }
 
@@ -450,17 +458,30 @@ struct NativeMotion::State {
         double opticalGpuMs = 0;
         bool allTimed = true;
         for (unsigned eye = 0; eye < 2; ++eye)
-            for (unsigned reverse = 0; reverse < 2; ++reverse) {
+            for (unsigned reverse = 0; reverse < (bidirectionalFlow ? 1u : 2u); ++reverse) {
                 auto a = resource(lumas[reverse ? latest : 1 - latest][eye]);
                 auto b = resource(lumas[reverse ? 1 - latest : latest][eye]);
                 auto motion = resource(flows[eye][reverse]), cost = resource(costs[eye]);
                 std::string error;
+                auto backwardMotion = resource(flows[eye][1]);
+                auto backwardCost = resource(backwardCosts[eye]);
                 if (!estimators[eye]->execute(
-                        a, b, motion, cost, error, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+                        a,
+                        b,
+                        motion,
+                        cost,
+                        error,
+                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                        bidirectionalFlow ? &backwardMotion : nullptr,
+                        bidirectionalFlow ? &backwardCost : nullptr
                     ))
                     throw std::runtime_error("Native motion flow failed: " + error);
                 flows[eye][reverse].layout = static_cast<vk::ImageLayout>(motion.layout);
                 costs[eye].layout = static_cast<vk::ImageLayout>(cost.layout);
+                if (bidirectionalFlow) {
+                    flows[eye][1].layout = static_cast<vk::ImageLayout>(backwardMotion.layout);
+                    backwardCosts[eye].layout = static_cast<vk::ImageLayout>(backwardCost.layout);
+                }
                 double deviceMs = estimators[eye]->opticalGpuMilliseconds();
                 allTimed &= deviceMs >= 0;
                 if (deviceMs >= 0)
@@ -476,9 +497,12 @@ NativeMotion::NativeMotion(
     vk::Extent2D extent,
     vk::Format format,
     uint32_t maxLumaDimension,
-    bool allowExactFlowExit
+    bool allowExactFlowExit,
+    bool bidirectionalFlow
 )
-    : state(std::make_unique<State>(ctx, extent, format, maxLumaDimension, allowExactFlowExit)) {
+    : state(std::make_unique<State>(
+        ctx, extent, format, maxLumaDimension, allowExactFlowExit, bidirectionalFlow
+    )) {
     state->initialize();
 }
 NativeMotion::~NativeMotion() = default;

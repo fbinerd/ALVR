@@ -225,6 +225,8 @@ struct Options {
     bool saveImages = false;
     bool fixedFlowIterations = false;
     bool compareFlowIterations = false;
+    bool compareBidirectionalFlow = false;
+    bool pairedComparison() const { return compareFlowIterations || compareBidirectionalFlow; }
     bool candidateFirst = false;
     unsigned warmupSamples = 1;
     double maxPredictMs = 0;
@@ -235,7 +237,7 @@ Options parse(int argc, char** argv) {
         throw std::runtime_error(
             "Usage: image_test OUTPUT [--suite smoke|quality|stream] "
             "[--iterations N] [--save-images] [--max-predict-ms N] [--luma-max N] "
-            "[--fixed-flow-iterations | --compare-flow-iterations] "
+            "[--fixed-flow-iterations | --compare-flow-iterations | --compare-bidirectional-flow] "
             "[--candidate-first] [--warmup-samples N]"
         );
     Options o;
@@ -269,6 +271,8 @@ Options parse(int argc, char** argv) {
             o.fixedFlowIterations = true;
         else if (arg == "--compare-flow-iterations")
             o.compareFlowIterations = true;
+        else if (arg == "--compare-bidirectional-flow")
+            o.compareBidirectionalFlow = true;
         else if (arg == "--candidate-first")
             o.candidateFirst = true;
         else if (arg == "--warmup-samples") {
@@ -297,15 +301,16 @@ Options parse(int argc, char** argv) {
     else if (o.suite == "stream") {
         o.size = { 2048, 2144 };
         // Two retained predictions per sample must fit the same pixel-cache cap.
-        o.iterations = o.compareFlowIterations ? 10 : 12;
+        o.iterations = o.pairedComparison() ? 10 : 12;
     } else
         throw std::runtime_error("Unknown suite: " + o.suite);
     if (requestedIterations)
         o.iterations = requestedIterations;
-    if (o.compareFlowIterations && o.fixedFlowIterations)
+    if ((o.pairedComparison() && o.fixedFlowIterations)
+        || (o.compareFlowIterations && o.compareBidirectionalFlow))
         throw std::runtime_error("Choose paired comparison or fixed iterations, not both");
-    if (o.candidateFirst && !o.compareFlowIterations)
-        throw std::runtime_error("--candidate-first requires --compare-flow-iterations");
+    if (o.candidateFirst && !o.pairedComparison())
+        throw std::runtime_error("--candidate-first requires a paired comparison");
     if (o.warmupSamples >= o.iterations && !(o.iterations == 1 && o.warmupSamples == 1))
         throw std::runtime_error("Warm-up must leave at least one measured sample");
     // Reject reuse so an earlier result cannot be confused with this run.
@@ -354,7 +359,12 @@ Pixels prime(alvr::motion::NativeMotion& motion, Images& gpu, Scene scene) {
     }
     return latest;
 }
-void timestampRecovery(alvr::VkContext& ctx, std::ofstream& summary, bool allowExactFlowExit) {
+void timestampRecovery(
+    alvr::VkContext& ctx,
+    std::ofstream& summary,
+    bool allowExactFlowExit,
+    bool bidirectional = false
+) {
     // Fixed small images: these are state/lifetime checks, not budget samples.
     Images gpu(ctx, { 512, 384 });
     gpu.initialize();
@@ -367,7 +377,8 @@ void timestampRecovery(alvr::VkContext& ctx, std::ofstream& summary, bool allowE
             { gpu.size.width(), gpu.size.height },
             vk::Format::eR8G8B8A8Unorm,
             alvr::motion::NativeMotion::DefaultLumaDimension,
-            allowExactFlowExit
+            allowExactFlowExit,
+            bidirectional
         );
         auto latest = prime(motion, gpu, Scene::Translation);
         unsigned releases = 0;
@@ -394,8 +405,11 @@ void timestampRecovery(alvr::VkContext& ctx, std::ofstream& summary, bool allowE
             "Prediction did not recover after rejection"
         );
         require(releases == 1, "Recovered prediction must release input exactly once");
-        summary << "timestamp_recovery target=" << target
-                << " passed=1 variant=" << (allowExactFlowExit ? "exact" : "fixed") << '\n';
+        summary << "timestamp_recovery target=" << target << " passed=1 variant="
+                << (bidirectional            ? "bidirectional"
+                        : allowExactFlowExit ? "exact"
+                                             : "fixed")
+                << '\n';
         summary.flush();
     }
 }
@@ -428,7 +442,7 @@ bool runCase(
         std::unique_ptr<Images> gpu;
         std::unique_ptr<alvr::motion::NativeMotion> motion;
     };
-    unsigned count = o.compareFlowIterations ? 2 : 1;
+    unsigned count = o.pairedComparison() ? 2 : 1;
     if (uint64_t(o.size.bytes()) * o.iterations * (2 + count) > 1536ull * 1024 * 1024)
         throw std::runtime_error("Fixture batch exceeds 1.5 GiB; reduce --iterations");
     std::vector<Sample> samples(o.iterations);
@@ -444,14 +458,19 @@ bool runCase(
     std::vector<Variant> variants;
     for (unsigned v = 0; v < count; ++v) {
         bool exact = o.compareFlowIterations ? v == 1 : !o.fixedFlowIterations;
-        Variant variant { exact ? "exact" : "fixed", std::make_unique<Images>(ctx, o.size), {} };
+        bool bidirectional = o.compareBidirectionalFlow && v == 1;
+        char const* name = o.compareBidirectionalFlow
+            ? (bidirectional ? "bidirectional" : "separate")
+            : (exact ? "exact" : "fixed");
+        Variant variant { name, std::make_unique<Images>(ctx, o.size), {} };
         variant.gpu->initialize();
         variant.motion = std::make_unique<alvr::motion::NativeMotion>(
             ctx,
             vk::Extent2D { o.size.width(), o.size.height },
             vk::Format::eR8G8B8A8Unorm,
             o.maxLumaDimension,
-            exact
+            exact,
+            bidirectional
         );
         (void)prime(*variant.motion, *variant.gpu, scene);
         variants.push_back(std::move(variant));
@@ -494,8 +513,8 @@ bool runCase(
     bool allPassed = true;
     if (count == 2) {
         uint64_t changedBytes = 0;
-        unsigned exactWins = 0;
-        std::vector<double> predictionDelta, fixedFirstDelta, exactFirstDelta;
+        unsigned candidateWins = 0;
+        std::vector<double> predictionDelta, controlFirstDelta, candidateFirstDelta;
         for (unsigned i = 0; i < samples.size(); ++i) {
             auto const& sample = samples[i];
             auto const& a = sample.results[0].image;
@@ -506,19 +525,20 @@ bool runCase(
             if (i >= o.warmupSamples || o.iterations == 1) {
                 double delta = sample.results[1].predictionMs - sample.results[0].predictionMs;
                 predictionDelta.push_back(delta);
-                exactWins += delta < 0;
-                (sample.results[0].position == 0 ? fixedFirstDelta : exactFirstDelta)
+                candidateWins += delta < 0;
+                (sample.results[0].position == 0 ? controlFirstDelta : candidateFirstDelta)
                     .push_back(delta);
             }
         }
         summary << "comparison_case=" << fixture::name(scene) << " samples=" << samples.size()
                 << " changed_rgba_bytes=" << changedBytes << " exact_match=" << (changedBytes == 0)
-                << " measured_pairs=" << predictionDelta.size() << " exact_wins=" << exactWins
-                << " exact_minus_fixed_p50_ms=" << percentile(predictionDelta, .5)
-                << " fixed_first_pairs=" << fixedFirstDelta.size()
-                << " fixed_first_delta_p50_ms=" << percentile(fixedFirstDelta, .5)
-                << " exact_first_pairs=" << exactFirstDelta.size()
-                << " exact_first_delta_p50_ms=" << percentile(exactFirstDelta, .5) << '\n';
+                << " measured_pairs=" << predictionDelta.size()
+                << " candidate_wins=" << candidateWins
+                << " candidate_minus_control_p50_ms=" << percentile(predictionDelta, .5)
+                << " control_first_pairs=" << controlFirstDelta.size()
+                << " control_first_delta_p50_ms=" << percentile(controlFirstDelta, .5)
+                << " candidate_first_pairs=" << candidateFirstDelta.size()
+                << " candidate_first_delta_p50_ms=" << percentile(candidateFirstDelta, .5) << '\n';
         allPassed &= changedBytes == 0;
     }
     for (unsigned v = 0; v < count; ++v) {
@@ -580,7 +600,7 @@ bool runCase(
             }
             if (sample == 0 && o.saveImages) {
                 auto folder = o.output;
-                if (o.compareFlowIterations)
+                if (o.pairedComparison())
                     folder /= variants[v].name;
                 folder /= fixture::name(scene);
                 std::filesystem::create_directories(folder);
@@ -629,14 +649,15 @@ int main(int argc, char** argv) {
                 << " luma_max_dimension=" << o.maxLumaDimension
                 << " fixed_flow_iterations=" << o.fixedFlowIterations
                 << " compare_flow_iterations=" << o.compareFlowIterations
+                << " compare_bidirectional_flow=" << o.compareBidirectionalFlow
                 << " candidate_first=" << o.candidateFirst << " warmup_samples=" << o.warmupSamples
                 << '\n';
         summary << "timing=CPU_wall_including_GPU_completion_excluding_upload_readback_encoder\n"
                 << "warmup=prefix_excluded_from_timing_but_included_in_quality\n"
                 << "budget=maximum_measured_prediction_time_not_percentile\n"
                 << "paired_order="
-                << (o.compareFlowIterations ? "AB_BA_alternating_independent_histories"
-                                            : "single_variant")
+                << (o.pairedComparison() ? "AB_BA_alternating_independent_histories"
+                                         : "single_variant")
                 << '\n'
                 << "sequence=unpaced_GPU_burst_references_before_scoring_after\n"
                 << "device_timing=optical_queue_including_pack_copy_and_render_warp_separately\n";
@@ -664,8 +685,8 @@ int main(int argc, char** argv) {
             timestampRecovery(
                 ctx, summary, o.compareFlowIterations ? false : !o.fixedFlowIterations
             );
-            if (o.compareFlowIterations)
-                timestampRecovery(ctx, summary, true);
+            if (o.pairedComparison())
+                timestampRecovery(ctx, summary, true, o.compareBidirectionalFlow);
         }
         ctx.destroy();
         summary << "passed=" << passed << '\n';

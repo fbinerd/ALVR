@@ -28,7 +28,8 @@ public:
         vk::Extent2D,
         vk::Format,
         uint32_t maxLumaDimension = DefaultLumaDimension,
-        bool allowExactFlowExit = true
+        bool allowExactFlowExit = true,
+        bool bidirectionalFlow = false
     );
     ~NativeMotion();
     NativeMotion(const NativeMotion&) = delete;
