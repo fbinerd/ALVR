@@ -22,6 +22,7 @@ enum class Scene {
     SlowTranslation,
     SlowVertical,
     SlowDiagonal,
+    ColorFlash,
     FineTexture,
     Rotation,
     Foreground,
@@ -39,6 +40,8 @@ inline const char* name(Scene scene) {
         return "slow_vertical";
     case Scene::SlowDiagonal:
         return "slow_diagonal";
+    case Scene::ColorFlash:
+        return "color_flash";
     case Scene::FineTexture:
         return "fine_texture";
     case Scene::Rotation:
@@ -89,7 +92,7 @@ inline Pixels render(Size size, Scene scene, double time) {
                     seed += 71;
                     cell = 6.f;
                 }
-            } else if (scene != Scene::Stationary) {
+            } else if (scene != Scene::Stationary && scene != Scene::ColorFlash) {
                 // Keep slow motion subpixel at both suite dimensions.
                 bool slow = scene == Scene::SlowTranslation || scene == Scene::SlowVertical
                     || scene == Scene::SlowDiagonal;
@@ -106,6 +109,15 @@ inline Pixels render(Size size, Scene scene, double time) {
             pixels[at + 1] = value;
             pixels[at + 2] = eye ? value : value / 2;
             pixels[at + 3] = 255;
+            if (scene == Scene::ColorFlash) {
+                // A stationary textured scene changes chroma every two frames.
+                // Target frames keep the latest color; extrapolating its last
+                // color change would invent another flash without motion.
+                int flash = (int(std::floor(time / 2)) % 2) ? 4 : -4;
+                unsigned dominant = eye ? 2 : 0;
+                pixels[at + dominant] = uint8_t(int(pixels[at + dominant]) - flash);
+                pixels[at + 1] = uint8_t(int(pixels[at + 1]) + flash);
+            }
         }
     return pixels;
 }

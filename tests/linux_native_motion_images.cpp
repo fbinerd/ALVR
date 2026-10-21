@@ -532,7 +532,8 @@ int main(int argc, char** argv) {
         if (o.suite != "smoke")
             scenes = { Scene::Stationary,   Scene::Translation,  Scene::SlowTranslation,
                        Scene::SlowVertical, Scene::SlowDiagonal, Scene::FineTexture,
-                       Scene::Rotation,     Scene::Foreground,   Scene::Jitter };
+                       Scene::Rotation,     Scene::Foreground,   Scene::Jitter,
+                       Scene::ColorFlash };
         for (auto scene : scenes)
             passed &= runCase(ctx, o, scene, metrics, timings, summary);
         if (o.suite != "smoke")

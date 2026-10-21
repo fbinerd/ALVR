@@ -58,13 +58,18 @@ sampling for smooth motion; performance and boundary quality need GPU tests.
 
 Before resampling, the shader compares previous/latest color at the current
 texel and at the actual proposed source. Identity at both sites preserves the
-exact current texel. For valid source motion up to one pixel per real-frame
-interval and a color change of at most 16/255 per channel, it instead predicts
-`latest + horizon * (latest - previous)`, clamped to the color range. This
-first-order temporal approximation avoids spatial filtering of subpixel
-detail; larger motion/changes use the spatial warp. It can amplify noise or
-overshoot changing edges. Both changes await GPU validation, including slow
-horizontal, vertical and diagonal fixtures at both resolutions.
+exact current texel. Subpixel prediction no longer depends on a one-pixel
+threshold applied to the coarse luma vectors. For each full 8x8 tile, 16 RGB
+history samples form a regularized local translation fit using symmetric
+spatial gradients. The fit must explain at least 75% of temporal squared
+change, have sufficient texture/change, and estimate at most one output pixel
+per real-frame interval. For accepted tiles, pixels changing by at most 16/255
+per channel use `latest + horizon * (latest - previous)`, clamped to the color
+range. Other pixels use the spatial warp. Accepted tiles skip the four corner
+flow solves; all workgroup barriers precede any pixel return. This is an
+untested candidate for the full-size slow-motion regression under capped luma.
+It can still amplify noise, misclassify mixed/ambiguous motion, or overshoot
+changing edges; GPU quality/cost checks are required before live use.
 
 Two retained real frames are required before predicting. A predicted frame
 may extend at most 0.55 of the measured real-frame interval beyond the latest
@@ -119,7 +124,7 @@ target time directly, independently of the predictor. Suites:
 | Suite | Per-eye size | Predictions per case | Cases |
 | --- | --- | --- | --- |
 | `smoke` (default) | 512x384 | 1 | Opposite translations |
-| `quality` | 512x384 | 6 | Stationary, translation, subpixel horizontal/vertical/diagonal translation, fine texture, rotation, foreground occlusion, timestamp jitter |
+| `quality` | 512x384 | 6 | Stationary, translation, subpixel horizontal/vertical/diagonal translation, fine texture, rotation, foreground occlusion, timestamp jitter, stationary color flash |
 | `stream` | 2048x2144 | 12 | Same cases at representative stream dimensions |
 
 `quality` and `stream` also verify four timestamp rejection/recovery cases
@@ -133,6 +138,10 @@ exact RGBA preservation at every pixel including edges; the CSV reports
 `static_pixel_mismatches`. Subpixel translation advances 0.25 output pixels
 per presentation along each selected axis at both resolutions, covering
 possible slow-motion freezes or directional bias.
+The color-flash control changes chroma every two presentations without moving
+geometry; the target retains the latest color. Prediction must stay within
+the existing 0.25 RGB MAE gate when repeating the latest is exact. This guards
+against treating every small color change as predictable motion.
 Newly revealed foreground-background pixels are reported
 separately; that region is diagnostic, not independently gated, because its
 visibility is not available from latest color alone.
