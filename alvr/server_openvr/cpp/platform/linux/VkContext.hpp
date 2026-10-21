@@ -60,10 +60,16 @@ public:
 
         u32 queueFamily;
         u32 queueIndex;
+        bool opticalFlowEnabled = false;
+        u32 opticalFlowQueueFamily = VK_QUEUE_FAMILY_IGNORED;
+        u32 opticalFlowQueueIndex = 0;
+        vk::PhysicalDeviceSynchronization2Features synchronization2;
+        vk::PhysicalDeviceOpticalFlowFeaturesNV opticalFlow;
     } meta;
 
 private:
     vk::Queue queue;
+    vk::Queue opticalFlowQueue;
     VkDebugUtilsMessengerEXT messenger = VK_NULL_HANDLE;
 
     static VkBool32
@@ -288,6 +294,57 @@ public:
 
         auto availExts = physDev.enumerateDeviceExtensionProperties();
 
+        auto hasDeviceExtension = [&](std::string_view name) {
+            return std::any_of(availExts.begin(), availExts.end(), [&](auto const& ext) {
+                return name == ext.extensionName;
+            });
+        };
+
+        char const* motionEnv = std::getenv("ALVR_NATIVE_MOTION");
+        bool wantsOpticalFlow = motionEnv && std::string_view(motionEnv) == "1";
+        std::optional<u32> opticalFlowFamily;
+        if (wantsOpticalFlow) {
+            bool dependencies = hasDeviceExtension(VK_NV_OPTICAL_FLOW_EXTENSION_NAME)
+                && hasDeviceExtension(VK_KHR_FORMAT_FEATURE_FLAGS_2_EXTENSION_NAME)
+                && hasDeviceExtension(VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME);
+            vk::PhysicalDeviceOpticalFlowFeaturesNV supportedOpticalFlow {
+                .opticalFlow = VK_FALSE,
+            };
+            vk::PhysicalDeviceSynchronization2Features supportedSync2 {
+                .pNext = &supportedOpticalFlow,
+                .synchronization2 = VK_FALSE,
+            };
+            vk::PhysicalDeviceFeatures2 supportedFeatures { .pNext = &supportedSync2 };
+            if (dependencies) physDev.getFeatures2(&supportedFeatures);
+
+            for (u32 i = 0; i < queueFamilyProps.size(); ++i) {
+                auto flags = queueFamilyProps[i].queueFlags;
+                if ((flags & (vk::QueueFlagBits::eOpticalFlowNV | vk::QueueFlagBits::eTransfer))
+                    == (vk::QueueFlagBits::eOpticalFlowNV | vk::QueueFlagBits::eTransfer)) {
+                    opticalFlowFamily = i;
+                    break;
+                }
+            }
+
+            if (!dependencies || !supportedOpticalFlow.opticalFlow
+                || !supportedSync2.synchronization2 || !opticalFlowFamily) {
+                Warn("ALVR_NATIVE_MOTION=1 requested, but this Vulkan device lacks optical-flow support, dependencies, or a compatible queue; motion synthesis stays off");
+            } else {
+                meta.opticalFlowEnabled = true;
+                meta.opticalFlowQueueFamily = *opticalFlowFamily;
+                opticalFlowQueue = nullptr;
+                meta.synchronization2 = vk::PhysicalDeviceSynchronization2Features {
+                    .synchronization2 = VK_TRUE,
+                };
+                meta.opticalFlow = vk::PhysicalDeviceOpticalFlowFeaturesNV {
+                    .opticalFlow = VK_TRUE,
+                };
+                meta.synchronization2.pNext = &meta.opticalFlow;
+                meta.feats12.pNext = &meta.synchronization2;
+                Info("Native optical-flow feature requested on queue family %u", *opticalFlowFamily);
+            }
+        }
+
         std::vector<char const*> acquiredExts;
         for (auto name : wantedExts) {
             auto it = std::find_if(availExts.begin(), availExts.end(), [&](auto& other) {
@@ -296,6 +353,11 @@ public:
             if (it != availExts.end())
                 acquiredExts.push_back(name.data());
         }
+        if (meta.opticalFlowEnabled) {
+            acquiredExts.push_back(VK_KHR_FORMAT_FEATURE_FLAGS_2_EXTENSION_NAME);
+            acquiredExts.push_back(VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME);
+            acquiredExts.push_back(VK_NV_OPTICAL_FLOW_EXTENSION_NAME);
+        }
 
         f32 queuePrio = 1.f;
         vk::DeviceQueueCreateInfo queueCI {
@@ -303,10 +365,19 @@ public:
             .queueCount = 1,
             .pQueuePriorities = &queuePrio,
         };
+        std::vector<vk::DeviceQueueCreateInfo> queueCIs { queueCI };
+        if (meta.opticalFlowEnabled && meta.opticalFlowQueueFamily != meta.queueFamily) {
+            queueCIs.push_back(vk::DeviceQueueCreateInfo {
+                .queueFamilyIndex = meta.opticalFlowQueueFamily,
+                .queueCount = 1,
+                .pQueuePriorities = &queuePrio,
+            });
+        }
 
         meta.feats12 = vk::PhysicalDeviceVulkan12Features {
             .timelineSemaphore = 1,
         };
+        if (meta.opticalFlowEnabled) meta.feats12.pNext = &meta.synchronization2;
 
         meta.feats = vk::PhysicalDeviceFeatures2 {
             .pNext = &meta.feats12,
@@ -317,8 +388,8 @@ public:
         };
         vk::DeviceCreateInfo devCI {
             .pNext = &meta.feats,
-            .queueCreateInfoCount = 1,
-            .pQueueCreateInfos = &queueCI,
+            .queueCreateInfoCount = static_cast<u32>(queueCIs.size()),
+            .pQueueCreateInfos = queueCIs.data(),
             .enabledExtensionCount = static_cast<u32>(acquiredExts.size()),
             .ppEnabledExtensionNames = acquiredExts.data(),
         };
@@ -327,11 +398,16 @@ public:
         meta.devExtensions = acquiredExts;
 
         queue = dev.getQueue(wantedQueueFamily.value(), meta.queueIndex);
+        if (meta.opticalFlowEnabled) {
+            meta.opticalFlowQueueIndex = 0;
+            opticalFlowQueue = dev.getQueue(meta.opticalFlowQueueFamily, meta.opticalFlowQueueIndex);
+        }
 
         sharedInit();
     }
 
     void useQueue(std::function<void(vk::Queue&)> fn) { fn(queue); }
+    vk::Queue getOpticalFlowQueue() const { return opticalFlowQueue; }
 
     void destroy() {
         dev.destroy();
