@@ -863,45 +863,6 @@ void Renderer::render(VkContext& vkCtx, std::vector<Layer> const& layers) {
         );
     }
 
-    if (probe) {
-        vk::MemoryBarrier toTransfer {
-            .srcAccessMask = vk::AccessFlagBits::eShaderWrite,
-            .dstAccessMask = vk::AccessFlagBits::eTransferRead,
-        };
-        cmdBuf.pipelineBarrier(
-            vk::PipelineStageFlagBits::eComputeShader,
-            vk::PipelineStageFlagBits::eTransfer,
-            {},
-            toTransfer,
-            {},
-            {}
-        );
-        vk::BufferImageCopy region {
-            .bufferOffset = ProbeBytes * 2,
-            .imageSubresource { .aspectMask = vk::ImageAspectFlagBits::eColor,
-                                .mipLevel = 0,
-                                .baseArrayLayer = 0,
-                                .layerCount = 1 },
-            .imageOffset { .x = (int32_t)(outExtent.width / 4 - ProbeSize / 2),
-                           .y = (int32_t)(outExtent.height / 2 - ProbeSize / 2),
-                           .z = 0 },
-            .imageExtent { .width = ProbeSize, .height = ProbeSize, .depth = 1 },
-        };
-        cmdBuf.copyImageToBuffer(output.image.image, output.image.layout, debugBuf, region);
-        vk::MemoryBarrier toHost {
-            .srcAccessMask = vk::AccessFlagBits::eTransferWrite,
-            .dstAccessMask = vk::AccessFlagBits::eHostRead,
-        };
-        cmdBuf.pipelineBarrier(
-            vk::PipelineStageFlagBits::eTransfer,
-            vk::PipelineStageFlagBits::eHost,
-            {},
-            toHost,
-            {},
-            {}
-        );
-    }
-
     cmdBuf.writeTimestamp(vk::PipelineStageFlagBits::eBottomOfPipe, timestampPool, 1);
 
     cmdBuf.end();
