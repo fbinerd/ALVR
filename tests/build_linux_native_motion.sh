@@ -35,4 +35,11 @@ includes=("-I$checkout/alvr/server_openvr/cpp" "-I$checkout/alvr/server_openvr/c
     "${includes[@]}" "$checkout/tests/linux_native_motion_images.cpp" \
     "$native_source/motion/NativeMotion.cpp" "$native_source/motion/NativeOpticalFlow.cpp" \
     -Wl,-l:libvulkan.so.1 -pthread -o "$motion_output/image_test"
+git -C "$checkout" rev-parse HEAD > "$motion_output/source-commit.txt"
+git -C "$checkout" status --short --untracked-files=no > "$motion_output/source-dirty.txt"
+(
+    cd "$motion_output"
+    sha256sum image_test timing_test motion_luma.spv motion_warp.spv NativeMotionShaders.hpp \
+        > checksums.sha256
+)
 printf 'Built checks in %s; no tests executed.\n' "$motion_output"

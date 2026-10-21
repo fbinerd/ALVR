@@ -91,16 +91,55 @@ bash tests/build_linux_native_motion.sh /path/to/ignored/output
 
 `timing_test` is CPU-only and checks timestamp eligibility, including
 nonmonotonic values, long pauses and overflow boundaries. `image_test` is an
-offscreen NVIDIA integration check, with opposite translations in each eye.
-It writes previous/latest/expected/predicted PPM images and per-eye errors;
-both predicted errors must improve over repeating the newest real frame.
-It does not open SteamVR, ALVR or a headset app. Notify the user before running
-tests. GPU and live testing are pending a user-confirmed Luna handoff.
+offscreen NVIDIA integration checker. Its analytic reference renders the
+target time directly, independently of the predictor. Suites:
+
+| Suite | Per-eye size | Predictions per case | Cases |
+| --- | --- | --- | --- |
+| `smoke` (default) | 512x384 | 1 | Opposite translations |
+| `quality` | 512x384 | 6 | Stationary, translation, fine texture, rotation, foreground occlusion, timestamp jitter |
+| `stream` | 2048x2144 | 12 | Same cases at representative stream dimensions |
+
+`quality` and `stream` also verify four timestamp rejection/recovery cases
+against the actual predictor: duplicate, reversed, excessive horizon and long
+pause. A rejected call must preserve output and retain the real input; a
+successful prediction must release that input exactly once. Every output
+pixel is checked for opaque alpha and for the eye's distinct color tint,
+including the seam. Image-quality gates require improvement in both the whole
+interior and the changed-pixel region of each eye. Stationary images must stay
+within 0.25 RGB MAE. Newly revealed foreground-background pixels are reported
+separately; that region is diagnostic, not independently gated, because its
+visibility is not available from latest color alone.
+
+Results include `metrics.csv` (eye/region errors), `timings.csv` (each sample),
+and `summary.txt` (quality result and p50/p95/max). Timings are CPU wall time
+including GPU completion, excluding fixture upload/readback and encoding.
+The first sample is marked cold and excluded from steady percentiles when
+more samples exist. Warm capture timing and capture+prediction pair timing
+are also recorded. These are not end-to-end frame latency or paced 72 Hz
+measurements. The fixture runs unpaced; desktop GPU load can affect results.
+
+Commit before the final check build. The builder records source revision,
+tracked dirtiness and binary/shader hashes. The runner refuses dirty build
+metadata or reused output directories and preserves failure/timeout logs.
+It does not open SteamVR, ALVR or a headset app. Announce every test first;
+GPU execution requires the user-confirmed Luna handoff.
 
 ```bash
-ALVR_NATIVE_MOTION=1 ALVR_VULKAN_DEVICE=NVIDIA \
-  timeout 60 /path/to/ignored/output/image_test /path/to/new/results
+bash tests/run_linux_native_motion.sh /path/to/ignored/output \
+  /path/to/new/quality-results --suite quality --save-images
+# Only after quality passes, measure representative resolution. The explicit
+# warm-prediction limit is one 72 Hz slot; encoding/capture still need budget.
+bash tests/run_linux_native_motion.sh /path/to/ignored/output \
+  /path/to/new/stream-results --suite stream --max-predict-ms 13.888889
 ```
+
+Use `--iterations N` to choose 1-120 samples per case. `--save-images` writes
+the first sample's previous/latest/expected/predicted PPMs in case folders;
+it is on by default only for `smoke`. At stream dimensions, these files can
+consume about 630 MB across six cases. The runner has a bounded 300-second
+timeout. A partial run or failure lacks a successful final `passed=1`;
+inspect `exit-status.txt` and the log before interpreting metrics.
 
 A passing fixture is required before a headset trial. It cannot validate
 driver texture synchronization, real frame cadence, pose accuracy, image
@@ -112,10 +151,14 @@ before testing the ALVR client path; Air Link must never open that client app.
 **Fact:** the two shaders compile for Vulkan 1.2. The backend, native-motion
 implementation and encoder header passed C++20 syntax compilation with local
 ALVR Vulkan/FFmpeg headers. The CPU timestamp eligibility check passed on
-2026-10-21. Runtime optical-flow execution and headset output remain unknown.
+2026-10-21. The first smoke fixture passed on RTX 3060 at source `bf103800`:
+left/right repeated MAE 18.5085/18.4292, predicted MAE 0.696263/0.541704,
+8.45 ms flow+warp at 512x384 per eye. That result predates the cadence recovery
+fix and expanded checker; those GPU checks remain pending. Headset output,
+pose association and full-resolution budget remain unknown.
 The RTX 3060 is present again; persistent Render GPU and Encoder GPU selectors
-were set to NVIDIA with a session backup. No ALVR/SteamVR launch or GPU test
-was performed during this implementation.
+were set to NVIDIA with a session backup. No ALVR/SteamVR launch occurred
+during implementation of the expanded checker.
 
 **Primary API reference:** [Khronos Vulkan `VK_NV_optical_flow`](https://docs.vulkan.org/refpages/latest/refpages/source/VK_NV_optical_flow.html)
 and [optical-flow queue and image requirements](https://docs.vulkan.org/spec/latest/chapters/VK_NV_optical_flow/optical_flow.html).
