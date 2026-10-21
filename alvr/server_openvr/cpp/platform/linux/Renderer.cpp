@@ -1,6 +1,8 @@
 #include "Renderer.hpp"
 
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <optional>
 #include <set>
@@ -264,7 +266,9 @@ Output createOutputImage(
         .mipLevels = 1,
         .arrayLayers = 1,
         .samples = vk::SampleCountFlagBits::e1,
-        .usage = vk::ImageUsageFlagBits::eStorage | vk::ImageUsageFlagBits::eSampled,
+        .usage = vk::ImageUsageFlagBits::eStorage | vk::ImageUsageFlagBits::eSampled
+            | (std::getenv("ALVR_DEBUG_PIXELS") ? vk::ImageUsageFlagBits::eTransferSrc
+                                                 : vk::ImageUsageFlags {}),
         .sharingMode = vk::SharingMode::eExclusive,
         .initialLayout = vk::ImageLayout::eUndefined,
     };
@@ -482,6 +486,8 @@ Renderer::Renderer(
     // The working images hold both eyes side by side at the size of the
     // first layer 0 texture set; later sets of another size (SteamVR Home's)
     // are scaled into it by layer.comp.
+    debugPixels = std::getenv("ALVR_DEBUG_PIXELS") != nullptr;
+    stagingFormat = unormFormat;
     vk::ImageCreateInfo stagingImgCI {
         .imageType = vk::ImageType::e2D,
         .format = unormFormat,
@@ -748,6 +754,74 @@ void Renderer::render(VkContext& vkCtx, std::vector<Layer> const& layers) {
             );
         }
     }
+    // Diagnostic readback (ALVR_DEBUG_PIXELS=1), recorded while the source is
+    // still acquired.
+    constexpr u32 ProbeSize = 64;
+    constexpr vk::DeviceSize ProbeBytes = ProbeSize * ProbeSize * 16;
+    bool const probe = debugPixels && (debugFrame++ % 72 == 0);
+    if (probe) {
+        if (!debugBuf) {
+            debugBuf = vkCtx.dev.createBuffer({
+                .size = ProbeBytes * 3,
+                .usage = vk::BufferUsageFlagBits::eTransferDst,
+                .sharingMode = vk::SharingMode::eExclusive,
+            });
+            auto req = vkCtx.dev.getBufferMemoryRequirements(debugBuf);
+            debugMem = vkCtx.dev.allocateMemory({
+                .allocationSize = req.size,
+                .memoryTypeIndex = memoryTypeIndex(
+                    vkCtx,
+                    vk::MemoryPropertyFlagBits::eHostVisible
+                        | vk::MemoryPropertyFlagBits::eHostCoherent,
+                    req.memoryTypeBits
+                ),
+            });
+            vkCtx.dev.bindBufferMemory(debugBuf, debugMem, 0);
+            debugMap = vkCtx.dev.mapMemory(debugMem, 0, ProbeBytes * 3);
+        }
+        std::memset(debugMap, 0, ProbeBytes * 3);
+        vk::MemoryBarrier toTransfer {
+            .srcAccessMask = vk::AccessFlagBits::eShaderWrite | vk::AccessFlagBits::eShaderRead,
+            .dstAccessMask = vk::AccessFlagBits::eTransferRead,
+        };
+        cmdBuf.pipelineBarrier(
+            vk::PipelineStageFlagBits::eComputeShader,
+            vk::PipelineStageFlagBits::eTransfer,
+            {},
+            toTransfer,
+            {},
+            {}
+        );
+        auto copyCentre = [&](Image& img, vk::Extent2D extent, vk::DeviceSize offset) {
+            vk::BufferImageCopy region {
+                .bufferOffset = offset,
+                .imageSubresource { .aspectMask = vk::ImageAspectFlagBits::eColor,
+                                    .mipLevel = 0,
+                                    .baseArrayLayer = 0,
+                                    .layerCount = 1 },
+                .imageOffset { .x = (int32_t)(extent.width / 2 - ProbeSize / 2),
+                               .y = (int32_t)(extent.height / 2 - ProbeSize / 2),
+                               .z = 0 },
+                .imageExtent { .width = ProbeSize, .height = ProbeSize, .depth = 1 },
+            };
+            cmdBuf.copyImageToBuffer(img.image, vk::ImageLayout::eGeneral, debugBuf, region);
+        };
+        copyCentre(*sources[0][0], layers[0].extent, 0);
+        copyCentre(*stageOut, eyeExtent, ProbeBytes);
+        vk::MemoryBarrier toHost {
+            .srcAccessMask = vk::AccessFlagBits::eTransferWrite,
+            .dstAccessMask = vk::AccessFlagBits::eHostRead,
+        };
+        cmdBuf.pipelineBarrier(
+            vk::PipelineStageFlagBits::eTransfer,
+            vk::PipelineStageFlagBits::eHost,
+            {},
+            toHost,
+            {},
+            {}
+        );
+    }
+
     for (Image* source : acquired) {
         externalBarrier(*source, false);
     }
@@ -801,6 +875,45 @@ void Renderer::render(VkContext& vkCtx, std::vector<Layer> const& layers) {
         prev = nextOut;
     }
 
+    if (probe) {
+        vk::MemoryBarrier toTransfer {
+            .srcAccessMask = vk::AccessFlagBits::eShaderWrite,
+            .dstAccessMask = vk::AccessFlagBits::eTransferRead,
+        };
+        cmdBuf.pipelineBarrier(
+            vk::PipelineStageFlagBits::eComputeShader,
+            vk::PipelineStageFlagBits::eTransfer,
+            {},
+            toTransfer,
+            {},
+            {}
+        );
+        vk::BufferImageCopy region {
+            .bufferOffset = ProbeBytes * 2,
+            .imageSubresource { .aspectMask = vk::ImageAspectFlagBits::eColor,
+                                .mipLevel = 0,
+                                .baseArrayLayer = 0,
+                                .layerCount = 1 },
+            .imageOffset { .x = (int32_t)(outExtent.width / 4 - ProbeSize / 2),
+                           .y = (int32_t)(outExtent.height / 2 - ProbeSize / 2),
+                           .z = 0 },
+            .imageExtent { .width = ProbeSize, .height = ProbeSize, .depth = 1 },
+        };
+        cmdBuf.copyImageToBuffer(output.image.image, output.image.layout, debugBuf, region);
+        vk::MemoryBarrier toHost {
+            .srcAccessMask = vk::AccessFlagBits::eTransferWrite,
+            .dstAccessMask = vk::AccessFlagBits::eHostRead,
+        };
+        cmdBuf.pipelineBarrier(
+            vk::PipelineStageFlagBits::eTransfer,
+            vk::PipelineStageFlagBits::eHost,
+            {},
+            toHost,
+            {},
+            {}
+        );
+    }
+
     cmdBuf.writeTimestamp(vk::PipelineStageFlagBits::eBottomOfPipe, timestampPool, 1);
 
     cmdBuf.end();
@@ -827,6 +940,66 @@ void Renderer::render(VkContext& vkCtx, std::vector<Layer> const& layers) {
         Warn("Renderer: GPU work still pending after %d s", waitedS + 1);
     }
     vkCtx.dev.resetFences(fence);
+
+    if (probe) {
+        auto texelSize = [](vk::Format format) -> u32 {
+            switch (format) {
+            case vk::Format::eR16G16B16A16Sfloat:
+            case vk::Format::eR16G16B16A16Unorm:
+                return 8;
+            case vk::Format::eR32G32B32A32Sfloat:
+                return 16;
+            default:
+                return 4;
+            }
+        };
+        auto describe = [&](u8 const* bytes, u32 texel, char* out, size_t outSize) {
+            u64 sum[4] = {};
+            u64 nonzero = 0;
+            u32 count = ProbeSize * ProbeSize;
+            for (u32 i = 0; i < count; ++i) {
+                for (u32 c = 0; c < texel; ++c) {
+                    u8 v = bytes[i * texel + c];
+                    nonzero += v != 0;
+                    if (texel == 4) {
+                        sum[c] += v;
+                    }
+                }
+            }
+            snprintf(
+                out,
+                outSize,
+                "texel=%uB nonzeroBytes=%llu/%u mean=[%.1f %.1f %.1f %.1f]",
+                texel,
+                (unsigned long long)nonzero,
+                count * texel,
+                sum[0] / (double)count,
+                sum[1] / (double)count,
+                sum[2] / (double)count,
+                sum[3] / (double)count
+            );
+        };
+        char src[160], stage[160], out[160];
+        auto const* base = static_cast<u8 const*>(debugMap);
+        describe(base, texelSize(layers[0].format), src, sizeof(src));
+        describe(base + ProbeBytes, texelSize(stagingFormat), stage, sizeof(stage));
+        describe(base + ProbeBytes * 2, 4, out, sizeof(out));
+        Info(
+            "Debug pixels: layers=%zu srcFormat=%d %ux%u | source %s | composed %s | output(fmt "
+            "%d, mod 0x%llx, planes %u, layout %d) %s",
+            layers.size(),
+            (int)layers[0].format,
+            layers[0].extent.width,
+            layers[0].extent.height,
+            src,
+            stage,
+            (int)output.imageCI.format,
+            (unsigned long long)output.drm.modifier,
+            output.drm.planes,
+            (int)output.image.layout,
+            out
+        );
+    }
 }
 
 // Imports one of SteamVR's textures the first time its handle is seen, the
@@ -921,6 +1094,11 @@ void Renderer::destroy(VkContext const& ctx) {
         pipe.destroy(ctx);
     }
 
+    if (debugBuf) {
+        ctx.dev.unmapMemory(debugMem);
+        ctx.dev.destroy(debugBuf);
+        ctx.dev.free(debugMem);
+    }
     ctx.dev.destroy(fence);
     ctx.dev.destroy(descLayout);
     ctx.dev.destroy(sampler);

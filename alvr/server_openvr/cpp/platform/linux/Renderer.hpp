@@ -172,6 +172,16 @@ class Renderer {
     vk::PipelineLayout layerPipeLayout;
     vk::Pipeline layerPipe;
 
+    // ALVR_DEBUG_PIXELS=1: once a second, read back the centre of the left
+    // eye of SteamVR's texture, of the composed working image and of the
+    // encoder input, and log their byte averages (diagnoses black output).
+    bool debugPixels = false;
+    vk::Format stagingFormat = vk::Format::eUndefined;
+    u64 debugFrame = 0;
+    vk::Buffer debugBuf;
+    vk::DeviceMemory debugMem;
+    void* debugMap = nullptr;
+
     Image& importTexture(VkContext& vkCtx, Layer const& layer, LayerEye const& eye);
     void drawLayerEye(VkContext& vkCtx, Image& source, int eye, LayerEye const& rect, bool opaque);
 

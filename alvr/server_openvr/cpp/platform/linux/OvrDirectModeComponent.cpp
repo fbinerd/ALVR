@@ -6,6 +6,9 @@
 
 #include <cstdlib>
 #include <iostream>
+#include <map>
+#include <mutex>
+#include <string>
 #include <unistd.h>
 
 #include "OvrDirectModeComponent.h"
@@ -179,6 +182,32 @@ OvrDirectModeComponent::~OvrDirectModeComponent() {
     closeFenceFds(m_job.waits);
 }
 
+// Runtime diagnostic switch: true while ~/.config/alvr/<name> exists. Checked
+// at most twice a second per name, so it can be flipped during a session
+// without restarting SteamVR.
+static bool diagSwitch(char const* name) {
+    struct Entry {
+        std::chrono::steady_clock::time_point checked {};
+        bool on = false;
+    };
+    static std::mutex mutex;
+    static std::map<std::string, Entry> entries;
+    std::lock_guard<std::mutex> lock(mutex);
+    auto& entry = entries[name];
+    auto const now = std::chrono::steady_clock::now();
+    if (now - entry.checked >= std::chrono::milliseconds(500)) {
+        entry.checked = now;
+        char const* home = getenv("HOME");
+        std::string path = std::string(home ? home : "") + "/.config/alvr/" + name;
+        bool const on = access(path.c_str(), F_OK) == 0;
+        if (on != entry.on) {
+            Info("Diagnostic switch %s %s", name, on ? "on" : "off");
+        }
+        entry.on = on;
+    }
+    return entry.on;
+}
+
 void OvrDirectModeComponent::DrainPendingJob() {
     uint64_t dropped = 0;
     {
@@ -203,6 +232,7 @@ void OvrDirectModeComponent::MarkRead(uint64_t frame) {
 }
 
 void OvrDirectModeComponent::EncodeWorkerLoop() {
+    m_debugFrames = getenv("ALVR_DEBUG_FRAMES") != nullptr;
     while (true) {
         FrameJob job;
         {
@@ -218,9 +248,28 @@ void OvrDirectModeComponent::EncodeWorkerLoop() {
         auto const ageLimit = std::chrono::duration_cast<std::chrono::nanoseconds>(
             frameInterval() * JobAgeLimitFrames
         );
+        if (m_debugFrames) {
+            auto const now = std::chrono::steady_clock::now();
+            if (now - m_dbgLast >= std::chrono::seconds(2)) {
+                Info(
+                    "Frames/2s: queued %u replaced %u aged %u unfinished %u encoded %u | "
+                    "1 layer %u, 2+ layers %u, layers dropped %u",
+                    m_dbgQueued.exchange(0),
+                    m_dbgReplaced.exchange(0),
+                    m_dbgAged.exchange(0),
+                    m_dbgUnfinished.exchange(0),
+                    m_dbgEncoded.exchange(0),
+                    m_dbgOneLayer.exchange(0),
+                    m_dbgMultiLayer.exchange(0),
+                    m_dbgLayerMissing.exchange(0)
+                );
+                m_dbgLast = now;
+            }
+        }
         if (std::chrono::steady_clock::now() - job.enqueueTime > ageLimit) {
             closeFenceFds(job.waits);
             MarkRead(job.frame);
+            m_dbgAged++;
             continue;
         }
 
@@ -323,6 +372,7 @@ void OvrDirectModeComponent::EncodeWorkerLoop() {
             // while rather than freeze the stream.
             if (unfinished) {
                 if (++m_timelineConsecTimeouts < TimelineSkipLimitFrames) {
+                    m_dbgUnfinished++;
                     MarkRead(job.frame);
                     continue;
                 }
@@ -371,6 +421,7 @@ void OvrDirectModeComponent::EncodeWorkerLoop() {
                 MarkRead(frame);
             });
             MarkRead(frame);
+            m_dbgEncoded++;
         } catch (std::exception const& e) {
             // An exception escaping a thread's start function is
             // std::terminate, which takes vrserver with it. Same recovery as
@@ -589,6 +640,16 @@ void OvrDirectModeComponent::GetNextSwapTextureSetIndex(
         if (pIndices) {
             (*pIndices)[eye] = idx;
         }
+        if (diagSwitch("diag_swaplog")) {
+            Info(
+                "swaplog next eye %d handle %llx set %p pid %u -> index %u",
+                eye,
+                (unsigned long long)sharedTextureHandles[eye],
+                (void*)it->second.first,
+                it->second.first->pid,
+                idx
+            );
+        }
     }
     m_presentMutex.unlock();
 }
@@ -623,6 +684,22 @@ void OvrDirectModeComponent::SubmitLayer(const SubmitLayerPerEye_t (&perEye)[2])
             m_framePoseRotation = HmdQuaternion_Init(0.0, 0.0, 0.0, 0.0);
         }
     }
+    if (diagSwitch("diag_swaplog")) {
+        for (int eye = 0; eye < 2; ++eye) {
+            auto it = m_handleMap.find(perEye[eye].hTexture);
+            Info(
+                "swaplog submit layer %d eye %d handle %llx index %d bounds %.2f %.2f %.2f %.2f",
+                m_submitLayer,
+                eye,
+                (unsigned long long)perEye[eye].hTexture,
+                it == m_handleMap.end() ? -1 : (int)it->second.second,
+                perEye[eye].bounds.uMin,
+                perEye[eye].bounds.vMin,
+                perEye[eye].bounds.uMax,
+                perEye[eye].bounds.vMax
+            );
+        }
+    }
     if (m_submitLayer < MAX_LAYERS) {
         m_submitLayers[m_submitLayer][0] = perEye[0];
         m_submitLayers[m_submitLayer][1] = perEye[1];
@@ -636,6 +713,9 @@ void OvrDirectModeComponent::SubmitLayer(const SubmitLayerPerEye_t (&perEye)[2])
 
 /** Submits queued layers for display. */
 void OvrDirectModeComponent::Present(vr::SharedTextureHandle_t syncTexture) {
+    if (diagSwitch("diag_swaplog")) {
+        Info("swaplog present sync %llx layers %d", (unsigned long long)syncTexture, m_submitLayer);
+    }
     int const layerCount = std::min(m_submitLayer, MAX_LAYERS);
     m_submitLayer = 0;
     // Set below when this Present queues a frame (read by PostPresent).
@@ -736,7 +816,14 @@ void OvrDirectModeComponent::Present(vr::SharedTextureHandle_t syncTexture) {
     for (int i = 1; i < layerCount; ++i) {
         if (auto layer = SubmittedLayer(i)) {
             job.layers.push_back(*layer);
+        } else {
+            m_dbgLayerMissing++;
         }
+    }
+    if (job.layers.size() > 1) {
+        m_dbgMultiLayer++;
+    } else {
+        m_dbgOneLayer++;
     }
     job.targetTimestampNs = m_targetTimestampNs;
     job.renderOrientation = m_framePoseRotation;
@@ -790,9 +877,11 @@ void OvrDirectModeComponent::Present(vr::SharedTextureHandle_t syncTexture) {
         // never be waited on, so close them here.
         if (m_jobPending) {
             closeFenceFds(m_job.waits);
+            m_dbgReplaced++;
         }
         m_job = job;
         m_jobPending = true;
+        m_dbgQueued++;
     }
     {
         std::lock_guard<std::mutex> lock(m_readMutex);

@@ -192,6 +192,13 @@ private:
     // instead of taxing every frame.
     uint32_t m_gpuWaitConsecTimeouts = 0;
     uint32_t m_timelineConsecTimeouts = 0;
+    // ALVR_DEBUG_FRAMES=1: per-interval frame accounting, logged by the
+    // encode worker.
+    bool m_debugFrames = false;
+    std::atomic<uint32_t> m_dbgQueued { 0 }, m_dbgReplaced { 0 }, m_dbgAged { 0 },
+        m_dbgUnfinished { 0 }, m_dbgEncoded { 0 }, m_dbgOneLayer { 0 }, m_dbgMultiLayer { 0 },
+        m_dbgLayerMissing { 0 };
+    std::chrono::steady_clock::time_point m_dbgLast {};
     bool m_gpuWaitPollDisarmed = false;
 
     // Written by the event loop thread in SetViewParams, read by the worker.
