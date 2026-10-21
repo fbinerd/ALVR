@@ -75,6 +75,36 @@ private:
     }
 
 public:
+    // Environment variables that restrict which GPUs a Vulkan or OpenGL
+    // process sees or uses, as "NAME=value, ..." for those set in this
+    // process ("" if none). SteamVR and its driver inherit them from Steam,
+    // so they can defeat a GPU chosen in ALVR's settings; warnings about an
+    // unmet GPU choice include this list.
+    static std::string gpuOverrideEnvironment() {
+        static char const* const names[] = {
+            "VK_DRIVER_FILES",
+            "VK_ICD_FILENAMES",
+            "VK_ADD_DRIVER_FILES",
+            "VK_LOADER_DRIVERS_SELECT",
+            "VK_LOADER_DRIVERS_DISABLE",
+            "VK_LOADER_LAYERS_DISABLE",
+            "__VK_LAYER_NV_optimus",
+            "MESA_VK_DEVICE_SELECT",
+            "DRI_PRIME",
+            "__NV_PRIME_RENDER_OFFLOAD",
+            "__GLX_VENDOR_LIBRARY_NAME",
+            "__EGL_VENDOR_LIBRARY_FILENAMES",
+            "ALVR_VULKAN_DEVICE",
+        };
+        std::string list;
+        for (auto name : names) {
+            if (char const* value = std::getenv(name)) {
+                list += (list.empty() ? "" : ", ") + std::string(name) + "=" + value;
+            }
+        }
+        return list;
+    }
+
     // Finds the device a user-written selector names: its index in the
     // list, or part of its name (case-insensitive). Shared by the render-GPU
     // and encoder-GPU settings.
@@ -134,7 +164,14 @@ private:
                 Info("Using Vulkan device %zu (%s)", *index, source.label);
                 return devs[*index];
             }
-            Warn("%s \"%s\" matches no Vulkan device", source.label, source.selector);
+            std::string env = gpuOverrideEnvironment();
+            Warn(
+                "%s \"%s\" matches no Vulkan device, so it cannot be honoured; GPU-restricting "
+                "environment inherited from Steam/SteamVR: %s",
+                source.label,
+                source.selector,
+                env.empty() ? "none" : env.c_str()
+            );
         }
 
         for (auto type :
