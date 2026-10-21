@@ -15,6 +15,7 @@
 #include <iomanip>
 #include <iostream>
 #include <limits>
+#include <memory>
 
 const Settings* Settings_Instance() {
     static Settings settings = [] {
@@ -223,6 +224,9 @@ struct Options {
     unsigned iterations = 1;
     bool saveImages = false;
     bool fixedFlowIterations = false;
+    bool compareFlowIterations = false;
+    bool candidateFirst = false;
+    unsigned warmupSamples = 1;
     double maxPredictMs = 0;
     uint32_t maxLumaDimension = alvr::motion::NativeMotion::DefaultLumaDimension;
 };
@@ -231,7 +235,8 @@ Options parse(int argc, char** argv) {
         throw std::runtime_error(
             "Usage: image_test OUTPUT [--suite smoke|quality|stream] "
             "[--iterations N] [--save-images] [--max-predict-ms N] [--luma-max N] "
-            "[--fixed-flow-iterations]"
+            "[--fixed-flow-iterations | --compare-flow-iterations] "
+            "[--candidate-first] [--warmup-samples N]"
         );
     Options o;
     o.output = argv[1];
@@ -262,7 +267,18 @@ Options parse(int argc, char** argv) {
             o.maxLumaDimension = uint32_t(number);
         } else if (arg == "--fixed-flow-iterations")
             o.fixedFlowIterations = true;
-        else if (arg == "--save-images")
+        else if (arg == "--compare-flow-iterations")
+            o.compareFlowIterations = true;
+        else if (arg == "--candidate-first")
+            o.candidateFirst = true;
+        else if (arg == "--warmup-samples") {
+            std::string text = value();
+            size_t end;
+            auto number = std::stoul(text, &end);
+            if (end != text.size() || number < 1 || number > 119)
+                throw std::runtime_error("Warm-up samples must be an integer in [1,119]");
+            o.warmupSamples = unsigned(number);
+        } else if (arg == "--save-images")
             o.saveImages = true;
         else if (arg == "--max-predict-ms") {
             std::string text = value();
@@ -280,11 +296,18 @@ Options parse(int argc, char** argv) {
         o.iterations = 6;
     else if (o.suite == "stream") {
         o.size = { 2048, 2144 };
-        o.iterations = 12;
+        // Two retained predictions per sample must fit the same pixel-cache cap.
+        o.iterations = o.compareFlowIterations ? 10 : 12;
     } else
         throw std::runtime_error("Unknown suite: " + o.suite);
     if (requestedIterations)
         o.iterations = requestedIterations;
+    if (o.compareFlowIterations && o.fixedFlowIterations)
+        throw std::runtime_error("Choose paired comparison or fixed iterations, not both");
+    if (o.candidateFirst && !o.compareFlowIterations)
+        throw std::runtime_error("--candidate-first requires --compare-flow-iterations");
+    if (o.warmupSamples >= o.iterations && !(o.iterations == 1 && o.warmupSamples == 1))
+        throw std::runtime_error("Warm-up must leave at least one measured sample");
     // Reject reuse so an earlier result cannot be confused with this run.
     if (std::filesystem::exists(o.output / "summary.txt"))
         throw std::runtime_error(
@@ -296,6 +319,10 @@ Options parse(int argc, char** argv) {
 using Clock = std::chrono::steady_clock;
 double elapsed(Clock::time_point start) {
     return std::chrono::duration<double, std::milli>(Clock::now() - start).count();
+}
+int64_t unixNanoseconds() {
+    auto now = std::chrono::system_clock::now().time_since_epoch();
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(now).count();
 }
 double percentile(std::vector<double> values, double fraction) {
     if (values.empty())
@@ -367,7 +394,8 @@ void timestampRecovery(alvr::VkContext& ctx, std::ofstream& summary, bool allowE
             "Prediction did not recover after rejection"
         );
         require(releases == 1, "Recovered prediction must release input exactly once");
-        summary << "timestamp_recovery target=" << target << " passed=1\n";
+        summary << "timestamp_recovery target=" << target
+                << " passed=1 variant=" << (allowExactFlowExit ? "exact" : "fixed") << '\n';
         summary.flush();
     }
 }
@@ -379,17 +407,29 @@ bool runCase(
     std::ofstream& timings,
     std::ofstream& summary
 ) {
-    // Reference rendering, image scoring, CSV flushing and PPM I/O used to
-    // idle the GPU between predictions. Precompute/retain one case at a time
-    // and perform those CPU operations outside the measured GPU sequence.
-    struct Sample {
-        fixture::Pixels latest, expected, image;
-        unsigned realFrame = 0;
-        uint64_t target = 0;
-        double targetTime = 0, predictionMs = 0, captureMs = 0;
+    // Prepare once for both variants. No scoring, reference rendering or file
+    // writes between predictions; each variant owns independent image/history.
+    struct Prediction {
+        Pixels image;
+        double predictionMs = 0, captureMs = 0;
+        int64_t startUnixNs = 0;
+        unsigned position = 0;
         alvr::motion::NativeMotion::PredictionTiming stages;
     };
-    if (uint64_t(o.size.bytes()) * o.iterations * 3 > 1536ull * 1024 * 1024)
+    struct Sample {
+        Pixels latest, expected;
+        std::array<Prediction, 2> results;
+        unsigned realFrame = 0;
+        uint64_t target = 0;
+        double targetTime = 0;
+    };
+    struct Variant {
+        char const* name;
+        std::unique_ptr<Images> gpu;
+        std::unique_ptr<alvr::motion::NativeMotion> motion;
+    };
+    unsigned count = o.compareFlowIterations ? 2 : 1;
+    if (uint64_t(o.size.bytes()) * o.iterations * (2 + count) > 1536ull * 1024 * 1024)
         throw std::runtime_error("Fixture batch exceeds 1.5 GiB; reduce --iterations");
     std::vector<Sample> samples(o.iterations);
     for (unsigned sample = 0; sample < o.iterations; ++sample) {
@@ -401,117 +441,179 @@ bool runCase(
         record.latest = fixture::render(o.size, scene, double(record.realFrame));
         record.expected = fixture::render(o.size, scene, record.targetTime);
     }
-    Images gpu(ctx, o.size);
-    gpu.initialize();
-    alvr::motion::NativeMotion motion(
-        ctx,
-        { o.size.width(), o.size.height },
-        vk::Format::eR8G8B8A8Unorm,
-        o.maxLumaDimension,
-        !o.fixedFlowIterations
-    );
-    (void)prime(motion, gpu, scene);
+    std::vector<Variant> variants;
+    for (unsigned v = 0; v < count; ++v) {
+        bool exact = o.compareFlowIterations ? v == 1 : !o.fixedFlowIterations;
+        Variant variant { exact ? "exact" : "fixed", std::make_unique<Images>(ctx, o.size), {} };
+        variant.gpu->initialize();
+        variant.motion = std::make_unique<alvr::motion::NativeMotion>(
+            ctx,
+            vk::Extent2D { o.size.width(), o.size.height },
+            vk::Format::eR8G8B8A8Unorm,
+            o.maxLumaDimension,
+            exact
+        );
+        (void)prime(*variant.motion, *variant.gpu, scene);
+        variants.push_back(std::move(variant));
+    }
     for (unsigned sample = 0; sample < o.iterations; ++sample) {
         auto& record = samples[sample];
-        unsigned realFrame = record.realFrame;
-        if (sample) {
-            gpu.transfer(&record.latest);
-            require(
-                !motion.predict(gpu.image, gpu.view, gpu.layout, First + realFrame * Tick),
-                "Prediction on a real capture presentation"
-            );
+        // AB, BA, AB, BA. A repeat with --candidate-first reverses every pair.
+        unsigned first = count == 2 ? (sample + unsigned(o.candidateFirst)) % 2 : 0;
+        for (unsigned position = 0; position < count; ++position) {
+            unsigned v = (first + position) % count;
+            auto& gpu = *variants[v].gpu;
+            auto& motion = *variants[v].motion;
+            auto& result = record.results[v];
+            result.position = position;
+            if (sample) {
+                gpu.transfer(&record.latest);
+                require(
+                    !motion.predict(
+                        gpu.image, gpu.view, gpu.layout, First + record.realFrame * Tick
+                    ),
+                    "Prediction on a real capture presentation"
+                );
+                auto start = Clock::now();
+                motion.capture(gpu.image, gpu.layout, First + record.realFrame * Tick);
+                result.captureMs = elapsed(start);
+            }
+            unsigned releases = 0;
+            result.startUnixNs = unixNanoseconds();
             auto start = Clock::now();
-            motion.capture(gpu.image, gpu.layout, First + realFrame * Tick);
-            record.captureMs = elapsed(start);
+            bool predicted = motion.predict(gpu.image, gpu.view, gpu.layout, record.target, [&] {
+                ++releases;
+            });
+            result.predictionMs = elapsed(start);
+            require(predicted, "Missing alternating prediction");
+            result.stages = motion.lastPredictionTiming();
+            require(releases == 1, "Prediction must release input exactly once");
+            result.image = gpu.transfer(nullptr);
         }
-        unsigned releases = 0;
-        auto start = Clock::now();
-        bool predicted
-            = motion.predict(gpu.image, gpu.view, gpu.layout, record.target, [&] { ++releases; });
-        record.predictionMs = elapsed(start);
-        require(predicted, "Missing alternating prediction");
-        record.stages = motion.lastPredictionTiming();
-        require(releases == 1, "Prediction must release input exactly once");
-        record.image = gpu.transfer(nullptr);
     }
-    bool quality = true;
-    std::vector<double> predictionMs, captureMs, pairMs, flowMs, warpMs, opticalGpuMs, warpGpuMs;
-    for (unsigned sample = 0; sample < o.iterations; ++sample) {
-        auto const& record = samples[sample];
-        auto const& latest = record.latest;
-        auto const& image = record.image;
-        auto const& expected = record.expected;
-        auto const& stages = record.stages;
-        unsigned realFrame = record.realFrame;
-        double targetTime = record.targetTime;
-        double predictionDuration = record.predictionMs, captureDuration = record.captureMs;
-        bool sampleQuality = true;
-        for (unsigned eye = 0; eye < 2; ++eye) {
-            auto result = fixture::score(
-                o.size, scene, latest, image, expected, eye, double(realFrame), targetTime
-            );
-            sampleQuality &= result.improved();
-            require(result.validPixels, "Invalid alpha or color leaked between stereo eyes");
-            auto row = [&](char const* region, fixture::Error const& error) {
-                metrics << fixture::name(scene) << ',' << sample << ',' << eye << ',' << region
-                        << ',' << error.pixels << ',' << error.baselineMae() << ','
-                        << error.predictionMae() << ',' << result.improved() << ','
-                        << result.staticMismatches << '\n';
-            };
-            row("all", result.all);
-            row("changed", result.changed);
-            if (scene == Scene::Foreground)
-                row("revealed", result.revealed);
-        }
-        quality &= sampleQuality;
-        bool cold = sample == 0;
-        timings << fixture::name(scene) << ',' << sample << ',' << cold << ',' << predictionDuration
-                << ',' << captureDuration << ',' << predictionDuration + captureDuration << ','
-                << sampleQuality << ',' << stages.flowMs << ',' << stages.warpMs << ','
-                << stages.opticalGpuMs << ',' << stages.warpGpuMs << '\n';
-        metrics.flush();
-        timings.flush();
-        // First prediction is cold; do not hide it in a steady-state percentile.
-        if (!cold || o.iterations == 1) {
-            predictionMs.push_back(predictionDuration);
-            flowMs.push_back(stages.flowMs);
-            warpMs.push_back(stages.warpMs);
-            if (stages.opticalGpuMs >= 0)
-                opticalGpuMs.push_back(stages.opticalGpuMs);
-            if (stages.warpGpuMs >= 0)
-                warpGpuMs.push_back(stages.warpGpuMs);
-            if (!cold) {
-                captureMs.push_back(captureDuration);
-                pairMs.push_back(predictionDuration + captureDuration);
+    bool allPassed = true;
+    if (count == 2) {
+        uint64_t changedBytes = 0;
+        unsigned exactWins = 0;
+        std::vector<double> predictionDelta, fixedFirstDelta, exactFirstDelta;
+        for (unsigned i = 0; i < samples.size(); ++i) {
+            auto const& sample = samples[i];
+            auto const& a = sample.results[0].image;
+            auto const& b = sample.results[1].image;
+            require(a.size() == b.size(), "Paired output sizes differ");
+            for (size_t byte = 0; byte < a.size(); ++byte)
+                changedBytes += a[byte] != b[byte];
+            if (i >= o.warmupSamples || o.iterations == 1) {
+                double delta = sample.results[1].predictionMs - sample.results[0].predictionMs;
+                predictionDelta.push_back(delta);
+                exactWins += delta < 0;
+                (sample.results[0].position == 0 ? fixedFirstDelta : exactFirstDelta)
+                    .push_back(delta);
             }
         }
-        if (sample == 0 && o.saveImages) {
-            auto folder = o.output / fixture::name(scene);
-            std::filesystem::create_directories(folder);
-            writePpm(folder / "previous.ppm", fixture::render(o.size, scene, 0), o.size);
-            writePpm(folder / "latest.ppm", latest, o.size);
-            writePpm(folder / "expected.ppm", expected, o.size);
-            writePpm(folder / "predicted.ppm", image, o.size);
-        }
+        summary << "comparison_case=" << fixture::name(scene) << " samples=" << samples.size()
+                << " changed_rgba_bytes=" << changedBytes << " exact_match=" << (changedBytes == 0)
+                << " measured_pairs=" << predictionDelta.size() << " exact_wins=" << exactWins
+                << " exact_minus_fixed_p50_ms=" << percentile(predictionDelta, .5)
+                << " fixed_first_pairs=" << fixedFirstDelta.size()
+                << " fixed_first_delta_p50_ms=" << percentile(fixedFirstDelta, .5)
+                << " exact_first_pairs=" << exactFirstDelta.size()
+                << " exact_first_delta_p50_ms=" << percentile(exactFirstDelta, .5) << '\n';
+        allPassed &= changedBytes == 0;
     }
-    double worst = *std::max_element(predictionMs.begin(), predictionMs.end());
-    bool budget = !o.maxPredictMs || worst <= o.maxPredictMs;
-    summary << "case=" << fixture::name(scene) << " quality_pass=" << quality
-            << " budget_pass=" << budget << " steady_samples=" << predictionMs.size()
-            << " predict_p50_ms=" << percentile(predictionMs, .5)
-            << " predict_p95_ms=" << percentile(predictionMs, .95) << " predict_max_ms=" << worst
-            << " capture_p95_ms=" << percentile(captureMs, .95)
-            << " pair_p95_ms=" << percentile(pairMs, .95)
-            << " flow_wall_p95_ms=" << percentile(flowMs, .95)
-            << " warp_wall_p95_ms=" << percentile(warpMs, .95)
-            << " optical_gpu_p95_ms=" << (opticalGpuMs.empty() ? -1 : percentile(opticalGpuMs, .95))
-            << " warp_gpu_p95_ms=" << (warpGpuMs.empty() ? -1 : percentile(warpGpuMs, .95))
-            << " optical_gpu_samples=" << opticalGpuMs.size()
-            << " warp_gpu_samples=" << warpGpuMs.size() << '\n';
+    for (unsigned v = 0; v < count; ++v) {
+        bool quality = true;
+        std::vector<double> predictionMs, captureMs, pairMs, flowMs, warpMs, opticalGpuMs,
+            warpGpuMs;
+        for (unsigned sample = 0; sample < o.iterations; ++sample) {
+            auto const& record = samples[sample];
+            auto const& result = record.results[v];
+            auto const& stages = result.stages;
+            bool sampleQuality = true;
+            for (unsigned eye = 0; eye < 2; ++eye) {
+                auto score = fixture::score(
+                    o.size,
+                    scene,
+                    record.latest,
+                    result.image,
+                    record.expected,
+                    eye,
+                    double(record.realFrame),
+                    record.targetTime
+                );
+                sampleQuality &= score.improved();
+                require(score.validPixels, "Invalid alpha or color leaked between stereo eyes");
+                auto row = [&](char const* region, fixture::Error const& error) {
+                    metrics << fixture::name(scene) << ',' << sample << ',' << eye << ',' << region
+                            << ',' << error.pixels << ',' << error.baselineMae() << ','
+                            << error.predictionMae() << ',' << score.improved() << ','
+                            << score.staticMismatches << ',' << variants[v].name << '\n';
+                };
+                row("all", score.all);
+                row("changed", score.changed);
+                if (scene == Scene::Foreground)
+                    row("revealed", score.revealed);
+            }
+            quality &= sampleQuality;
+            bool cold = sample == 0;
+            bool warmup = sample < o.warmupSamples;
+            timings << fixture::name(scene) << ',' << sample << ',' << cold << ','
+                    << result.predictionMs << ',' << result.captureMs << ','
+                    << result.predictionMs + result.captureMs << ',' << sampleQuality << ','
+                    << stages.flowMs << ',' << stages.warpMs << ',' << stages.opticalGpuMs << ','
+                    << stages.warpGpuMs << ',' << variants[v].name << ',' << result.position << ','
+                    << result.startUnixNs << ',' << warmup << '\n';
+            // Warm-up still participates in image/release/equivalence gates.
+            // A one-sample smoke run has no steady sample and reports its cold one.
+            if (!warmup || o.iterations == 1) {
+                predictionMs.push_back(result.predictionMs);
+                flowMs.push_back(stages.flowMs);
+                warpMs.push_back(stages.warpMs);
+                if (stages.opticalGpuMs >= 0)
+                    opticalGpuMs.push_back(stages.opticalGpuMs);
+                if (stages.warpGpuMs >= 0)
+                    warpGpuMs.push_back(stages.warpGpuMs);
+                if (!cold) {
+                    captureMs.push_back(result.captureMs);
+                    pairMs.push_back(result.predictionMs + result.captureMs);
+                }
+            }
+            if (sample == 0 && o.saveImages) {
+                auto folder = o.output;
+                if (o.compareFlowIterations)
+                    folder /= variants[v].name;
+                folder /= fixture::name(scene);
+                std::filesystem::create_directories(folder);
+                writePpm(folder / "previous.ppm", fixture::render(o.size, scene, 0), o.size);
+                writePpm(folder / "latest.ppm", record.latest, o.size);
+                writePpm(folder / "expected.ppm", record.expected, o.size);
+                writePpm(folder / "predicted.ppm", result.image, o.size);
+            }
+        }
+        double worst = *std::max_element(predictionMs.begin(), predictionMs.end());
+        bool budget = !o.maxPredictMs || worst <= o.maxPredictMs;
+        summary << "case=" << fixture::name(scene) << " quality_pass=" << quality
+                << " budget_pass=" << budget << " steady_samples=" << predictionMs.size()
+                << " predict_p50_ms=" << percentile(predictionMs, .5)
+                << " predict_p95_ms=" << percentile(predictionMs, .95)
+                << " predict_max_ms=" << worst << " capture_p95_ms=" << percentile(captureMs, .95)
+                << " pair_p95_ms=" << percentile(pairMs, .95)
+                << " flow_wall_p95_ms=" << percentile(flowMs, .95)
+                << " warp_wall_p95_ms=" << percentile(warpMs, .95) << " optical_gpu_p95_ms="
+                << (opticalGpuMs.empty() ? -1 : percentile(opticalGpuMs, .95))
+                << " warp_gpu_p95_ms=" << (warpGpuMs.empty() ? -1 : percentile(warpGpuMs, .95))
+                << " optical_gpu_samples=" << opticalGpuMs.size()
+                << " warp_gpu_samples=" << warpGpuMs.size() << " variant=" << variants[v].name
+                << '\n';
+        std::cout << fixture::name(scene) << " variant=" << variants[v].name
+                  << " quality=" << quality << " budget=" << budget
+                  << " predict_p95_ms=" << percentile(predictionMs, .95) << '\n';
+        allPassed &= quality && budget;
+    }
+    metrics.flush();
+    timings.flush();
     summary.flush();
-    std::cout << fixture::name(scene) << " quality=" << quality << " budget=" << budget
-              << " predict_p95_ms=" << percentile(predictionMs, .95) << '\n';
-    return quality && budget;
+    return allPassed;
 }
 }
 int main(int argc, char** argv) {
@@ -525,16 +627,25 @@ int main(int argc, char** argv) {
                 << " height=" << o.size.height << " iterations=" << o.iterations
                 << " max_predict_ms=" << o.maxPredictMs
                 << " luma_max_dimension=" << o.maxLumaDimension
-                << " fixed_flow_iterations=" << o.fixedFlowIterations << '\n';
+                << " fixed_flow_iterations=" << o.fixedFlowIterations
+                << " compare_flow_iterations=" << o.compareFlowIterations
+                << " candidate_first=" << o.candidateFirst << " warmup_samples=" << o.warmupSamples
+                << '\n';
         summary << "timing=CPU_wall_including_GPU_completion_excluding_upload_readback_encoder\n"
-                << "first_sample=cold_excluded_from_steady_unless_only_sample\n"
+                << "warmup=prefix_excluded_from_timing_but_included_in_quality\n"
+                << "budget=maximum_measured_prediction_time_not_percentile\n"
+                << "paired_order="
+                << (o.compareFlowIterations ? "AB_BA_alternating_independent_histories"
+                                            : "single_variant")
+                << '\n'
                 << "sequence=unpaced_GPU_burst_references_before_scoring_after\n"
                 << "device_timing=optical_queue_including_pack_copy_and_render_warp_separately\n";
         summary.flush();
         metrics << "case,sample,eye,region,pixels,repeated_mae,predicted_mae,quality_pass,"
-                   "static_pixel_mismatches\n";
+                   "static_pixel_mismatches,variant\n";
         timings << "case,sample,cold,predict_ms,capture_ms,pair_ms,quality_pass,flow_wall_ms,"
-                   "warp_wall_ms,optical_gpu_ms,warp_gpu_ms\n";
+                   "warp_wall_ms,optical_gpu_ms,warp_gpu_ms,variant,pair_position,start_unix_ns,"
+                   "warmup\n";
         alvr::VkContext ctx(std::vector<uint8_t> {});
         if (!ctx.meta.opticalFlowEnabled || ctx.meta.vendor != alvr::Vendor::Nvidia)
             throw std::runtime_error(
@@ -549,13 +660,19 @@ int main(int argc, char** argv) {
                        Scene::ColorFlash };
         for (auto scene : scenes)
             passed &= runCase(ctx, o, scene, metrics, timings, summary);
-        if (o.suite != "smoke")
-            timestampRecovery(ctx, summary, !o.fixedFlowIterations);
+        if (o.suite != "smoke") {
+            timestampRecovery(
+                ctx, summary, o.compareFlowIterations ? false : !o.fixedFlowIterations
+            );
+            if (o.compareFlowIterations)
+                timestampRecovery(ctx, summary, true);
+        }
         ctx.destroy();
         summary << "passed=" << passed << '\n';
         if (!summary || !metrics || !timings)
             throw std::runtime_error("Result write failed");
-        std::cout << (passed ? "PASS\n" : "FAIL (quality or requested budget gate)\n");
+        std::cout
+            << (passed ? "PASS\n" : "FAIL (quality, exact comparison or requested budget gate)\n");
         return passed ? 0 : 1;
     } catch (std::exception const& error) {
         std::cerr << error.what() << '\n';

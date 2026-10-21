@@ -233,6 +233,60 @@ driver texture synchronization, real frame cadence, pose accuracy, image
 quality or headset latency. A matching-source Android client must be prepared
 before testing the ALVR client path; Air Link must never open that client app.
 
+### Paired exact-exit comparison
+
+Separate processes showed large GPU-clock variation even in the unchanged
+optical-flow stage. Use `--compare-flow-iterations` to run the fixed-iteration
+control and exact-exit candidate in one process, on the same references and
+timestamps. Each owns independent images, history and optical-flow sessions.
+The order alternates fixed/exact, exact/fixed per sample. `--candidate-first`
+reverses every pair for a second run. GPU commands remain synchronous; this
+mode does not measure concurrent execution or isolate other desktop GPU work.
+
+`--warmup-samples N` excludes a prefix from timing summaries (default 1),
+while retaining its image, input-release and exact-output checks. At least
+one measured sample must remain; a one-sample smoke run reports its cold
+sample. The paired stream default is ten samples instead of twelve so that
+two predictions plus the shared references fit the existing 1.5 GiB pixel
+cache cap. Other CPU/GPU allocations are additional. All ten scenes and the
+four timestamp-recovery cases run for each variant. A difference in any RGBA
+byte in any sample fails the comparison, even if both quality gates pass.
+
+Metrics and timings append a `variant` column (`fixed` or `exact`). Timings
+also append `pair_position`, `start_unix_ns` (prediction start for telemetry
+correlation) and `warmup`. CSV rows are grouped by variant, so use sample and
+position to reconstruct execution order. `comparison_case` summary lines
+report exact-byte agreement and paired candidate-minus-control time deltas:
+negative is faster for exact exit. Order-specific counts/medians expose order
+bias; an empty group has count zero and its reported median is not usable.
+Saved PPMs are placed in `fixed/<scene>/` and `exact/<scene>/`.
+
+The optional budget still gates the **maximum** measured prediction time,
+not just its percentile. With the small sample counts used so far, p95 and
+maximum coincide. Do not relax the deadline when switching protocols or
+claim game/stream readiness from a paired throughput pass. Two resident
+histories and alternating variants may affect cache residency and clocks;
+paired timing reduces long gaps but does not prove stable device frequency.
+
+After the user-confirmed Luna handoff, run these in fresh result directories:
+
+```bash
+bash tests/run_linux_native_motion.sh /path/to/checker /path/to/paired-quality \
+  --suite quality --compare-flow-iterations --warmup-samples 2 --luma-max 512 --save-images
+# Require 10/10 quality, exact agreement for every sample and 4/4 recoveries
+# for each variant before full size. Then run two opposite starting orders:
+bash tests/run_linux_native_motion.sh /path/to/checker /path/to/paired-stream-ab \
+  --suite stream --compare-flow-iterations --warmup-samples 2 --luma-max 512 \
+  --max-predict-ms 13.888889 --save-images
+bash tests/run_linux_native_motion.sh /path/to/checker /path/to/paired-stream-ba \
+  --suite stream --compare-flow-iterations --warmup-samples 2 --luma-max 512 \
+  --max-predict-ms 13.888889 --save-images --candidate-first
+```
+
+A timing-only failure permits the opposite-order comparison. Stop on any
+quality, release, recovery or equality failure. Keep logs and telemetry for
+all runs. No ALVR, SteamVR or Quest process is involved in this protocol.
+
 ## Verification record
 
 **Fact:** the two shaders compile for Vulkan 1.2. The backend, native-motion
