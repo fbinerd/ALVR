@@ -367,7 +367,7 @@ bool runCase(
     );
     auto latest = prime(motion, gpu, scene);
     bool quality = true;
-    std::vector<double> predictionMs, captureMs, pairMs;
+    std::vector<double> predictionMs, captureMs, pairMs, flowMs, warpMs;
     for (unsigned sample = 0; sample < o.iterations; ++sample) {
         unsigned realFrame = 2 + sample * 2;
         double captureDuration = 0;
@@ -393,6 +393,7 @@ bool runCase(
             = motion.predict(gpu.image, gpu.view, gpu.layout, target, [&] { ++releases; });
         double predictionDuration = elapsed(start);
         require(predicted, "Missing alternating prediction");
+        auto stages = motion.lastPredictionTiming();
         require(releases == 1, "Prediction must release input exactly once");
         auto image = gpu.transfer(nullptr);
         bool sampleQuality = true;
@@ -417,12 +418,14 @@ bool runCase(
         bool cold = sample == 0;
         timings << fixture::name(scene) << ',' << sample << ',' << cold << ',' << predictionDuration
                 << ',' << captureDuration << ',' << predictionDuration + captureDuration << ','
-                << sampleQuality << '\n';
+                << sampleQuality << ',' << stages.flowMs << ',' << stages.warpMs << '\n';
         metrics.flush();
         timings.flush();
         // First prediction is cold; do not hide it in a steady-state percentile.
         if (!cold || o.iterations == 1) {
             predictionMs.push_back(predictionDuration);
+            flowMs.push_back(stages.flowMs);
+            warpMs.push_back(stages.warpMs);
             if (!cold) {
                 captureMs.push_back(captureDuration);
                 pairMs.push_back(predictionDuration + captureDuration);
@@ -444,7 +447,9 @@ bool runCase(
             << " predict_p50_ms=" << percentile(predictionMs, .5)
             << " predict_p95_ms=" << percentile(predictionMs, .95) << " predict_max_ms=" << worst
             << " capture_p95_ms=" << percentile(captureMs, .95)
-            << " pair_p95_ms=" << percentile(pairMs, .95) << '\n';
+            << " pair_p95_ms=" << percentile(pairMs, .95)
+            << " flow_wall_p95_ms=" << percentile(flowMs, .95)
+            << " warp_wall_p95_ms=" << percentile(warpMs, .95) << '\n';
     summary.flush();
     std::cout << fixture::name(scene) << " quality=" << quality << " budget=" << budget
               << " predict_p95_ms=" << percentile(predictionMs, .95) << '\n';
@@ -466,7 +471,8 @@ int main(int argc, char** argv) {
         summary.flush();
         metrics << "case,sample,eye,region,pixels,repeated_mae,predicted_mae,quality_pass,"
                    "static_pixel_mismatches\n";
-        timings << "case,sample,cold,predict_ms,capture_ms,pair_ms,quality_pass\n";
+        timings << "case,sample,cold,predict_ms,capture_ms,pair_ms,quality_pass,flow_wall_ms,"
+                   "warp_wall_ms\n";
         alvr::VkContext ctx(std::vector<uint8_t> {});
         if (!ctx.meta.opticalFlowEnabled || ctx.meta.vendor != alvr::Vendor::Nvidia)
             throw std::runtime_error(

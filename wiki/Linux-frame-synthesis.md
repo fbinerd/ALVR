@@ -139,6 +139,10 @@ The first sample is marked cold and excluded from steady percentiles when
 more samples exist. Warm capture timing and capture+prediction pair timing
 are also recorded. These are not end-to-end frame latency or paced 72 Hz
 measurements. The fixture runs unpaced; desktop GPU load can affect results.
+The predictor also reports separate flow-estimation and warp-submission CPU
+wall durations (both include their completion waits). These are not Vulkan
+timestamp queries and can include CPU scheduling or other queued GPU work;
+their percentile maxima need not occur in the same sample.
 
 Commit before the final check build. The builder records source revision,
 tracked dirtiness and binary/shader hashes. The runner refuses dirty build

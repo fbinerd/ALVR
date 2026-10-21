@@ -13,6 +13,10 @@ class NativeMotion {
     std::unique_ptr<State> state;
 
 public:
+    // CPU wall time including GPU completion, not device timestamp queries.
+    struct PredictionTiming {
+        double flowMs = 0, warpMs = 0;
+    };
     NativeMotion(VkContext&, vk::Extent2D, vk::Format);
     ~NativeMotion();
     NativeMotion(const NativeMotion&) = delete;
@@ -35,6 +39,9 @@ public:
     // Retains an internally owned copy of a real frame on capture presentations.
     // Output's layout is restored; imported SteamVR images are never retained.
     void capture(vk::Image output, vk::ImageLayout, uint64_t timestamp);
+
+    // Valid after a successful prediction. No queue/device operation.
+    PredictionTiming lastPredictionTiming() const;
 };
 
 }

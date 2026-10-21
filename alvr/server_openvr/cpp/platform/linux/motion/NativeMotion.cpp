@@ -47,6 +47,7 @@ struct NativeMotion::State {
     uint64_t presentations = 0, predictions = 0, captures = 0, rejected = 0;
     unsigned retained = 0, latest = 0;
     bool captureThisFrame = true, flowDirty = false, idle = true;
+    PredictionTiming timing;
 
     State(VkContext& c, vk::Extent2D size, vk::Format f)
         : ctx(c)
@@ -461,6 +462,7 @@ bool NativeMotion::predict(
         releaseInput();
     auto start = std::chrono::steady_clock::now();
     s.estimate();
+    auto flowEnd = std::chrono::steady_clock::now();
     s.begin();
     s.barrier(output, layout, vk::ImageLayout::eGeneral);
     WarpPush push {
@@ -482,6 +484,11 @@ bool NativeMotion::predict(
     );
     s.barrier(output, vk::ImageLayout::eGeneral, layout);
     s.submit();
+    auto warpEnd = std::chrono::steady_clock::now();
+    s.timing = {
+        std::chrono::duration<double, std::milli>(flowEnd - start).count(),
+        std::chrono::duration<double, std::milli>(warpEnd - flowEnd).count(),
+    };
     if (++s.predictions == 1 || s.predictions % 360 == 0) {
         auto elapsed
             = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start)
@@ -497,6 +504,8 @@ bool NativeMotion::predict(
     }
     return true;
 }
+
+NativeMotion::PredictionTiming NativeMotion::lastPredictionTiming() const { return state->timing; }
 
 void NativeMotion::capture(vk::Image output, vk::ImageLayout layout, uint64_t timestamp) {
     auto& s = *state;
