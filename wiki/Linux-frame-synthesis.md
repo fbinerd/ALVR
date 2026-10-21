@@ -70,6 +70,12 @@ flow solves; all workgroup barriers precede any pixel return. This is an
 untested candidate for the full-size slow-motion regression under capped luma.
 It can still amplify noise, misclassify mixed/ambiguous motion, or overshoot
 changing edges; GPU quality/cost checks are required before live use.
+If the fit rejects motion and all 16 samples have the same nonzero RGB change,
+pixels matching that change keep the exact latest color. This protects a
+stationary texture during a uniform color flash from false coarse-flow warp;
+pixels with a different change still use spatial inversion. The uniformity
+threshold is 1.25/255 per channel and is an unvalidated heuristic for mixed
+color and geometric motion.
 
 Two retained real frames are required before predicting. A predicted frame
 may extend at most 0.55 of the measured real-frame interval beyond the latest
