@@ -32,8 +32,6 @@
 #include "alvr_server/Logger.h"
 #include "alvr_server/Settings.h"
 #include "alvr_server/bindings.h"
-#include "alvr_server/Settings.h"
-#include "alvr_server/bindings.h"
 
 extern "C" {
 #include <libavutil/log.h>
@@ -66,51 +64,6 @@ public:
 
 private:
     vk::Queue queue;
-
-public:
-    static std::optional<usize>
-    findPhysicalDevice(std::vector<vk::PhysicalDevice> const& devs, std::string_view selector) {
-        if (selector.empty()) return std::nullopt;
-        std::string wanted(selector);
-        std::transform(wanted.begin(),wanted.end(),wanted.begin(),[](unsigned char c){return std::tolower(c);});
-        for (usize i=0;i<devs.size();++i) {
-            std::string name=devs[i].getProperties().deviceName.data();
-            std::transform(name.begin(),name.end(),name.begin(),[](unsigned char c){return std::tolower(c);});
-            if (wanted==std::to_string(i) || name.find(wanted)!=std::string::npos) return i;
-        }
-        return std::nullopt;
-    }
-
-private:
-    static vk::PhysicalDevice selectPhysicalDevice(std::vector<vk::PhysicalDevice> const& devs) {
-        if (devs.empty()) throw std::runtime_error("No Vulkan device found");
-        for (usize i=0;i<devs.size();++i) {
-            auto props=devs[i].getProperties();
-            Info("Vulkan device %zu: %s (%s)",i,props.deviceName.data(),vk::to_string(props.deviceType).c_str());
-        }
-        Settings const* settings=Settings_Instance();
-        struct Source {char const* label;char const* selector;};
-        Source const sources[]={
-            {"ALVR_VULKAN_DEVICE",std::getenv("ALVR_VULKAN_DEVICE")},
-            {"Render GPU setting",settings?settings->m_renderGpu:nullptr},
-        };
-        for (auto const& source:sources) {
-            if (!source.selector || !source.selector[0]) continue;
-            if (auto index=findPhysicalDevice(devs,source.selector)) {
-                Info("Using Vulkan device %zu (%s)",*index,source.label);
-                return devs[*index];
-            }
-            Warn("%s \"%s\" matches no Vulkan device",source.label,source.selector);
-        }
-        for (auto type:{vk::PhysicalDeviceType::eDiscreteGpu,vk::PhysicalDeviceType::eIntegratedGpu})
-            for (usize i=0;i<devs.size();++i)
-                if (devs[i].getProperties().deviceType==type) {
-                    Info("Using Vulkan device %zu (automatic)",i);return devs[i];
-                }
-        return devs[0];
-    }
-<<<<<<< HEAD
-=======
     VkDebugUtilsMessengerEXT messenger = VK_NULL_HANDLE;
 
     static VkBool32
@@ -237,7 +190,6 @@ private:
         }
         return devs[0];
     }
->>>>>>> f8fd23df (feat(linux): let the user choose render GPU, encoder GPU and encoder technology)
 
     void sharedInit() {
         auto devProps = physDev.getProperties2();
