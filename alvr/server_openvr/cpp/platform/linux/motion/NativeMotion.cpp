@@ -50,12 +50,20 @@ struct NativeMotion::State {
     uint64_t presentations = 0, predictions = 0, captures = 0, rejected = 0;
     unsigned retained = 0, latest = 0;
     bool captureThisFrame = true, flowDirty = false, idle = true;
+    bool allowExactFlowExit;
     PredictionTiming timing;
 
-    State(VkContext& c, vk::Extent2D size, vk::Format f, uint32_t maxLumaDimension)
+    State(
+        VkContext& c,
+        vk::Extent2D size,
+        vk::Format f,
+        uint32_t maxLumaDimension,
+        bool exactFlowExit
+    )
         : ctx(c)
         , extent(size)
-        , format(f) {
+        , format(f)
+        , allowExactFlowExit(exactFlowExit) {
         lumaExtent = vk::Extent2D { (size.width / 4) & ~3u, (size.height / 2) & ~3u };
         if (maxLumaDimension && (maxLumaDimension < 64 || maxLumaDimension % 4))
             throw std::runtime_error(
@@ -180,7 +188,8 @@ struct NativeMotion::State {
         vk::DescriptorSetLayout& descriptors,
         vk::PipelineLayout& layout,
         vk::ShaderModule& shader,
-        vk::Pipeline& pipeline
+        vk::Pipeline& pipeline,
+        const vk::SpecializationInfo* specialization = nullptr
     ) {
         std::vector<vk::DescriptorSetLayoutBinding> entries;
         for (unsigned i = 0; i < bindings; ++i) {
@@ -210,7 +219,10 @@ struct NativeMotion::State {
             {},
             vk::ComputePipelineCreateInfo {
                 .stage
-                = { .stage = vk::ShaderStageFlagBits::eCompute, .module = shader, .pName = "main" },
+                = { .stage = vk::ShaderStageFlagBits::eCompute,
+                    .module = shader,
+                    .pName = "main",
+                    .pSpecializationInfo = specialization },
                 .layout = layout,
             }
         );
@@ -291,6 +303,14 @@ struct NativeMotion::State {
             lumaShader,
             lumaPipeline
         );
+        uint32_t exactFlowExit = allowExactFlowExit ? VK_TRUE : VK_FALSE;
+        vk::SpecializationMapEntry exitEntry { 0, 0, sizeof(exactFlowExit) };
+        vk::SpecializationInfo exitSpecialization {
+            .mapEntryCount = 1,
+            .pMapEntries = &exitEntry,
+            .dataSize = sizeof(exactFlowExit),
+            .pData = &exactFlowExit,
+        };
         makePipeline(
             shader::warp,
             sizeof(shader::warp),
@@ -298,7 +318,8 @@ struct NativeMotion::State {
             warpDescriptors,
             warpLayout,
             warpShader,
-            warpPipeline
+            warpPipeline,
+            &exitSpecialization
         );
 
         Context native {};
@@ -327,11 +348,12 @@ struct NativeMotion::State {
             );
         Info(
             "Native motion controlled mode: alternate real/predicted, %ux%u per eye, luma %ux%u; "
-            "experimental pose association",
+            "exact flow exit %s; experimental pose association",
             extent.width / 2,
             extent.height,
             lumaExtent.width,
-            lumaExtent.height
+            lumaExtent.height,
+            allowExactFlowExit ? "enabled" : "disabled"
         );
     }
 
@@ -450,9 +472,13 @@ struct NativeMotion::State {
 };
 
 NativeMotion::NativeMotion(
-    VkContext& ctx, vk::Extent2D extent, vk::Format format, uint32_t maxLumaDimension
+    VkContext& ctx,
+    vk::Extent2D extent,
+    vk::Format format,
+    uint32_t maxLumaDimension,
+    bool allowExactFlowExit
 )
-    : state(std::make_unique<State>(ctx, extent, format, maxLumaDimension)) {
+    : state(std::make_unique<State>(ctx, extent, format, maxLumaDimension, allowExactFlowExit)) {
     state->initialize();
 }
 NativeMotion::~NativeMotion() = default;

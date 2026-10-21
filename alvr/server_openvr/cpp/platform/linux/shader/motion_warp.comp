@@ -1,6 +1,8 @@
 #version 450
 // Inverse warp with bidirectional consistency, derived from our CPU reference.
 layout(local_size_x=8,local_size_y=8) in;
+// The checker can specialize this off to retain the five-iteration control.
+layout(constant_id=0) const bool exactFlowExit=true;
 layout(binding=0) uniform sampler2D previousImage;
 layout(binding=1) uniform sampler2D latestImage;
 layout(binding=2) uniform isampler2D forwardLeft;
@@ -112,12 +114,23 @@ bool inside(vec2 q) {
 }
 bool sourceAt(vec2 target,float distance,bool reverse,bool right,out vec2 q) {
     q=target;
+    vec2 v=vec2(0);
+    bool settled=false;
     for (int i=0;i<5;i++) {
         if (!inside(q)) return false;
-        q=target-distance*flowAt(reverse,right,q);
+        v=flowAt(reverse,right,q);
+        vec2 next=target-distance*v;
+        // Exact equality is a fixed point: repeating the same texture samples
+        // and arithmetic cannot move q again. No tolerance changes the solve.
+        if (exactFlowExit && all(equal(next,q))) {
+            settled=true;
+            break;
+        }
+        q=next;
     }
     if (!inside(q)) return false;
-    vec2 v=flowAt(reverse,right,q), other=q+v;
+    if (!settled) v=flowAt(reverse,right,q);
+    vec2 other=q+v;
     // Thresholds are in full-resolution pixels at either estimator resolution.
     return inside(other) && length(q+distance*v-target)<=1.0
         && length(v+flowAt(!reverse,right,other))<=2.0;

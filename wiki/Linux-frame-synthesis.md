@@ -56,6 +56,21 @@ the displacement across that tile. Motion boundaries, invalid corners and
 partial/seam tiles retain per-pixel inversion. This reduces repeated flow
 sampling for smooth motion; performance and boundary quality need GPU tests.
 
+Each inverse solve uses at most five updates. It now stops when the next
+source coordinate equals the current coordinate exactly, reusing the flow
+already sampled there for the final consistency check. Repeating deterministic
+samples at that coordinate would give the same update. There is no convergence
+tolerance and no change to the residual or bidirectional thresholds. GPU
+validation is pending; divergent lanes and pipeline compilation may affect
+the cost, so this is not a measured speedup.
+
+The offscreen checker's `--fixed-flow-iterations` flag disables that exit via
+a shader specialization constant. It keeps five updates and the final flow
+sample, providing a control in the same executable. Recovery checks use the
+selected variant too. Compare both variants at the same `--luma-max 512`,
+require unchanged image-quality gates and exact stationary output, and retain
+device/wall timings before attributing any speedup to this change.
+
 Before resampling, the shader compares previous/latest color at the current
 texel and at the actual proposed source. Identity at both sites preserves the
 exact current texel. Subpixel prediction no longer depends on a one-pixel

@@ -222,6 +222,7 @@ struct Options {
     Size size;
     unsigned iterations = 1;
     bool saveImages = false;
+    bool fixedFlowIterations = false;
     double maxPredictMs = 0;
     uint32_t maxLumaDimension = alvr::motion::NativeMotion::DefaultLumaDimension;
 };
@@ -229,7 +230,8 @@ Options parse(int argc, char** argv) {
     if (argc < 2)
         throw std::runtime_error(
             "Usage: image_test OUTPUT [--suite smoke|quality|stream] "
-            "[--iterations N] [--save-images] [--max-predict-ms N] [--luma-max N]"
+            "[--iterations N] [--save-images] [--max-predict-ms N] [--luma-max N] "
+            "[--fixed-flow-iterations]"
         );
     Options o;
     o.output = argv[1];
@@ -258,7 +260,9 @@ Options parse(int argc, char** argv) {
                 throw std::runtime_error("Luma cap must be zero or a multiple of four in [64,2048]"
                 );
             o.maxLumaDimension = uint32_t(number);
-        } else if (arg == "--save-images")
+        } else if (arg == "--fixed-flow-iterations")
+            o.fixedFlowIterations = true;
+        else if (arg == "--save-images")
             o.saveImages = true;
         else if (arg == "--max-predict-ms") {
             std::string text = value();
@@ -323,7 +327,7 @@ Pixels prime(alvr::motion::NativeMotion& motion, Images& gpu, Scene scene) {
     }
     return latest;
 }
-void timestampRecovery(alvr::VkContext& ctx, std::ofstream& summary) {
+void timestampRecovery(alvr::VkContext& ctx, std::ofstream& summary, bool allowExactFlowExit) {
     // Fixed small images: these are state/lifetime checks, not budget samples.
     Images gpu(ctx, { 512, 384 });
     gpu.initialize();
@@ -332,7 +336,11 @@ void timestampRecovery(alvr::VkContext& ctx, std::ofstream& summary) {
     };
     for (auto target : targets) {
         alvr::motion::NativeMotion motion(
-            ctx, { gpu.size.width(), gpu.size.height }, vk::Format::eR8G8B8A8Unorm
+            ctx,
+            { gpu.size.width(), gpu.size.height },
+            vk::Format::eR8G8B8A8Unorm,
+            alvr::motion::NativeMotion::DefaultLumaDimension,
+            allowExactFlowExit
         );
         auto latest = prime(motion, gpu, Scene::Translation);
         unsigned releases = 0;
@@ -396,7 +404,11 @@ bool runCase(
     Images gpu(ctx, o.size);
     gpu.initialize();
     alvr::motion::NativeMotion motion(
-        ctx, { o.size.width(), o.size.height }, vk::Format::eR8G8B8A8Unorm, o.maxLumaDimension
+        ctx,
+        { o.size.width(), o.size.height },
+        vk::Format::eR8G8B8A8Unorm,
+        o.maxLumaDimension,
+        !o.fixedFlowIterations
     );
     (void)prime(motion, gpu, scene);
     for (unsigned sample = 0; sample < o.iterations; ++sample) {
@@ -512,7 +524,8 @@ int main(int argc, char** argv) {
         summary << std::setprecision(8) << "suite=" << o.suite << " eye_width=" << o.size.eyeWidth
                 << " height=" << o.size.height << " iterations=" << o.iterations
                 << " max_predict_ms=" << o.maxPredictMs
-                << " luma_max_dimension=" << o.maxLumaDimension << '\n';
+                << " luma_max_dimension=" << o.maxLumaDimension
+                << " fixed_flow_iterations=" << o.fixedFlowIterations << '\n';
         summary << "timing=CPU_wall_including_GPU_completion_excluding_upload_readback_encoder\n"
                 << "first_sample=cold_excluded_from_steady_unless_only_sample\n"
                 << "sequence=unpaced_GPU_burst_references_before_scoring_after\n"
@@ -537,7 +550,7 @@ int main(int argc, char** argv) {
         for (auto scene : scenes)
             passed &= runCase(ctx, o, scene, metrics, timings, summary);
         if (o.suite != "smoke")
-            timestampRecovery(ctx, summary);
+            timestampRecovery(ctx, summary, !o.fixedFlowIterations);
         ctx.destroy();
         summary << "passed=" << passed << '\n';
         if (!summary || !metrics || !timings)
