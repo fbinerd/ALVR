@@ -1,359 +1,357 @@
-# Linux frame synthesis status
+# Linux frame synthesis (native motion)
 
-## Current path
+Experimental frame synthesis for the ALVR Linux streamer: when the VR
+application misses a display slot, the driver synthesizes the missing picture
+from the two newest real pictures and streams it, so the headset keeps
+receiving the full refresh rate. It plays the role SteamVR Motion Smoothing
+plays on Windows; SteamVR's own Motion Smoothing is not available on Linux
+(see [Why not SteamVR's Motion Smoothing](#why-not-steamvrs-motion-smoothing)).
 
-Linux ALVR receives SteamVR's composed eye images in the direct-mode driver,
-composites layers in `platform/linux/Renderer.cpp`, and encodes the resulting
-Vulkan image from `Encoder.hpp`. A frame is submitted to the encoder once per
-driver presentation. Reprojection metadata and frame timestamps are carried
-by the driver. The default path submits only real composed frames.
+Branch: `linux-frame-synthesis` (formerly `airlink-gpu-encoder-selection`).
+Status (2026-10-22): works end to end and validated on a Quest 2 in four
+headset sessions; mode 7 is the recommended mode. Off by default.
 
-## Optional optical-flow device setup
+## Contents
 
-`VK_NV_optical_flow` setup is available behind the environment variable
-`ALVR_NATIVE_MOTION=1`. It is off by default. When requested, `VkContext`
-checks the selected render device for `VK_NV_optical_flow`, its required
-format-feature and synchronization2 extensions, the optical-flow feature,
-and a queue family supporting optical flow and transfers. It enables the
-features and creates/gets a queue only if every check succeeds. Otherwise it
-logs a warning and starts the existing path without optical flow. The device
-must also support extended storage-image formats and storage writes without
-format, used for R8 luma and the existing RGBA/BGRA encoder input.
+- [Quick start](#quick-start)
+- [Modes](#modes)
+- [How it works](#how-it-works)
+- [Comparison with ASW and SSW](#comparison-with-asw-and-ssw)
+- [Results](#results)
+- [Depth (hDepthTexture) evaluation](#depth-hdepthtexture-evaluation)
+- [Limitations and known issues](#limitations-and-known-issues)
+- [Bugs found and fixed along the way](#bugs-found-and-fixed-along-the-way)
+- [Why not SteamVR's Motion Smoothing](#why-not-steamvrs-motion-smoothing)
+- [Test kit](#test-kit)
+- [Offline checker](#offline-checker)
+- [Next steps](#next-steps)
 
-This uses the Vulkan GPU selected as the **render GPU**. SteamVR's imported
-textures must be on that same GPU. Choosing another encoder GPU does not move
-the optical-flow work; the existing encoder handoff is downstream. On this
-host, the tested implementation is NVIDIA-specific. The Intel GPU does not
-provide this NV extension.
+## Quick start
 
-## Controlled synthesis prototype
+Requirements:
 
-`ALVR_NATIVE_MOTION=1` now also requests a controlled synthesis prototype.
-Requirements: NVIDIA render GPU, same-GPU NVENC, foveated encoding disabled,
-and an RGBA8/BGRA8 output with formatless storage-write support. Select
-**NVIDIA GeForce RTX 3060** for both Render GPU and Encoder GPU on this host.
-Encoder technology Automatic resolves to NVENC. SteamVR must render on the
-same GPU; an Intel-only Steam environment can defeat the selection.
+- Linux, SteamVR, ALVR built from this branch.
+- An NVIDIA RTX GPU (`VK_NV_optical_flow`, RTX 20 series or newer) selected
+  as **both** Render GPU and Encoder GPU (same-GPU NVENC).
+- Foveated encoding **disabled**.
 
-The encoder worker retains every other composed frame in owned GPU memory.
-It extracts luma separately for each eye, at most half the output dimensions,
-with its largest dimension capped at 512. The ratio is preserved with dimensions
-rounded down to multiples of four. For 2048x2144 output per eye the estimator
-uses 488x512 luma instead of 1024x1072. Color/output resolution is unchanged.
-Larger downsampling footprints use four color samples to reduce aliasing.
-The estimator still computes both
-motion directions using the borrowed-device backend from the research repo.
-On an intervening presentation, a shader inverse-warps the latest color
-image forward using backward motion and forward/backward consistency checks.
-Pixels with invalid motion repeat the newest pixel. The eye boundaries are
-clamped independently. The output goes through the existing single NVENC
-submission and timestamp channel at the existing presentation cadence.
-
-Fallback pixels are fetched exactly. The warp solves the four corners of an
-8x8 output tile once. When all corners pass the existing consistency checks
-and their displacements vary by at most 0.5 output pixels, it interpolates
-the displacement across that tile. Motion boundaries, invalid corners and
-partial/seam tiles retain per-pixel inversion. This reduces repeated flow
-sampling for smooth motion; performance and boundary quality need GPU tests.
-
-Each inverse solve uses at most five updates. It now stops when the next
-source coordinate equals the current coordinate exactly, reusing the flow
-already sampled there for the final consistency check. Repeating deterministic
-samples at that coordinate would give the same update. There is no convergence
-tolerance and no change to the residual or bidirectional thresholds. GPU
-validation is pending; divergent lanes and pipeline compilation may affect
-the cost, so this is not a measured speedup.
-
-The offscreen checker's `--fixed-flow-iterations` flag disables that exit via
-a shader specialization constant. It keeps five updates and the final flow
-sample, providing a control in the same executable. Recovery checks use the
-selected variant too. Compare both variants at the same `--luma-max 512`,
-require unchanged image-quality gates and exact stationary output, and retain
-device/wall timings before attributing any speedup to this change.
-
-Before resampling, the shader compares previous/latest color at the current
-texel and at the actual proposed source. Identity at both sites preserves the
-exact current texel. Subpixel prediction no longer depends on a one-pixel
-threshold applied to the coarse luma vectors. For each full 8x8 tile, 16 RGB
-history samples form a regularized local translation fit using symmetric
-spatial gradients. The fit must explain at least 75% of temporal squared
-change, have sufficient texture/change, and estimate at most one output pixel
-per real-frame interval. For accepted tiles, pixels changing by at most 16/255
-per channel use `latest + horizon * (latest - previous)`, clamped to the color
-range. Other pixels use the spatial warp. Accepted tiles skip the four corner
-flow solves; all workgroup barriers precede any pixel return. This is an
-untested candidate for the full-size slow-motion regression under capped luma.
-It can still amplify noise, misclassify mixed/ambiguous motion, or overshoot
-changing edges; GPU quality/cost checks are required before live use.
-If the fit rejects motion and all 16 samples have the same nonzero RGB change,
-pixels matching that change keep the exact latest color. This protects a
-stationary texture during a uniform color flash from false coarse-flow warp;
-pixels with a different change still use spatial inversion. The uniformity
-threshold is 1.25/255 per channel and is an unvalidated heuristic for mixed
-color and geometric motion.
-
-Two retained real frames are required before predicting. A predicted frame
-may extend at most 0.55 of the measured real-frame interval beyond the latest
-frame; duplicate/reversed timestamps and intervals longer than 100 ms reset
-history and use a real frame. Logs include `Native motion predicted=...` and
-`Native motion timestamp rejected=...`. The compositor's submitted textures
-are not read on prediction presentations and are released before GPU work.
-New commands have bounded waits. Runtime GPU failures go through the existing
-encoder worker error/idle path; pending resources are not freed without
-confirmed completion. Constructor capability/format failures use normal
-frames instead.
-
-After a rejected prediction, that fallback real frame re-anchors the capture
-cadence. One warm-up presentation is left before retaining the next real
-frame. This avoids a recurring rejection when two retained timestamps are
-only one presentation apart. GPU recovery coverage is prepared in the
-offscreen checker; all four recovery cases passed on the RTX 3060 at `798f39a7`.
-
-This is controlled half-input-rate prediction, not automatic SteamVR app
-throttling. At a stable 72 presentations/s it selects 36 real inputs/s and
-attempts 36 predictions/s. It does not halve the game's rendering cost,
-enable Valve's Motion Smoothing UI, or implement Valve's missing Linux
-estimator. There is no depth or game-provided motion input. The prototype
-stamps predictions with the current job's tracking timestamp; its association
-with the estimated image pose and interaction with rotational rewarp remain
-unverified. It must not be described as validated headset Motion Smoothing.
-
-No extra setting is enabled by default. Unsupported modes, cross-GPU encode,
-and foveated encoding retain normal frames. Unset `ALVR_NATIVE_MOTION` and
-restart SteamVR to disable the experimental path. Remove any
-`airlink_test_frame_divisor` file before testing this mode: the old divisor
-would remove presentations needed by its controlled cadence.
-
-## Build and checks
-
-Linux streamer builds compile the two GLSL sources with `glslangValidator`
-and generate aligned C++ shader arrays in Cargo's `OUT_DIR`; generated SPIR-V
-is not committed. The Linux Docker build image installs `glslang-tools`.
-Windows and macOS do not compile these shaders or the native backend.
-
-Build isolated checks without executing either one:
+Enable (mode 7 recommended), then restart SteamVR:
 
 ```bash
-bash tests/build_linux_native_motion.sh /path/to/ignored/output
+echo 7 > ~/.config/alvr/diag_native_motion
 ```
 
-`timing_test` is CPU-only and checks timestamp eligibility, including
-nonmonotonic values, long pauses and overflow boundaries. `image_test` is an
-offscreen NVIDIA integration checker. Its analytic reference renders the
-target time directly, independently of the predictor. Suites:
+Disable: delete the file (or write `0`) and restart SteamVR. The file is read
+when the Vulkan context and the encoder are created, so a change applies after
+a SteamVR restart.
 
-| Suite | Per-eye size | Predictions per case | Cases |
-| --- | --- | --- | --- |
-| `smoke` (default) | 512x384 | 1 | Opposite translations |
-| `quality` | 512x384 | 6 | Stationary, translation, subpixel horizontal/vertical/diagonal translation, fine texture, rotation, foreground occlusion, timestamp jitter, stationary color flash |
-| `stream` | 2048x2144 | 12 | Same cases at representative stream dimensions |
+The older environment variables `ALVR_NATIVE_MOTION=1` (and
+`ALVR_NATIVE_MOTION_BIDIRECTIONAL=1`) still work when `vrserver` inherits
+them, but when the dashboard starts SteamVR through a running Steam client
+they never reach `vrserver`; this is why the file switch exists.
 
-`quality` and `stream` also verify four timestamp rejection/recovery cases
-against the actual predictor: duplicate, reversed, excessive horizon and long
-pause. A rejected call must preserve output and retain the real input; a
-successful prediction must release that input exactly once. Every output
-pixel is checked for opaque alpha and for the eye's distinct color tint,
-including the seam. Image-quality gates require improvement in both the whole
-interior and the changed-pixel region of each eye. Stationary images require
-exact RGBA preservation at every pixel including edges; the CSV reports
-`static_pixel_mismatches`. Subpixel translation advances 0.25 output pixels
-per presentation along each selected axis at both resolutions, covering
-possible slow-motion freezes or directional bias.
-The color-flash control changes chroma every two presentations without moving
-geometry; the target retains the latest color. Prediction must stay within
-the existing 0.25 RGB MAE gate when repeating the latest is exact. This guards
-against treating every small color change as predictable motion.
-Newly revealed foreground-background pixels are reported
-separately; that region is diagnostic, not independently gated, because its
-visibility is not available from latest color alone.
+If any requirement is missing (other GPU vendor, cross-GPU encode, foveated
+encoding, unsupported format) the driver logs the reason and streams normal
+frames.
 
-Results include `metrics.csv` (eye/region errors), `timings.csv` (each sample),
-and `summary.txt` (quality result and p50/p95/max). Timings are CPU wall time
-including GPU completion, excluding fixture upload/readback and encoding.
-The first sample is marked cold and excluded from steady percentiles when
-more samples exist. Warm capture timing and capture+prediction pair timing
-are also recorded. These are not end-to-end frame latency or paced 72 Hz
-measurements. The fixture runs unpaced; desktop GPU load can affect results.
-The predictor also reports separate flow-estimation and warp-submission CPU
-wall durations (both include their completion waits). These are not Vulkan
-timestamp queries and can include CPU scheduling or other queued GPU work;
-their percentile maxima need not occur in the same sample.
-Optional queue timestamp queries additionally report device durations. The
-optical duration sums four optical-queue runs including their packed-output
-copies; it excludes input and final copies on the render queue. Warp duration
-covers render-queue barriers and compute, excluding CPU recording/submission.
-An unsupported queue or unavailable result reports -1 with zero summary
-samples, rather than inventing a zero-cost operation. Both intervals can
-include device scheduling/preemption; neither accounts for encoding/display.
+## Modes
 
-The checker precomputes reference images, executes an unpaced GPU
-sequence, then scores/writes images and CSVs. Host batch memory is bounded
-at 1.5 GiB of cached pixel payload per scene; other allocations are additional.
-Larger iteration counts require smaller dimensions.
-Uploads/readbacks remain between samples but outside prediction timing.
-This avoids CPU reference/scoring gaps lowering device clocks between
-predictions. It is a throughput check, not a paced or game-loaded deadline
-test. Prior results with per-sample CPU work are not directly comparable.
+| Mode | Behaviour | Use |
+|---|---|---|
+| 0 / no file | Normal ALVR, no synthesis | default |
+| 1, 2 | Controlled experiment: drops every other real picture and predicts it (2 = bidirectional flow session) | lab only |
+| 3 | Repeat reference: drops every other real picture and repeats the newest | measurement baseline |
+| 4 | Gap filling: every real picture is sent; a missed slot gets an extrapolated picture | superseded |
+| 5 | Mode 4 + head-rotation separation | superseded |
+| 6 | Mode 5 + confidence blending | experimental, worse |
+| **7** | Mode 5 + still-scene dead zone, colour-guided flow, border fallback | **recommended** |
+| 9 | Interpolation between the two newest real pictures (holds the real picture one slot) | experimental |
 
-Commit before the final check build. The builder records source revision,
-tracked dirtiness and binary/shader hashes. The runner refuses dirty build
-metadata or reused output directories and preserves failure/timeout logs.
-When available, `nvidia-smi` records read-only utilization, memory, graphics
-clock and power telemetry in `gpu-telemetry.csv` during execution, alongside
-wall-clock start/end files. Sampler errors are kept separately; telemetry
-does not isolate the GPU or measure per-dispatch device time.
-It does not open SteamVR, ALVR or a headset app. Announce every test first;
-GPU execution requires the user-confirmed Luna handoff.
+Modes 4–9 only act when the application misses a slot. With an application at
+the full refresh rate they synthesize almost nothing (178 pictures in 30 s on
+the Quest, versus about 1,000 with the application at half rate).
 
-```bash
-bash tests/run_linux_native_motion.sh /path/to/ignored/output \
-  /path/to/new/quality-results --suite quality --save-images
-# Only after quality passes, measure representative resolution. The explicit
-# warm-prediction limit is one 72 Hz slot; encoding/capture still need budget.
-bash tests/run_linux_native_motion.sh /path/to/ignored/output \
-  /path/to/new/stream-results --suite stream --max-predict-ms 13.888889
-```
+Measurement switch: `~/.config/alvr/diag_native_motion_eager` computes the
+flow right after each real picture instead of on the synthesized one
+(A/B showed no clear difference; off by default).
 
-Use `--luma-max 0` to retain the original half-resolution estimator as a
-same-binary timing/quality baseline. The default is 512; other caps must be
-multiples of four in [64,2048]. Small fixtures below the cap are unchanged.
-Compare 0 versus 512 under this same burst protocol; prior interleaved-CPU
-timings cannot establish the speedup. A lower cap can lose fine motion or
-disocclusion detail, so all nine quality gates still apply.
+## How it works
 
-Use `--iterations N` to choose 1-120 samples per case. `--save-images` writes
-the first sample's previous/latest/expected/predicted PPMs in case folders;
-it is on by default only for `smoke`. At stream dimensions, these files can
-consume about 950 MB across nine cases. The runner has a bounded 300-second
-timeout. A partial run or failure lacks a successful final `passed=1`;
-inspect `exit-status.txt` and the log before interpreting metrics.
+Code: `alvr/server_openvr/cpp/platform/linux/` — `motion/NativeMotion.cpp`,
+`motion/NativeOpticalFlow.cpp`, `shader/motion_luma.comp`,
+`shader/motion_warp.comp`, `Encoder.hpp`, `OvrDirectModeComponent.cpp`
+(`EncodeWorkerLoop`), `motion/NativeMotionSwitch.hpp`.
 
-A passing fixture is required before a headset trial. It cannot validate
-driver texture synchronization, real frame cadence, pose accuracy, image
-quality or headset latency. A matching-source Android client must be prepared
-before testing the ALVR client path; Air Link must never open that client app.
+1. **Capture.** Each real picture the encoder renders is copied into owned
+   GPU history (two slots) and reduced to per-eye luma (largest dimension
+   capped at 768). The copy reads the output image in the General layout and
+   does not wait on the encode path (0.1 ms mean); the encoder waits for it
+   before the next render writes the output, and the flow waits before
+   reading its lumas.
+2. **Motion.** NVIDIA's hardware optical flow (`VK_NV_optical_flow`) estimates
+   forward and backward motion between the two retained real pictures, per
+   eye, on the same GPU.
+3. **Rotation separation (modes 5–9).** Before the flow, the older picture is
+   rotationally aligned into the newest picture's camera (same quaternion
+   convention and per-eye FOV tangents as the real-frame rewarp,
+   `BuildWarpParams`); the flow then holds only object motion and parallax.
+   The synthesized picture is rotated into the exact pose of its stamp in the
+   same pass, so image and stamp agree.
+4. **Warp.** A compute shader inverse-warps the newest picture to the target
+   time (extrapolation t ≈ 1.5 of the real interval; interpolation t ≈ 0.5 in
+   mode 9, sampling both pictures). Mode 7 adds a 0.5–1.5-pixel motion dead
+   zone (still scenes stay byte-identical), colour-guided 2x2 flow
+   upsampling, continuous consistency confidence, and fills newly exposed
+   borders from the rotated newest picture.
+5. **Scheduling (gap filling).** The encode worker waits for the next Present
+   until one frame interval after the previous Present plus 1 ms. If none
+   arrives, it synthesizes the slot: the target time is the slot time
+   measured on the Present clock (not pose stamps, whose rotation-based match
+   can jump by a tracking sample), and the stamp is the tracking pose nearest
+   to the slot (retried every millisecond for up to 5 ms until that pose has
+   arrived; the server only sends pictures whose stamp is in its pose queue).
+   It stops after four intervals without a real picture.
+6. **Guards.** No fill until four real pictures after a reset or 100 ms pause
+   (warm-up); no fill while the newest real picture has layers over the
+   scene (SteamVR dashboard); history resets on non-increasing or stale
+   stamps.
+7. **Mode 9.** When the application skipped a slot, the newest real picture
+   is captured but held; the picture halfway between the previous and the
+   newest real picture is sent first, then the held real picture one slot
+   later. Costs about one slot of latency for object motion; head rotation
+   is still corrected by the headset from the pose stamps.
 
-### Paired exact-exit comparison
+## Comparison with ASW and SSW
 
-Separate processes showed large GPU-clock variation even in the unchanged
-optical-flow stage. Use `--compare-flow-iterations` to run the fixed-iteration
-control and exact-exit candidate in one process, on the same references and
-timestamps. Each owns independent images, history and optical-flow sessions.
-The order alternates fixed/exact, exact/fixed per sample. `--candidate-first`
-reverses every pair for a second run. GPU commands remain synchronous; this
-mode does not measure concurrent execution or isolate other desktop GPU work.
+ASW = Meta Asynchronous SpaceWarp (PC runtime); SSW = Virtual Desktop
+Synchronous SpaceWarp. Public information only; internals may differ.
 
-`--warmup-samples N` excludes a prefix from timing summaries (default 1),
-while retaining its image, input-release and exact-output checks. At least
-one measured sample must remain; a one-sample smoke run reports its cold
-sample. The paired stream default is ten samples instead of twelve so that
-two predictions plus the shared references fit the existing 1.5 GiB pixel
-cache cap. Other CPU/GPU allocations are additional. All ten scenes and the
-four timestamp-recovery cases run for each variant. A difference in any RGBA
-byte in any sample fails the comparison, even if both quality gates pass.
+| | This work (mode 7) | ASW | SSW |
+|---|---|---|---|
+| Runs on | PC (ALVR driver) | PC (Meta runtime) | headset |
+| Platform | Linux | Windows | Windows PC + Quest |
+| GPU | NVIDIA RTX | NVIDIA / AMD | any (work on headset) |
+| Activation | only missed slots | locks the app to half rate | streams half rate |
+| Network | full rate | n/a (Link) | half the frames |
+| Motion source | hardware optical flow | GPU encoder motion estimation | video motion vectors on headset |
+| Rotation | separated (mode 5+) | ATW | headset reprojection |
+| Prediction | extrapolation (mode 9: interpolation) | extrapolation | extrapolation |
+| Depth / positional | not available (see below) | ASW 2.0 uses app depth | no |
+| Known artifact | shadow behind moving near objects | halo around hands | similar |
 
-Metrics and timings append a `variant` column (`fixed` or `exact`). Timings
-also append `pair_position`, `start_unix_ns` (prediction start for telemetry
-correlation) and `warmup`. CSV rows are grouped by variant, so use sample and
-position to reconstruct execution order. `comparison_case` summary lines
-report exact-byte agreement and paired candidate-minus-control time deltas:
-negative is faster for exact exit. Order-specific counts/medians expose order
-bias; an empty group has count zero and its reported median is not usable.
-Saved PPMs are placed in `fixed/<scene>/` and `exact/<scene>/`.
+Position: comparable to ASW 1.0 in the core; ahead in filling only what is
+missing (real pictures are never dropped); behind ASW 2.0 on depth and behind
+SSW on bandwidth; the only one of the three on Linux.
 
-The optional budget still gates the **maximum** measured prediction time,
-not just its percentile. With the small sample counts used so far, p95 and
-maximum coincide. Do not relax the deadline when switching protocols or
-claim game/stream readiness from a paired throughput pass. Two resident
-histories and alternating variants may affect cache residency and clocks;
-paired timing reduces long gaps but does not prove stable device frequency.
+## Results
 
-After the user-confirmed Luna handoff, run these in fresh result directories:
+All results on an RTX 3060 (driver 615.71.09), SteamVR 2.18.4, Quest 2,
+1440x1504 per eye, 72 Hz. "Repeated vsyncs" = share of 72-Hz display slots
+that would show the same image as the previous slot (frames shown by their
+timestamps, best vsync phase). "Judder" = median deviation of each displayed
+step from its neighbours.
 
-```bash
-bash tests/run_linux_native_motion.sh /path/to/checker /path/to/paired-quality \
-  --suite quality --compare-flow-iterations --warmup-samples 2 --luma-max 512 --save-images
-# Require 10/10 quality, exact agreement for every sample and 4/4 recoveries
-# for each variant before full size. Then run two opposite starting orders:
-bash tests/run_linux_native_motion.sh /path/to/checker /path/to/paired-stream-ab \
-  --suite stream --compare-flow-iterations --warmup-samples 2 --luma-max 512 \
-  --max-predict-ms 13.888889 --save-images
-bash tests/run_linux_native_motion.sh /path/to/checker /path/to/paired-stream-ba \
-  --suite stream --compare-flow-iterations --warmup-samples 2 --luma-max 512 \
-  --max-predict-ms 13.888889 --save-images --candidate-first
-```
+### Offline, recorded Home frames (real-frame evaluator)
 
-A timing-only failure permits the opposite-order comparison. Stop on any
-quality, release, recovery or equality failure. Keep logs and telemetry for
-all runs. No ALVR, SteamVR or Quest process is involved in this protocol.
+Ground truth: full-rate recordings; every other frame is treated as real and
+the dropped one is synthesized by the production code path. Means over 28–31
+targets; lower is better.
 
-### Experimental bidirectional estimator
+| Window | Repeat | Mode 4 | Mode 5 | Mode 7 | Mode 9 |
+|---|---:|---:|---:|---:|---:|
+| Yaw sweep, MAE | 2.39–2.58 | 1.029 | 0.878 | 0.761 | **0.685** |
+| Yaw sweep, Block8 error | 1.66 | 1.011 | 0.843 | 0.835 | **0.759** |
+| Yaw sweep, temporal error | 3.74 | 1.625 | 1.346 | 1.184 | **1.073** |
+| Still scene, error vs newest | 0 | — | 0.0702 | **0.0006** | — |
+| Fast yaw (45°, 2 s), MAE | 5.85 | — | 2.118 | **1.925** | — |
+| Sideways sway, MAE | 0.67 | 0.627 | 0.550 | **0.536** | — |
 
-`--compare-bidirectional-flow` compares the existing two separate directions
-against a session with `VK_OPTICAL_FLOW_SESSION_CREATE_BOTH_DIRECTIONS_BIT_NV`.
-Both variants keep exact flow exit enabled, the same luma cap and all image
-thresholds. They are labeled `separate` and `bidirectional` in metrics/images.
-This mode is mutually exclusive with `--compare-flow-iterations` and
-`--fixed-flow-iterations`. The same alternating order, warm-up accounting,
-memory cap and byte-equality gate apply. Comparison summary keys now use
-`candidate_wins`, `candidate_minus_control_p50_ms`, `control_first_*` and
-`candidate_first_*` for either kind of comparison.
+Fast-yaw worst frames: mode 5 leaves a black hole at the newly exposed
+border; mode 7 fills it (its higher Block8 there comes from softened fine
+branches). GPU flow+warp per synthesized picture: 3–8 ms median offline;
+4–6 ms (mode 7) and 6–8.5 ms (mode 9) logged live on the Quest.
 
-The experimental session requires `bidirectionalFlowSupported`, allocates
-backward vector/cost images and buffers, and binds the backward output slots.
-It copies both directions back through the same semaphore/fence chain.
-There are two execute chains per stereo pair instead of four; device work
-does not necessarily halve. All outputs are checked for aliases and legal
-usage/layout, and their metadata changes only after successful completion.
-Existing single-direction API calls retain their default behavior. The
-`NativeMotion` constructor's bidirectional argument defaults to false; the
-encoder selects it only when `ALVR_NATIVE_MOTION_BIDIRECTIONAL=1`, alongside
-the existing `ALVR_NATIVE_MOTION=1`. Both must be inherited by vrserver at
-startup. Unsupported bidirectional hardware logs the capability rejection
-and retains separate-direction synthesis. Initialization/GPU failures use
-the existing normal-frame fallback. The flag alone does not enable native
-motion, change the selected GPU, or select virtual display. No FFI or settings
-layout changes are involved.
+Synthetic checker (512x384, ten scenes) for the warp edge fix: occlusion
+revealed-area MAE 32.6 → 24.8, occlusion changed 6.55 → 5.42, fine texture
+1.34 → 1.24, others unchanged; all ten quality scenes and recoveries pass.
 
-The API's [session flags](https://docs.vulkan.org/refpages/latest/refpages/source/VkOpticalFlowSessionCreateFlagBitsNV.html)
-require backward vector output and, when cost generation is enabled, backward
-cost output. Unsupported devices reject this test explicitly. Paired quality
-must pass before attempting stream-size timings with both initial orders.
+### Live, mock client (no headset), SteamVR Home
 
-```bash
-bash tests/run_linux_native_motion.sh /path/to/checker /path/to/bidir-quality \
-  --suite quality --compare-bidirectional-flow --warmup-samples 2 --luma-max 512 --save-images
-```
+| Case | Received fps | Repeated vsyncs | Judder |
+|---|---:|---:|---:|
+| Home at 72, no synthesis | 71.9 | 0% (quiet day) / 6–7% (loaded day) | 0.013 / 0.27 px |
+| Home throttled to 36, no synthesis | 36.0 | 50% | 1.95 px |
+| Home at 36, mode 4 (first working) | 65–69 | 11–12% | 0.34–0.52 px |
+| Home at 36, mode 4 slot-aimed (3 runs) | 65–68 | 4.3 / 7.4 / 13.2% | 0.22–0.42 px |
+| Home at 36, mode 5 | 72 | 11.6% | 0.324 px |
+| Home at 36, mode 7 | 72 | **7.5–9.2%** | **0.24–0.30 px** |
+| Home at 36, mode 9 | 64.7 | 13.2% | 0.308 px (latency 80 ms vs 52 ms) |
+| Home at 72, mode 4–7 | 71.5–72 | 2–3% (normal mode same day 6–7%) | 0.09–0.16 px |
+| Sideways sway, Home at 36: none / mode 4 | | 49.9% / 12.4% | 0.228 / 0.061 px |
 
-Do not infer stream readiness or output equivalence from compilation alone.
+Run-to-run variation follows late real Presents from SteamVR (49 to 273 per
+40 s run), not the filling itself (>99% of missed slots filled).
 
-## Verification record
+### Quest 2 sessions (Home throttled to 36 fps unless noted)
 
-**Fact:** the two shaders compile for Vulkan 1.2. The backend, native-motion
-implementation and encoder header passed C++20 syntax compilation with local
-ALVR Vulkan/FFmpeg headers. The CPU timestamp eligibility check passed on
-2026-10-21. The first smoke fixture passed on RTX 3060 at source `bf103800`:
-left/right repeated MAE 18.5085/18.4292, predicted MAE 0.696263/0.541704,
-8.45 ms flow+warp at 512x384 per eye. That result predates the cadence recovery
-fix and expanded checker. The expanded suite at `6e2ce564` passed the five
-moving scenes and all four timestamp recovery contracts, but failed stationary
-images: predicted MAE 0.563584/0.633863 versus exact repetition. The identity
-patch guard at `798f39a7` passed all seven small-image cases with exact static
-pixels. At 2048x2144 per eye it preserved stationary pixels but failed slow
-translation: predicted MAE 1.52871/1.59969 versus repeated 1.3463/1.3575.
-Warm prediction p95 ranged 17.398–37.283 ms under uncontrolled desktop load,
-exceeding the 13.888889 ms test gate. The tile solver, cheaper identity check
-and temporal subpixel approximation at `f56f9221` passed all nine image scenes
-at both sizes. Its stream prediction p95 still ranged 17.289–33.296 ms under
-variable clocks. The new luma cap/filter, burst measurement and device-query
-instrumentation are pending GPU tests. Headset output, pose association and
-full-resolution budget remain unknown.
-The RTX 3060 is present again; persistent Render GPU and Encoder GPU selectors
-were set to NVIDIA with a session backup. No ALVR/SteamVR launch occurred
-during implementation of the expanded checker.
+| Session | Mode | Quest fps | Latency | User's observation |
+|---|---|---:|---:|---|
+| 1 | 0 | 35.9 | 64 ms | hands tremble and lag |
+| 1 | 4 | 71.8 | 66 ms | hands smoother; blocks, distortion, image trembles |
+| 1 | 4, Home at 72 | 71.8 | 71 ms | smoothest (application at full rate) |
+| 2 | 0 | 36.0 | 62 ms | stable; shadow around hands |
+| 2 | 4 | 72.0 | 65 ms | blocks while moving; trembles |
+| 2 | 5 | 72.0 | 66 ms | much better than 4; blocks when turning; ripples when still |
+| 3 | 5 | 72 | — | distorted flashes when turning; menu tremulous |
+| 3 | **7** | 72 | — | **surroundings good while moving; blocks and ripples gone**; shadow behind moving hand and menu; a few bad frames at start (fixed afterwards by the warm-up) |
+| 4 | 0 | — | — | distant fine; near objects and menus dragged |
+| 4 | 7 | — | — | distant fine; near objects and menu drag/shadow |
+| 4 | 9 | — | — | less shadow, but the shadow flickers |
 
-**Primary API reference:** [Khronos Vulkan `VK_NV_optical_flow`](https://docs.vulkan.org/refpages/latest/refpages/source/VK_NV_optical_flow.html)
-and [optical-flow queue and image requirements](https://docs.vulkan.org/spec/latest/chapters/VK_NV_optical_flow/optical_flow.html).
-Timestamp queries follow the queue capability and stage requirements of
-[`vkCmdWriteTimestamp2`](https://docs.vulkan.org/refpages/latest/refpages/source/vkCmdWriteTimestamp2.html)
-and [`vkCmdResetQueryPool`](https://docs.vulkan.org/refpages/latest/refpages/source/vkCmdResetQueryPool.html).
+Session 4 showed that the drag on near objects is present **without**
+synthesis too: it comes from the half-rate application plus the headset's
+rotation-only reprojection, not from the synthesis. Extrapolation cannot know
+background revealed behind a moving object (it is hidden in both real
+pictures); interpolation (mode 9) can, at the cost of latency.
+
+## Depth (hDepthTexture) evaluation
+
+OpenVR's direct-mode `SubmitLayerPerEye_t` carries `hDepthTexture` and
+`mProjection` ("depth not always provided"). Depth would allow ASW 2.0-style
+positional correction, the main remaining artifact.
+
+Diagnostic: `touch ~/.config/alvr/diag_submit_depth` (then restart SteamVR)
+logs to `vrserver.txt` every swap texture set created (format, size), the
+first 120 layers per owner plus one in 720, and per-owner totals every 10 s:
+`Submit depth summary pid=… comm=… layers=… with_depth=… known_depth=…`.
+
+| Application | Engine / path | Layers reach ALVR as | Layers | With depth |
+|---|---|---|---:|---:|
+| SteamVR Home | Source 2, native Vulkan | composited by vrcompositor, or Home's own textures | 9,291 / 3,148 | 0 |
+| VRChat | Unity (OpenVR), Proton | VRChat.exe textures (pass-through) | 4,998 | 0 (no depth set created) |
+| Open Brush | Unity (OpenXR), Proton | OpenBrush.exe textures (pass-through) | 3,242 | **0**, although Unity logs `Depth Submission Mode: Depth24Bit` |
+
+Findings:
+
+- Proton's `vrclient_x64.so` forwards depth (`VRTextureWithDepth_t`) for every
+  game except No Man's Sky (`disable_depth_data` compares `SteamGameId` with
+  275850) or invalid depth data.
+- Open Brush submits depth to SteamVR's OpenXR runtime, and the runtime
+  shares depth images with the compositor (`vrclient.so` has shared/injected
+  depth image code), but the compositor does **not** pass depth to the
+  direct-mode driver: no depth swap set is created for the driver and every
+  layer arrives with `hDepthTexture = 0`. No OpenVR driver property requests
+  depth. The compositor keeps depth for its own features (`depthReprojection*`
+  settings, Motion Smoothing).
+- The Linux Open Brush depot does not start VR (`NOXR_GRID`; Steam launches
+  `OpenBrush.exe`). Force Proton Experimental in the game's Compatibility
+  settings to run the Windows build in VR.
+- SteamVR Home renders at 3523x3682 when the client's recommended size is
+  2492x2604; SteamVR then composites it into its own 2160x2256 system-layer
+  texture ("Scene into System Layer"), so any depth would stay in the
+  compositor. VRChat and Open Brush render at the recommended size and pass
+  through.
+
+Conclusion: with the current SteamVR, a direct-mode driver does not receive
+application depth even when the application submits it. Positional
+correction with depth would need another route (e.g. capturing the depth
+images inside vrcompositor with a Vulkan layer).
+
+## Limitations and known issues
+
+- NVIDIA RTX only; same-GPU NVENC; foveated encoding must be off.
+- Shadow/drag behind moving near objects and the SteamVR menu (also present
+  without synthesis); mode 9 reduces it but flickers and adds ~28 ms
+  (pipeline median 80 ms vs 52 ms in the mock).
+- No depth (see above).
+- Fine detail is slightly softened on fast motion.
+- Configuration through a file, no dashboard setting yet.
+- GPU cost spikes up to 16–20 ms were seen offline under concurrent load
+  (13.9-ms slot); live Quest logs stayed at 4–8.5 ms.
+- VRChat once crashed SteamVR in a mock session ("Watchdog timeout in thread
+  Connection"), leaving the driver blocked by SteamVR safe mode; not
+  reproduced in later VRChat sessions.
+
+## Bugs found and fixed along the way
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| Native motion never active in real sessions | env variables never reached vrserver (Steam starts it) | file switch `diag_native_motion` |
+| Gap fills almost never fired | slots counted from the end of the real picture's encode | count from the Present (`job.enqueueTime`) |
+| ~150 fill rejections per run | extrapolation timed by pose stamps that jump by a tracking sample | time by Present clocks |
+| Jitter with filling on at full rate | synchronous capture on the encode path | deferred capture (General layout copy) |
+| Image tremble (Quest) | flow carried head rotation, reprojected again by the headset | rotation separation (mode 5) |
+| Blocks and still ripples (Quest) | tile interpolation, flow noise, empty borders | mode 7 |
+| Distorted pictures at connect (Quest) | prediction before the cadence settled | four-picture warm-up |
+| Viewer showed wrong per-eye colours | ffplay `-fflags nobuffer` dropped the only IDR | removed (viewer only; stream was fine) |
+| Driver failed to load on a cold start | `libopenvr_api.so` not found | bundled with `$ORIGIN` lookup |
+| Dashboard hung at start | wedged adb server in `adb kill-server` | test scripts stop adb first |
+
+## Why not SteamVR's Motion Smoothing
+
+SteamVR 2.17.10 and 2.18.4 for Linux report Motion Smoothing as unsupported
+by design: the capability probe and the NVIDIA optical-flow, NvEncode and CVP
+backend wrappers in `vrcompositor` are stubs returning false/null
+(`xor eax,eax; ret`). Forcing the capability flag makes the compositor try
+the estimator, fail (`Failed to initialize motion estimation system!`) and
+disable it again. The orchestration code exists, the platform backends do
+not. The virtual-display present path is empty as well. Reimplementing the
+missing backends behind Valve's private contract was judged riskier than
+synthesizing in ALVR's own driver, where the frames and poses already are.
+
+## Test kit
+
+Scripts live in the MetaHorizonLinux research repository (`scripts/`); the mock client is in this branch:
+
+- **Mock client with a viewer** (`alvr/client_mock`): connects like a
+  headset; `MOCK_OUT=<dir>` records the stream (`stream.hevc`, `frames.csv`
+  with per-frame stamps, `poses.csv`), shows it in an ffplay window,
+  `MOCK_SWEEP=<deg>,<s>` scripts a yaw sweep, `MOCK_SWAY=<m>,<s>` a sideways
+  motion.
+- **`mock_stream_test.sh`**: restarts ALVR (this branch) and SteamVR Home,
+  connects the mock (stream over TCP, since a same-host client cannot share
+  the UDP port), records and reports. `MOTION=0..9`, `THROTTLE=1` (Home at
+  half rate via SteamVR per-app `framesToThrottle`), `SWEEP`, `SWAY`,
+  `VRCHAT=1`.
+- **`mock_motion_report.py`**: frame cadence, shifts, judder, 72-Hz display
+  simulation.
+- **`evaluate_native_motion_quality.sh`** (real-frame evaluator, `--rotation`,
+  `--stable`, `--interpolate`): MAE, PSNR, Block8 gradient error, temporal
+  error, still-scene error, GPU timings, worst-frame crops.
+- **Quest sessions**: ADB starts the ALVR app; voice guidance through
+  `spd-say` routed to the "ALVR Audio" sink so it plays in the headset.
+
+## Offline checker
+
+`tests/build_linux_native_motion.sh <out>` builds `timing_test` (CPU
+timestamp rules), `image_test` (synthetic offscreen GPU scenes) and
+`recording_test` (real-frame evaluator). `tests/run_linux_native_motion.sh
+<build> <new-results> --suite quality|stream|smoke [options]` runs
+`image_test` from a clean committed build only.
+
+- `quality`: 512x384, ten scenes (stationary, translation, slow
+  horizontal/vertical/diagonal, fine texture, rotation, foreground occlusion,
+  timestamp jitter, colour flash) plus four timestamp-recovery cases;
+  stationary images must stay byte-identical.
+- `stream`: same scenes at 2048x2144 per eye; `--max-predict-ms 13.888889`
+  gates the maximum prediction time.
+- `--compare-flow-iterations` / `--compare-bidirectional-flow`: paired
+  in-process comparisons with byte-equality checks; `--candidate-first`
+  reverses order; `--warmup-samples N` excludes a timing prefix.
+
+These checks exercise the extrapolation path of mode 1; gap filling and the
+rotation modes are measured with `recording_test` on real recordings.
+
+## Next steps
+
+1. Mode 9: remove the flicker of the remaining shadow and reduce latency, or
+   drop it.
+2. Dashboard setting instead of the file switch.
+3. A genuinely heavy application (not only throttled Home).
+4. Depth through another route (capture in vrcompositor), if worth it.
+5. Foveated encoding and non-NVIDIA GPUs (compute-shader optical flow).
+6. Split the synthesis from the Air Link work into a branch based on
+   upstream ALVR for review.
+
+References: [Khronos `VK_NV_optical_flow`](https://docs.vulkan.org/refpages/latest/refpages/source/VK_NV_optical_flow.html),
+[optical-flow queue and image requirements](https://docs.vulkan.org/spec/latest/chapters/VK_NV_optical_flow/optical_flow.html).

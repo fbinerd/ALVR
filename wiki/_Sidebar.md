@@ -20,6 +20,8 @@
 
 * [ALVR wired setup (ALVR over USB)](https://github.com/alvr-org/ALVR/wiki/ALVR-wired-setup-(ALVR-over-USB))
 
+* [Linux frame synthesis (experimental, linux-frame-synthesis branch)](Linux-frame-synthesis)
+
 ***
 
 #### Troubleshooting
