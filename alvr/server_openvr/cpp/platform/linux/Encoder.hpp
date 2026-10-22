@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdlib>
 #include <fstream>
 #include <functional>
 #include <map>
@@ -345,12 +346,30 @@ public:
         if (vkCtx.meta.opticalFlowEnabled) {
             if (settings->m_enableFoveatedEncoding || target.crossDevice
                 || target.backend != EncoderBackend::Nvenc) {
-                Warn("Native motion controlled mode requires same-GPU NVENC and foveated encoding disabled; using normal frames");
+                Warn("Native motion controlled mode requires same-GPU NVENC and foveated encoding "
+                     "disabled; using normal frames");
             } else {
                 try {
                     auto output = renderer.get().getOutput();
+                    const char* bothDirections = std::getenv("ALVR_NATIVE_MOTION_BIDIRECTIONAL");
+                    bool bidirectional = bothDirections && std::strcmp(bothDirections, "1") == 0;
+                    if (bidirectional) {
+                        vk::PhysicalDeviceOpticalFlowPropertiesNV opticalProperties {};
+                        vk::PhysicalDeviceProperties2 properties { .pNext = &opticalProperties };
+                        vkCtx.physDev.getProperties2(&properties);
+                        if (!opticalProperties.bidirectionalFlowSupported) {
+                            Warn("Bidirectional native motion requested but unsupported; using "
+                                 "separate directions");
+                            bidirectional = false;
+                        }
+                    }
                     nativeMotion = std::make_unique<motion::NativeMotion>(
-                        vkCtx, outExtent, static_cast<vk::Format>(output.imageCI.format)
+                        vkCtx,
+                        outExtent,
+                        static_cast<vk::Format>(output.imageCI.format),
+                        motion::NativeMotion::DefaultLumaDimension,
+                        true,
+                        bidirectional
                     );
                 } catch (std::exception const& e) {
                     Warn("Native motion unavailable: %s; using normal frames", e.what());
@@ -487,9 +506,14 @@ public:
         ReportPresent(targetTimestampNs, 0);
         updateFoveationCenters(targetTimestampNs);
         auto output = renderer.get().getOutput();
-        bool predicted = nativeMotion && nativeMotion->predict(
-            output.image.image, output.image.view, output.image.layout, targetTimestampNs, afterRead
-        );
+        bool predicted = nativeMotion
+            && nativeMotion->predict(
+                output.image.image,
+                output.image.view,
+                output.image.layout,
+                targetTimestampNs,
+                afterRead
+            );
         if (!predicted) {
             renderer.get().render(vkCtx, layers);
             afterRead();

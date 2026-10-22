@@ -307,7 +307,12 @@ does not necessarily halve. All outputs are checked for aliases and legal
 usage/layout, and their metadata changes only after successful completion.
 Existing single-direction API calls retain their default behavior. The
 `NativeMotion` constructor's bidirectional argument defaults to false; the
-encoder does not select this experiment automatically. No FFI or settings
+encoder selects it only when `ALVR_NATIVE_MOTION_BIDIRECTIONAL=1`, alongside
+the existing `ALVR_NATIVE_MOTION=1`. Both must be inherited by vrserver at
+startup. Unsupported bidirectional hardware logs the capability rejection
+and retains separate-direction synthesis. Initialization/GPU failures use
+the existing normal-frame fallback. The flag alone does not enable native
+motion, change the selected GPU, or select virtual display. No FFI or settings
 layout changes are involved.
 
 The API's [session flags](https://docs.vulkan.org/refpages/latest/refpages/source/VkOpticalFlowSessionCreateFlagBitsNV.html)
