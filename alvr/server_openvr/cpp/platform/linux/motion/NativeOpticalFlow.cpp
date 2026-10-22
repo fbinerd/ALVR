@@ -123,6 +123,7 @@ struct NativeOpticalFlow::State {
     VkSemaphore inputs_ready = VK_NULL_HANDLE, results_ready = VK_NULL_HANDLE;
     VkQueryPool queries = VK_NULL_HANDLE;
     uint32_t timestamp_bits = 0;
+    bool renderTimestampBracket = false;
     double timestamp_period = 0, optical_gpu_ms = -1;
     bool idle = true, poisoned = false;
     int last_submitted = -1;
@@ -329,6 +330,10 @@ struct NativeOpticalFlow::State {
         props.pNext = &caps;
         c.properties(c.physical, &props);
         timestamp_bits = families[c.optical_family].timestampValidBits;
+        if (!timestamp_bits) {
+            timestamp_bits = families[c.render_family].timestampValidBits;
+            renderTimestampBracket = timestamp_bits != 0;
+        }
         timestamp_period = props.properties.limits.timestampPeriod;
         if (!caps.costSupported || (bothDirections && !caps.bidirectionalFlowSupported)
             || !(caps.supportedOutputGridSizes & VK_OPTICAL_FLOW_GRID_SIZE_4X4_BIT_NV)
@@ -554,6 +559,10 @@ struct NativeOpticalFlow::State {
     }
     void prepare_inputs(const ImageResource& a, const ImageResource& b) {
         begin(0);
+        if (queries && renderTimestampBracket) {
+            f.CmdResetQueryPool(commands[0],queries,0,2);
+            f.CmdWriteTimestamp2(commands[0],VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,queries,0);
+        }
         const ImageResource* sources[] = { &a, &b };
         Image* targets[] = { &input, &reference };
         for (uint32_t i = 0; i < 2; ++i) {
@@ -620,7 +629,7 @@ struct NativeOpticalFlow::State {
     }
     void estimate() {
         begin(1);
-        if (queries) {
+        if (queries && !renderTimestampBracket) {
             f.CmdResetQueryPool(commands[1], queries, 0, 2);
             f.CmdWriteTimestamp2(commands[1], VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, queries, 0);
         }
@@ -655,7 +664,7 @@ struct NativeOpticalFlow::State {
                 commands[1], images[i]->handle, images[i]->layout, packed[i].handle, 1, &copy
             );
         }
-        if (queries)
+        if (queries && !renderTimestampBracket)
             f.CmdWriteTimestamp2(commands[1], VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, queries, 1);
         checked(f.EndCommandBuffer(commands[1]), "end native estimate");
     }
@@ -695,6 +704,8 @@ struct NativeOpticalFlow::State {
                 VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT
             );
         }
+        if (queries && renderTimestampBracket)
+            f.CmdWriteTimestamp2(commands[2],VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,queries,1);
         checked(f.EndCommandBuffer(commands[2]), "end native output copy");
     }
     void submit(
