@@ -2,22 +2,47 @@
 layout(local_size_x=8,local_size_y=8) in;
 layout(binding=0) uniform sampler2D colorImage;
 layout(binding=1,r8) uniform writeonly image2D lumaImage;
-layout(push_constant) uniform Params { uint eye; } p;
+layout(push_constant) uniform Params {
+    uint eyeWidth,height,lumaWidth,lumaHeight;
+    float time; uint rotationMode,eye,padding;
+    vec4 previousQuaternion,targetQuaternion,leftTans,rightTans;
+} p;
+vec2 rotatePixel(vec2 at,bool right,vec4 quat) {
+    vec4 t=right?p.rightTans:p.leftTans;
+    vec2 uv=(at+0.5)/vec2(p.eyeWidth,p.height);
+    vec3 v=vec3(mix(t.x,t.y,uv.x),mix(t.z,t.w,uv.y),-1);
+    v+=2.0*cross(quat.xyz,cross(quat.xyz,v)+quat.w*v);
+    if(v.z>=-1e-5) return vec2(-10000);
+    vec2 ray=v.xy/-v.z;
+    return vec2((ray.x-t.x)/(t.y-t.x),(ray.y-t.z)/(t.w-t.z))
+        *vec2(p.eyeWidth,p.height)-0.5;
+}
+
+vec3 readColor(vec2 uv) {
+    if(p.rotationMode!=0) {
+        vec2 local=vec2(uv.x*2-float(p.eye),uv.y)*vec2(p.eyeWidth,p.height)-0.5;
+        local=rotatePixel(local,p.eye!=0,p.previousQuaternion);
+        local=clamp(local,vec2(0),vec2(p.eyeWidth-1,p.height-1));
+        uv=(local+0.5)/vec2(p.eyeWidth,p.height);
+        uv.x=(uv.x+float(p.eye))*0.5;
+    }
+    return texture(colorImage,uv).rgb;
+}
 void main() {
     ivec2 q=ivec2(gl_GlobalInvocationID.xy), size=imageSize(lumaImage);
     if (any(greaterThanEqual(q,size))) return;
     vec2 uv=(vec2(q)+0.5)/vec2(size);
     uv.x=(uv.x+float(p.eye))*0.5;
-    vec3 rgb=texture(colorImage,uv).rgb;
+    vec3 rgb=readColor(uv);
     // The large-frame estimator uses a smaller luma grid. Cover four parts of
     // the source footprint instead of taking one aliased center sample.
     vec2 sourceSize=vec2(textureSize(colorImage,0))*vec2(0.5,1.0);
     if (any(greaterThan(sourceSize/vec2(size),vec2(2.1)))) {
         vec2 d=vec2(0.125,0.25)/vec2(size);
-        rgb=(texture(colorImage,uv+vec2(-d.x,-d.y)).rgb
-            +texture(colorImage,uv+vec2(d.x,-d.y)).rgb
-            +texture(colorImage,uv+vec2(-d.x,d.y)).rgb
-            +texture(colorImage,uv+d).rgb)*0.25;
+        rgb=(readColor(uv+vec2(-d.x,-d.y))
+            +readColor(uv+vec2(d.x,-d.y))
+            +readColor(uv+vec2(-d.x,d.y))
+            +readColor(uv+d))*0.25;
     }
     imageStore(lumaImage,q,vec4(dot(rgb,vec3(0.2126,0.7152,0.0722))));
 }

@@ -170,6 +170,21 @@ static bool BuildWarpParams(
     return true;
 }
 
+// Same source-from-destination convention as the real-frame rewarp.
+static bool BuildMotionRotation(const vr::HmdQuaternion_t& source,
+    const FfiQuat& destination, const FfiViewParams (&views)[2],
+    alvr::motion::NativeMotion::Rotation& result) {
+    alvr::render::WarpParams validated {};
+    if (!BuildWarpParams(source,destination,views[0].fov,views[1].fov,validated)) return false;
+    vr::HmdQuaternion_t dest {destination.w,destination.x,destination.y,destination.z};
+    auto delta=vrmath::quaternionConjugate(source)*dest;
+    result.quaternion[0]=delta.x; result.quaternion[1]=delta.y;
+    result.quaternion[2]=delta.z; result.quaternion[3]=delta.w;
+    memcpy(result.leftTans,validated.leftTans,sizeof(result.leftTans));
+    memcpy(result.rightTans,validated.rightTans,sizeof(result.rightTans));
+    return true;
+}
+
 void OvrDirectModeComponent::SetViewParams(const FfiViewParams params[2]) {
     std::unique_lock<std::mutex> lock(m_viewParamsMutex);
     m_viewParams[0] = params[0];
@@ -229,7 +244,7 @@ void OvrDirectModeComponent::EncodeWorkerLoop() {
     // Gap filling (diag_native_motion=4): when no Present arrives for a
     // display slot, send a synthesized picture instead of leaving the slot
     // empty. Read once; off by default.
-    bool const gapFill = alvr::motion::nativeMotionMode() == 4;
+    bool const gapFill = alvr::motion::nativeMotionMode() >= 4;
     std::chrono::steady_clock::time_point nextSlot {}, lastRealOutput {};
     uint64_t lastStamp = 0, lastRealStamp = 0, slotIndex = 0, poseWaits = 0;
     uint64_t filled = 0, attempts = 0, noPose = 0, notNewer = 0, notReady = 0, rejected = 0;
@@ -240,6 +255,9 @@ void OvrDirectModeComponent::EncodeWorkerLoop() {
     // the newest tracking pose: a real picture already carries (nearly) the
     // newest pose when presented, so this slot's pose has only just arrived,
     // and the prediction extrapolates the image to exactly that pose time.
+    bool const separateRotation = alvr::motion::nativeMotionMode() == 5;
+    vr::HmdQuaternion_t lastMotionOrientation {1,0,0,0};
+    bool motionPoseValid = false;
     auto tryFill = [&](bool lastChance) -> bool {
         ++attempts;
         // Aim at the slot's exact time after the real picture, so pictures
@@ -271,7 +289,15 @@ void OvrDirectModeComponent::EncodeWorkerLoop() {
             auto const slotClockNs = (uint64_t)std::chrono::duration_cast<
                                          std::chrono::nanoseconds>(nextSlot.time_since_epoch())
                                          .count();
-            if (m_encoderReady && enc.fill(pose->targetTimestampNs, slotClockNs)) {
+            alvr::motion::NativeMotion::Rotation rotation;
+            if (separateRotation) {
+                FfiViewParams views[2];
+                { std::unique_lock<std::mutex> lock(m_viewParamsMutex);
+                  if (!m_viewParamsValid || !motionPoseValid) return false;
+                  views[0]=m_viewParams[0]; views[1]=m_viewParams[1]; }
+                if (!BuildMotionRotation(lastMotionOrientation,pose->motion.pose.orientation,views,rotation)) return false;
+            }
+            if (m_encoderReady && enc.fill(pose->targetTimestampNs, slotClockNs, separateRotation?&rotation:nullptr)) {
                 lastStamp = pose->targetTimestampNs;
                 ++filled;
                 return true;
@@ -470,6 +496,7 @@ void OvrDirectModeComponent::EncodeWorkerLoop() {
             // rather than in Present so the target is as fresh as possible.
             uint64_t stampTimestampNs = job.targetTimestampNs;
             alvr::render::WarpParams warpParams {};
+            auto stampOrientation=job.renderOrientation;
             if (RewarpEnabled && enc.warpCapable()) {
                 auto latest = m_poseHistory->GetLatestPose();
 
@@ -491,6 +518,8 @@ void OvrDirectModeComponent::EncodeWorkerLoop() {
                         warpParams
                     )) {
                     stampTimestampNs = latest->targetTimestampNs;
+                    auto q=latest->motion.pose.orientation;
+                    stampOrientation={q.w,q.x,q.y,q.z};
                 }
             }
 
@@ -500,13 +529,26 @@ void OvrDirectModeComponent::EncodeWorkerLoop() {
                                             job.enqueueTime.time_since_epoch()
             )
                                             .count();
+            alvr::motion::NativeMotion::Rotation historyRotation;
+            bool validHistoryRotation=false;
+            if (separateRotation) {
+                FfiViewParams views[2];
+                { std::unique_lock<std::mutex> lock(m_viewParamsMutex);
+                  views[0]=m_viewParams[0]; views[1]=m_viewParams[1];
+                  if (m_viewParamsValid) {
+                    FfiQuat destination {float(stampOrientation.x),float(stampOrientation.y),float(stampOrientation.z),float(stampOrientation.w)};
+                    validHistoryRotation=BuildMotionRotation(motionPoseValid?lastMotionOrientation:stampOrientation,destination,views,historyRotation);
+                  } }
+            }
             enc.present(
                 stampTimestampNs,
                 warpParams,
                 job.layers,
                 [this, frame] { MarkRead(frame); },
-                presentClockNs
+                presentClockNs, validHistoryRotation?&historyRotation:nullptr
             );
+            lastMotionOrientation=stampOrientation;
+            motionPoseValid=validHistoryRotation;
             MarkRead(frame);
             if (gapFill) {
                 // Slots count from the Present that brought this picture,

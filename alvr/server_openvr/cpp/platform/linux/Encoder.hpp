@@ -377,7 +377,7 @@ public:
                         Info("Native motion repeat reference: predicted pictures repeat the "
                              "newest real picture");
                     }
-                    if (motion::nativeMotionMode() == 4) {
+                    if (motion::nativeMotionMode() >= 4) {
                         nativeMotion->setGapFill(true);
                         // Measurement switch: flow right after each real
                         // picture instead of on the synthesized one.
@@ -510,7 +510,7 @@ public:
         render::WarpParams const& warp,
         std::vector<render::Layer> const& layers,
         std::function<void()> const& afterRead,
-        u64 presentClockNs = 0
+        u64 presentClockNs = 0, motion::NativeMotion::Rotation const* historyRotation = nullptr
     ) {
         if (!encoder) {
             // Say it once instead of at frame rate.
@@ -541,7 +541,7 @@ public:
             if (nativeMotion) {
                 output = renderer.get().getOutput();
                 nativeMotion->capture(
-                    output.image.image, output.image.layout, targetTimestampNs, presentClockNs
+                    output.image.image, output.image.layout, targetTimestampNs, presentClockNs, historyRotation
                 );
             }
         }
@@ -575,7 +575,7 @@ public:
     // slot the application missed, stamped with targetTimestampNs (the
     // newest tracking pose). False when there is nothing to synthesize from
     // or the prediction is rejected; then nothing is sent.
-    bool fill(u64 targetTimestampNs, u64 slotClockNs) {
+    bool fill(u64 targetTimestampNs, u64 slotClockNs, motion::NativeMotion::Rotation const* targetRotation = nullptr) {
         if (!encoder || !nativeMotion || !nativeMotion->gapFill() || !renderer.hasValue())
             return false;
         auto output = renderer.get().getOutput();
@@ -585,7 +585,7 @@ public:
                 output.image.layout,
                 targetTimestampNs,
                 {},
-                slotClockNs
+                slotClockNs, targetRotation
             ))
             return false;
         ReportPresent(targetTimestampNs, 0);

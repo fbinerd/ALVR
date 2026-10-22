@@ -13,6 +13,10 @@ class NativeMotion {
     std::unique_ptr<State> state;
 
 public:
+    struct Rotation {
+        float quaternion[4] {0, 0, 0, 1}; // source-from-destination, xyzw
+        float leftTans[4] {}, rightTans[4] {}; // left,right,up,down
+    };
     // Wall durations include completion waits. Device durations are -1 when
     // the relevant queue does not support timestamps or results are unavailable.
     struct PredictionTiming {
@@ -48,7 +52,7 @@ public:
         vk::ImageLayout,
         uint64_t timestamp,
         std::function<void()> const& releaseInput = {},
-        uint64_t clockNs = 0
+        uint64_t clockNs = 0, Rotation const* targetRotation = nullptr
     );
 
     // Retains an internally owned copy of a real frame on capture presentations.
@@ -57,7 +61,7 @@ public:
     // presented. Gap filling times its extrapolation with these clocks rather
     // than with pose timestamps, whose association to a picture can jump by
     // a tracking sample; the pose timestamp stays the picture's stamp.
-    void capture(vk::Image output, vk::ImageLayout, uint64_t timestamp, uint64_t clockNs = 0);
+    void capture(vk::Image output, vk::ImageLayout, uint64_t timestamp, uint64_t clockNs = 0, Rotation const* historyRotation = nullptr);
 
     // Reference mode for measurements: same real/predicted cadence, but each
     // "predicted" picture repeats the newest real picture (no flow, no warp).

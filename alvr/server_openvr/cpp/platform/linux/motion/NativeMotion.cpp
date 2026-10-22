@@ -22,8 +22,11 @@ namespace {
     struct WarpPush {
         uint32_t eyeWidth, height, lumaWidth, lumaHeight;
         float time;
+        uint32_t rotationMode = 0, eye = 0, padding = 0;
+        float previousQuaternion[4] {0,0,0,1}, targetQuaternion[4] {0,0,0,1};
+        float leftTans[4] {}, rightTans[4] {};
     };
-    static_assert(sizeof(WarpPush) == 20);
+    static_assert(sizeof(WarpPush) == 96);
 }
 
 struct NativeMotion::State {
@@ -56,6 +59,8 @@ struct NativeMotion::State {
     double aheadFlowMs = -1, captureMsSum = 0, captureMsMax = 0;
     bool allowExactFlowExit, bidirectionalFlow;
     PredictionTiming timing;
+    Rotation historyRotation;
+    bool rotationMode = false;
 
     State(
         VkContext& c,
@@ -527,9 +532,10 @@ bool NativeMotion::predict(
     vk::ImageLayout layout,
     uint64_t timestamp,
     std::function<void()> const& releaseInput,
-    uint64_t clockNs
+    uint64_t clockNs, Rotation const* targetRotation
 ) {
     auto& s = *state;
+    if (s.rotationMode && !targetRotation) return false;
     if (s.gapFill) {
         // Real pictures are all captured; this call is for a missed slot.
         s.captureThisFrame = true;
@@ -627,6 +633,13 @@ bool NativeMotion::predict(
     WarpPush push {
         s.extent.width / 2, s.extent.height, s.lumaExtent.width, s.lumaExtent.height, *time
     };
+    if (s.rotationMode) {
+        push.rotationMode = 1;
+        std::copy_n(s.historyRotation.quaternion, 4, push.previousQuaternion);
+        std::copy_n(targetRotation->quaternion, 4, push.targetQuaternion);
+        std::copy_n(targetRotation->leftTans, 4, push.leftTans);
+        std::copy_n(targetRotation->rightTans, 4, push.rightTans);
+    }
     s.dispatch(
         s.warpPipeline,
         s.warpLayout,
@@ -708,7 +721,7 @@ void NativeMotion::prepare() {
 }
 
 void NativeMotion::capture(
-    vk::Image output, vk::ImageLayout layout, uint64_t timestamp, uint64_t clockNs
+    vk::Image output, vk::ImageLayout layout, uint64_t timestamp, uint64_t clockNs, Rotation const* historyRotation
 ) {
     auto& s = *state;
     if (!s.captureThisFrame || !timestamp)
@@ -719,6 +732,8 @@ void NativeMotion::capture(
         s.retained = 0;
         ++s.historyResets;
     }
+    s.rotationMode = historyRotation != nullptr;
+    if (historyRotation) s.historyRotation = *historyRotation;
     unsigned slot = s.retained ? 1 - s.latest : 0;
     s.begin();
     // In the General layout the copy only reads the output, without a layout
@@ -742,17 +757,39 @@ void NativeMotion::capture(
     if (!deferred)
         s.barrier(output, copyLayout, layout);
     for (uint32_t eye = 0; eye < 2; ++eye) {
+        WarpPush lumaPush {};
+        lumaPush.eye = eye;
+        lumaPush.eyeWidth = s.extent.width / 2;
+        lumaPush.height = s.extent.height;
         auto& luma = s.lumas[slot][eye];
         s.transition(luma, vk::ImageLayout::eGeneral);
         s.dispatch(
             s.lumaPipeline,
             s.lumaLayout,
             { s.sampled(s.colors[slot]), { {}, luma.view, vk::ImageLayout::eGeneral } },
-            &eye,
-            sizeof(eye),
+            &lumaPush,
+            sizeof(lumaPush),
             s.lumaExtent
         );
         s.transition(luma, vk::ImageLayout::eShaderReadOnlyOptimal);
+    }
+    if (historyRotation && s.retained) {
+        // Rebuild the older luma in the newest real picture's geometry. The
+        // older color stays untouched; the warp samples it with the same map.
+        for (uint32_t eye = 0; eye < 2; ++eye) {
+            auto& luma = s.lumas[s.latest][eye];
+            s.transition(luma, vk::ImageLayout::eGeneral);
+            WarpPush params {};
+            params.eye = eye; params.eyeWidth = s.extent.width / 2; params.height = s.extent.height;
+            params.rotationMode = 1;
+            std::copy_n(historyRotation->quaternion,4,params.previousQuaternion);
+            std::copy_n(historyRotation->leftTans,4,params.leftTans);
+            std::copy_n(historyRotation->rightTans,4,params.rightTans);
+            s.dispatch(s.lumaPipeline,s.lumaLayout,
+                {s.sampled(s.colors[s.latest]), {{},luma.view,vk::ImageLayout::eGeneral}},
+                &params,sizeof(params),s.lumaExtent);
+            s.transition(luma,vk::ImageLayout::eShaderReadOnlyOptimal);
+        }
     }
     s.submit(!deferred);
     s.latest = slot;

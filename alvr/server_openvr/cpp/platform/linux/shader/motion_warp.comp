@@ -12,8 +12,19 @@ layout(binding=5) uniform isampler2D backwardRight;
 layout(binding=6) uniform writeonly image2D outputImage;
 layout(push_constant) uniform Params {
     uint eyeWidth,height,lumaWidth,lumaHeight;
-    float time;
+    float time; uint rotationMode,eye,padding;
+    vec4 previousQuaternion,targetQuaternion,leftTans,rightTans;
 } p;
+vec2 rotatePixel(vec2 at,bool right,vec4 quat) {
+    vec4 t=right?p.rightTans:p.leftTans;
+    vec2 uv=(at+0.5)/vec2(p.eyeWidth,p.height);
+    vec3 v=vec3(mix(t.x,t.y,uv.x),mix(t.z,t.w,uv.y),-1);
+    v+=2.0*cross(quat.xyz,cross(quat.xyz,v)+quat.w*v);
+    if(v.z>=-1e-5) return vec2(-10000);
+    vec2 ray=v.xy/-v.z;
+    return vec2((ray.x-t.x)/(t.y-t.x),(ray.y-t.z)/(t.w-t.z))
+        *vec2(p.eyeWidth,p.height)-0.5;
+}
 // The flow grid is coarser than output pixels. Solve four tile corners once
 // rather than repeating the iterative inversion for every output pixel.
 shared vec2 cornerDisplacement[4];
@@ -28,6 +39,7 @@ shared vec3 temporalChange[16];
 shared uint temporalTile;
 shared uint colorOnlyTile;
 vec3 historyAt(bool recent,bool right,ivec2 q) {
+    if (!recent && p.rotationMode!=0) q=ivec2(round(rotatePixel(vec2(q),right,p.previousQuaternion)));
     q=clamp(q,ivec2(0),ivec2(p.eyeWidth-1,p.height-1));
     q.x+=right?int(p.eyeWidth):0;
     return recent?texelFetch(latestImage,q,0).rgb:texelFetch(previousImage,q,0).rgb;
@@ -136,6 +148,7 @@ bool sourceAt(vec2 target,float distance,bool reverse,bool right,out vec2 q) {
         && length(v+flowAt(!reverse,right,other))<=2.0;
 }
 vec4 colorAt(bool recent,bool right,vec2 q) {
+    if (!recent && p.rotationMode!=0) q=rotatePixel(q,right,p.previousQuaternion);
     q=clamp(q,vec2(0),vec2(p.eyeWidth-1,p.height-1));
     q.x+=right?float(p.eyeWidth):0.0;
     vec2 uv=(q+0.5)/vec2(2*p.eyeWidth,p.height);
@@ -148,7 +161,9 @@ void main() {
     // A partial tile or a tile crossing the eye seam takes the exact path.
     bool fullTile=base.y+7<p.height
         && base.x+7<(tileRight?2*p.eyeWidth:p.eyeWidth);
-    fitTemporalTile(base,tileRight,fullTile);
+    if(p.rotationMode==0) fitTemporalTile(base,tileRight,fullTile);
+    else { if(gl_LocalInvocationIndex==0) {temporalTile=0; colorOnlyTile=0;} barrier(); }
+    if(p.rotationMode!=0) fullTile=false;
     if (gl_LocalInvocationIndex<4) {
         uint i=gl_LocalInvocationIndex;
         vec2 at=vec2(base.x%p.eyeWidth+(i%2)*7,base.y+(i/2)*7), source;
@@ -163,7 +178,8 @@ void main() {
     if (xy.x>=2*p.eyeWidth || xy.y>=p.height) return;
     bool right=xy.x>=p.eyeWidth;
     vec2 target=vec2(xy.x%p.eyeWidth,xy.y), q;
-    vec4 color=texelFetch(latestImage,ivec2(xy),0);
+    if(p.rotationMode!=0) target=rotatePixel(target,right,p.targetQuaternion);
+    vec4 color=p.rotationMode!=0?colorAt(true,right,target):texelFetch(latestImage,ivec2(xy),0);
     vec4 previous=texelFetch(previousImage,ivec2(xy),0);
     vec3 delta=color.rgb-previous.rgb;
     float horizon=p.time-1.0;

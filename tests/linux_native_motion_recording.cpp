@@ -28,7 +28,7 @@ Scores scoreRecording(Pixels const& prediction, Pixels const& truth, Size size,
 }
 int main(int argc,char** argv) {
  try {
-    if(argc!=6) throw std::runtime_error("Usage: recording_test RAW_RGBA MANIFEST OUTPUT EYE_WIDTH HEIGHT");
+    if(argc!=6 && argc!=7) throw std::runtime_error("Usage: recording_test RAW_RGBA MANIFEST OUTPUT EYE_WIDTH HEIGHT");
     Size size{uint32_t(std::stoul(argv[4])),uint32_t(std::stoul(argv[5]))};
     std::filesystem::path output(argv[3]); std::filesystem::create_directories(output);
     std::ifstream input(argv[1],std::ios::binary), manifest(argv[2]);
@@ -43,15 +43,27 @@ int main(int argc,char** argv) {
     std::ofstream csv(output/"metrics.csv");
     csv<<"frame,pose_ns,clock_ns,yaw_rad,variant,mae,psnr,gradient_mae,block8_gradient_mae,temporal_error_delta,flow_wall_ms,warp_wall_ms,optical_gpu_ms,warp_gpu_ms\n";
     size_t index=0,targets=0; uint64_t pose,clock; double yaw; unsigned frame;
-    double worst=-1, prepareMs=0;
+    double worst=-1, prepareMs=0, latestYaw=0;
+    bool rotation=argc==7;
+    auto rotationBetween=[](double delta) {
+        alvr::motion::NativeMotion::Rotation r;
+        r.quaternion[1]=float(std::sin(delta/2)); r.quaternion[3]=float(std::cos(delta/2));
+        for(auto t: {r.leftTans,r.rightTans}) {
+            t[0]=-std::tan(1.0f); t[1]=std::tan(1.0f); t[2]=std::tan(1.0f); t[3]=-std::tan(1.0f);
+        }
+        return r;
+    };
     while(manifest>>frame>>pose>>clock>>yaw) {
         if(!input.read(reinterpret_cast<char*>(truth.data()),truth.size())) throw std::runtime_error("Truncated raw recording");
         if(index%2==0) {
-            motion.waitIdle(); gpu.transfer(&truth); motion.capture(gpu.image,gpu.layout,pose,clock);
+            motion.waitIdle(); gpu.transfer(&truth); auto transform=rotationBetween(index==0?0:yaw-latestYaw);
+            motion.capture(gpu.image,gpu.layout,pose,clock,rotation?&transform:nullptr);
+            latestYaw=yaw;
             auto prepareStart=std::chrono::steady_clock::now();
             motion.prepare(); prepareMs=elapsed(prepareStart); latest=truth;
         } else if(index>=3) {
-            if(!motion.predict(gpu.image,gpu.view,gpu.layout,pose,{},clock)) throw std::runtime_error("Gap-fill target rejected");
+            auto transform=rotationBetween(yaw-latestYaw);
+            if(!motion.predict(gpu.image,gpu.view,gpu.layout,pose,{},clock,rotation?&transform:nullptr)) throw std::runtime_error("Gap-fill target rejected");
             auto image=gpu.transfer(nullptr); auto timing=motion.lastPredictionTiming();
             auto synth=scoreRecording(image,truth,size,synthError);
             auto repeat=scoreRecording(latest,truth,size,repeatError);
