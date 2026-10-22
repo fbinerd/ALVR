@@ -59,6 +59,7 @@ struct NativeMotion::State {
     double aheadFlowMs = -1, captureMsSum = 0, captureMsMax = 0;
     bool allowExactFlowExit, bidirectionalFlow;
     PredictionTiming timing;
+    double cachedOpticalGpuMs = -1;
     Rotation historyRotation;
     bool rotationMode = false;
 
@@ -506,7 +507,7 @@ struct NativeMotion::State {
                 if (deviceMs >= 0)
                     opticalGpuMs += deviceMs;
             }
-        timing.opticalGpuMs = allTimed ? opticalGpuMs : -1;
+        cachedOpticalGpuMs = allTimed ? opticalGpuMs : -1;
         flowDirty = false;
     }
 };
@@ -623,6 +624,7 @@ bool NativeMotion::predict(
         return true;
     }
     s.estimate();
+    s.timing.opticalGpuMs = s.cachedOpticalGpuMs;
     auto flowEnd = std::chrono::steady_clock::now();
     s.begin();
     if (s.warpQueries) {
