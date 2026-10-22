@@ -13,6 +13,7 @@
 #include "SteamVrSync.h"
 
 #include "alvr_server/Logger.h"
+#include "alvr_server/driverlog.h"
 #include "alvr_server/include/openvr_math.h"
 #include <algorithm>
 #include <cmath>
@@ -814,7 +815,7 @@ void OvrDirectModeComponent::SubmitLayer(const SubmitLayerPerEye_t (&perEye)[2])
             sane=sane && layer.mProjection.m[0][0]!=0 && layer.mProjection.m[1][1]!=0;
             auto found=m_handleMap.find(layer.hDepthTexture);
             auto desc=found==m_handleMap.end()?SwapTextureSetDesc_t{}:found->second.first->textDesc;
-            Info("Submit depth pid=%u layer=%u eye=%d present=%d handle=%llu known=%d format=%u size=%ux%u projection_sane=%d z22=%g z23=%g z32=%g z33=%g",
+            DriverLog("Submit depth pid=%u layer=%u eye=%d present=%d handle=%llu known=%d format=%u size=%ux%u projection_sane=%d z22=%g z23=%g z32=%g z33=%g",
                 ownerPid,depthLayers,eye,layer.hDepthTexture!=0,(unsigned long long)layer.hDepthTexture,
                 found!=m_handleMap.end(),desc.nFormat,desc.nWidth,desc.nHeight,sane,
                 layer.mProjection.m[2][2],layer.mProjection.m[2][3],layer.mProjection.m[3][2],layer.mProjection.m[3][3]);
