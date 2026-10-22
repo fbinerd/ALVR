@@ -251,6 +251,12 @@ void OvrDirectModeComponent::EncodeWorkerLoop() {
     uint64_t lastStamp = 0, lastRealStamp = 0, slotIndex = 0, poseWaits = 0;
     uint64_t filled = 0, attempts = 0, noPose = 0, notNewer = 0, notReady = 0, rejected = 0;
     uint64_t jobsSeen = 0, timeouts = 0, retries = 0, presentsShort = 0, presentsLong = 0;
+    uint64_t jobsWithOverlays = 0, overlaySkips = 0;
+    // Overlays (the SteamVR dashboard, other layers over the scene) are
+    // composited before synthesis and would be extrapolated with the scene,
+    // leaving trails; while the newest real picture has any, slots are left
+    // to the headset's own reprojection.
+    bool newestHasOverlays = false;
     std::chrono::steady_clock::time_point retryAt {};
     auto nextReport = std::chrono::steady_clock::now();
     // Synthesizes and sends the picture for the current slot, stamped with
@@ -285,6 +291,10 @@ void OvrDirectModeComponent::EncodeWorkerLoop() {
         }
         if (m_encoderState.load() != EncoderState::Streaming) {
             ++notReady;
+            return false;
+        }
+        if (newestHasOverlays) {
+            ++overlaySkips;
             return false;
         }
         std::lock_guard<std::mutex> encLock(m_encMutex);
@@ -328,7 +338,8 @@ void OvrDirectModeComponent::EncodeWorkerLoop() {
                 Info(
                     "Native motion gap filling: jobs=%llu slots=%llu attempts=%llu retries=%llu "
                     "pose_waits=%llu filled=%llu no_pose=%llu not_newer=%llu not_streaming=%llu "
-                    "rejected=%llu presents<20ms=%llu presents>34ms=%llu\n",
+                    "rejected=%llu presents<20ms=%llu presents>34ms=%llu with_overlays=%llu "
+                    "overlay_skips=%llu\n",
                     (unsigned long long)jobsSeen,
                     (unsigned long long)timeouts,
                     (unsigned long long)attempts,
@@ -340,7 +351,9 @@ void OvrDirectModeComponent::EncodeWorkerLoop() {
                     (unsigned long long)notReady,
                     (unsigned long long)rejected,
                     (unsigned long long)presentsShort,
-                    (unsigned long long)presentsLong
+                    (unsigned long long)presentsLong,
+                    (unsigned long long)jobsWithOverlays,
+                    (unsigned long long)overlaySkips
                 );
             }
             if (gapFill && nextSlot != std::chrono::steady_clock::time_point {}) {
@@ -391,6 +404,8 @@ void OvrDirectModeComponent::EncodeWorkerLoop() {
             job = m_job;
             m_jobPending = false;
             ++jobsSeen;
+            jobsWithOverlays += job.layers.size() > 1;
+            newestHasOverlays = job.layers.size() > 1;
         }
 
         auto const ageLimit = std::chrono::duration_cast<std::chrono::nanoseconds>(

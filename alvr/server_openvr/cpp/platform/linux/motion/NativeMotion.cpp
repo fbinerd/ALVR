@@ -9,6 +9,9 @@
 #include <stdexcept>
 
 namespace alvr::motion {
+
+// Real pictures needed after a reset or pause before gap filling starts.
+constexpr unsigned GapFillWarmupPictures = 4;
 namespace {
     constexpr uint64_t TimeoutNs = 500'000'000;
     struct Image {
@@ -56,7 +59,12 @@ struct NativeMotion::State {
     unsigned retained = 0, latest = 0;
     bool captureThisFrame = true, flowDirty = false, idle = true, repeatReference = false,
          gapFill = false;
-    uint64_t gapRejected = 0, gapNoHistory = 0, historyResets = 0;
+    uint64_t gapRejected = 0, gapNoHistory = 0, historyResets = 0, gapWarmup = 0;
+    // Real pictures captured since the last history reset or pause; gap
+    // filling waits for a few of them so its first predictions do not use a
+    // cadence that has not settled yet (distorted pictures right after
+    // connecting).
+    unsigned warmCaptures = 0;
     double aheadFlowMs = -1, captureMsSum = 0, captureMsMax = 0;
     bool allowExactFlowExit, bidirectionalFlow;
     PredictionTiming timing;
@@ -554,6 +562,14 @@ bool NativeMotion::predict(
                 );
             return false;
         }
+        if (s.warmCaptures < GapFillWarmupPictures) {
+            if (++s.gapWarmup == 1 || s.gapWarmup % 60 == 0)
+                Info(
+                    "Native motion gap fill waiting for a stable history: %llu slots",
+                    static_cast<unsigned long long>(s.gapWarmup)
+                );
+            return false;
+        }
         uint64_t newest = s.clocks[s.latest], previous = s.clocks[1 - s.latest];
         uint64_t const target = clockNs ? clockNs : timestamp;
         if (!predictionTime(previous, newest, target, 1.5)) {
@@ -784,6 +800,10 @@ void NativeMotion::capture(
         s.retained = 0;
         ++s.historyResets;
     }
+    // A pause (no real picture for 100 ms) or a reset restarts the warm-up.
+    if (!s.retained || clock - s.clocks[s.latest] > 100'000'000)
+        s.warmCaptures = 0;
+    s.warmCaptures = std::min(s.warmCaptures + 1, 1000u);
     s.rotationMode = historyRotation != nullptr;
     if (historyRotation) s.historyRotation = *historyRotation;
     unsigned slot = s.retained ? 1 - s.latest : 0;

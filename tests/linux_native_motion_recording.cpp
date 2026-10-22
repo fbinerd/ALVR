@@ -42,7 +42,7 @@ int main(int argc,char** argv) {
             latestYaw=yaw;
             auto prepareStart=std::chrono::steady_clock::now();
             motion.prepare(); prepareMs=elapsed(prepareStart); latest=truth;
-        } else if(index>=3) {
+        } else if(index>=7) { // gap filling waits for four real pictures (warm-up)
             auto transform=rotationBetween(yaw-latestYaw);
             if(!motion.predict(gpu.image,gpu.view,gpu.layout,pose,{},clock,rotation?&transform:nullptr)) throw std::runtime_error("Gap-fill target rejected");
             auto image=gpu.transfer(nullptr); auto timing=motion.lastPredictionTiming();
