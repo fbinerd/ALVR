@@ -5,6 +5,7 @@
 #include <sys/un.h>
 
 #include <cstdlib>
+#include <fstream>
 #include <iostream>
 #include <unistd.h>
 
@@ -255,7 +256,7 @@ void OvrDirectModeComponent::EncodeWorkerLoop() {
     // the newest tracking pose: a real picture already carries (nearly) the
     // newest pose when presented, so this slot's pose has only just arrived,
     // and the prediction extrapolates the image to exactly that pose time.
-    bool const separateRotation = alvr::motion::nativeMotionMode() == 5;
+    bool const separateRotation = alvr::motion::nativeMotionMode() >= 5;
     vr::HmdQuaternion_t lastMotionOrientation {1,0,0,0};
     bool motionPoseValid = false;
     auto tryFill = [&](bool lastChance) -> bool {
@@ -796,6 +797,26 @@ void OvrDirectModeComponent::GetNextSwapTextureSetIndex(
  * layers have been submitted. */
 void OvrDirectModeComponent::SubmitLayer(const SubmitLayerPerEye_t (&perEye)[2]) {
     m_presentMutex.lock();
+
+    static bool const traceDepth = [] {
+        auto home=std::getenv("HOME");
+        return home && std::ifstream(std::string(home)+"/.config/alvr/diag_submit_depth").good();
+    }();
+    static unsigned depthLayers=0;
+    if (traceDepth && depthLayers++ < 120) {
+        for (int eye=0;eye<2;++eye) {
+            auto const& layer=perEye[eye];
+            bool sane=true;
+            for(auto const& row:layer.mProjection.m) for(float v:row) sane=sane && std::isfinite(v);
+            sane=sane && layer.mProjection.m[0][0]!=0 && layer.mProjection.m[1][1]!=0;
+            auto found=m_handleMap.find(layer.hDepthTexture);
+            auto desc=found==m_handleMap.end()?SwapTextureSetDesc_t{}:found->second.first->textDesc;
+            Info("Submit depth layer=%u eye=%d present=%d handle=%llu known=%d format=%u size=%ux%u projection_sane=%d z22=%g z23=%g z32=%g z33=%g",
+                depthLayers,eye,layer.hDepthTexture!=0,(unsigned long long)layer.hDepthTexture,
+                found!=m_handleMap.end(),desc.nFormat,desc.nWidth,desc.nHeight,sane,
+                layer.mProjection.m[2][2],layer.mProjection.m[2][3],layer.mProjection.m[3][2],layer.mProjection.m[3][3]);
+        }
+    }
 
     auto pPose = &perEye[0].mHmdPose; // TODO: are both poses the same? Name HMD suggests yes.
 
