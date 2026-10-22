@@ -46,12 +46,17 @@ public:
         vk::ImageView,
         vk::ImageLayout,
         uint64_t timestamp,
-        std::function<void()> const& releaseInput = {}
+        std::function<void()> const& releaseInput = {},
+        uint64_t clockNs = 0
     );
 
     // Retains an internally owned copy of a real frame on capture presentations.
     // Output's layout is restored; imported SteamVR images are never retained.
-    void capture(vk::Image output, vk::ImageLayout, uint64_t timestamp);
+    // clockNs (optional, steady-clock nanoseconds) is when the picture was
+    // presented. Gap filling times its extrapolation with these clocks rather
+    // than with pose timestamps, whose association to a picture can jump by
+    // a tracking sample; the pose timestamp stays the picture's stamp.
+    void capture(vk::Image output, vk::ImageLayout, uint64_t timestamp, uint64_t clockNs = 0);
 
     // Reference mode for measurements: same real/predicted cadence, but each
     // "predicted" picture repeats the newest real picture (no flow, no warp).

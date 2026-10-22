@@ -47,11 +47,12 @@ struct NativeMotion::State {
     vk::ShaderModule lumaShader {}, warpShader {};
     vk::Pipeline lumaPipeline {}, warpPipeline {};
     std::array<uint64_t, 2> timestamps {};
+    std::array<uint64_t, 2> clocks {};
     uint64_t presentations = 0, predictions = 0, captures = 0, rejected = 0;
     unsigned retained = 0, latest = 0;
     bool captureThisFrame = true, flowDirty = false, idle = true, repeatReference = false,
          gapFill = false;
-    uint64_t gapRejected = 0;
+    uint64_t gapRejected = 0, gapNoHistory = 0, historyResets = 0;
     double aheadFlowMs = -1, captureMsSum = 0, captureMsMax = 0;
     bool allowExactFlowExit, bidirectionalFlow;
     PredictionTiming timing;
@@ -525,23 +526,32 @@ bool NativeMotion::predict(
     vk::ImageView view,
     vk::ImageLayout layout,
     uint64_t timestamp,
-    std::function<void()> const& releaseInput
+    std::function<void()> const& releaseInput,
+    uint64_t clockNs
 ) {
     auto& s = *state;
     if (s.gapFill) {
         // Real pictures are all captured; this call is for a missed slot.
         s.captureThisFrame = true;
-        if (s.retained < 2)
+        if (s.retained < 2) {
+            if (++s.gapNoHistory == 1 || s.gapNoHistory % 60 == 0)
+                Info(
+                    "Native motion gap fill without two real pictures: %llu (history resets %llu)",
+                    static_cast<unsigned long long>(s.gapNoHistory),
+                    static_cast<unsigned long long>(s.historyResets)
+                );
             return false;
-        uint64_t newest = s.timestamps[s.latest], previous = s.timestamps[1 - s.latest];
-        if (!predictionTime(previous, newest, timestamp, 1.5)) {
-            if (++s.gapRejected == 1 || s.gapRejected % 360 == 0)
+        }
+        uint64_t newest = s.clocks[s.latest], previous = s.clocks[1 - s.latest];
+        uint64_t const target = clockNs ? clockNs : timestamp;
+        if (!predictionTime(previous, newest, target, 1.5)) {
+            if (++s.gapRejected == 1 || s.gapRejected % 60 == 0)
                 Info(
                     "Native motion gap fill rejected=%llu previous=%llu latest=%llu target=%llu",
                     static_cast<unsigned long long>(s.gapRejected),
                     static_cast<unsigned long long>(previous),
                     static_cast<unsigned long long>(newest),
-                    static_cast<unsigned long long>(timestamp)
+                    static_cast<unsigned long long>(target)
                 );
             return false;
         }
@@ -551,7 +561,9 @@ bool NativeMotion::predict(
             return false;
     }
     uint64_t newest = s.timestamps[s.latest], previous = s.timestamps[1 - s.latest];
-    auto time = predictionTime(previous, newest, timestamp, s.gapFill ? 1.5 : 0.55);
+    auto time = s.gapFill
+        ? predictionTime(s.clocks[1 - s.latest], s.clocks[s.latest], clockNs ? clockNs : timestamp, 1.5)
+        : predictionTime(previous, newest, timestamp, 0.55);
     // A long pause, restart or missed job must not extrapolate stale motion.
     if (!time) {
         if (++s.rejected == 1 || s.rejected % 360 == 0)
@@ -695,13 +707,18 @@ void NativeMotion::prepare() {
         = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
 }
 
-void NativeMotion::capture(vk::Image output, vk::ImageLayout layout, uint64_t timestamp) {
+void NativeMotion::capture(
+    vk::Image output, vk::ImageLayout layout, uint64_t timestamp, uint64_t clockNs
+) {
     auto& s = *state;
     if (!s.captureThisFrame || !timestamp)
         return;
     auto const captureStart = std::chrono::steady_clock::now();
-    if (s.retained && timestamp <= s.timestamps[s.latest])
+    uint64_t const clock = clockNs ? clockNs : timestamp;
+    if (s.retained && clock <= s.clocks[s.latest]) {
         s.retained = 0;
+        ++s.historyResets;
+    }
     unsigned slot = s.retained ? 1 - s.latest : 0;
     s.begin();
     // In the General layout the copy only reads the output, without a layout
@@ -740,6 +757,7 @@ void NativeMotion::capture(vk::Image output, vk::ImageLayout layout, uint64_t ti
     s.submit(!deferred);
     s.latest = slot;
     s.timestamps[slot] = timestamp;
+    s.clocks[slot] = clock;
     s.retained = std::min(2u, s.retained + 1);
     s.flowDirty = s.retained == 2;
     ++s.captures;

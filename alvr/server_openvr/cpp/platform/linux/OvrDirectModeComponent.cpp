@@ -233,7 +233,7 @@ void OvrDirectModeComponent::EncodeWorkerLoop() {
     std::chrono::steady_clock::time_point nextSlot {}, lastRealOutput {};
     uint64_t lastStamp = 0, lastRealStamp = 0, slotIndex = 0, poseWaits = 0;
     uint64_t filled = 0, attempts = 0, noPose = 0, notNewer = 0, notReady = 0, rejected = 0;
-    uint64_t jobsSeen = 0, timeouts = 0, retries = 0;
+    uint64_t jobsSeen = 0, timeouts = 0, retries = 0, presentsShort = 0, presentsLong = 0;
     std::chrono::steady_clock::time_point retryAt {};
     auto nextReport = std::chrono::steady_clock::now();
     // Synthesizes and sends the picture for the current slot, stamped with
@@ -268,7 +268,10 @@ void OvrDirectModeComponent::EncodeWorkerLoop() {
         }
         std::lock_guard<std::mutex> encLock(m_encMutex);
         try {
-            if (m_encoderReady && enc.fill(pose->targetTimestampNs)) {
+            auto const slotClockNs = (uint64_t)std::chrono::duration_cast<
+                                         std::chrono::nanoseconds>(nextSlot.time_since_epoch())
+                                         .count();
+            if (m_encoderReady && enc.fill(pose->targetTimestampNs, slotClockNs)) {
                 lastStamp = pose->targetTimestampNs;
                 ++filled;
                 return true;
@@ -296,7 +299,7 @@ void OvrDirectModeComponent::EncodeWorkerLoop() {
                 Info(
                     "Native motion gap filling: jobs=%llu slots=%llu attempts=%llu retries=%llu "
                     "pose_waits=%llu filled=%llu no_pose=%llu not_newer=%llu not_streaming=%llu "
-                    "rejected=%llu\n",
+                    "rejected=%llu presents<20ms=%llu presents>34ms=%llu\n",
                     (unsigned long long)jobsSeen,
                     (unsigned long long)timeouts,
                     (unsigned long long)attempts,
@@ -306,7 +309,9 @@ void OvrDirectModeComponent::EncodeWorkerLoop() {
                     (unsigned long long)noPose,
                     (unsigned long long)notNewer,
                     (unsigned long long)notReady,
-                    (unsigned long long)rejected
+                    (unsigned long long)rejected,
+                    (unsigned long long)presentsShort,
+                    (unsigned long long)presentsLong
                 );
             }
             if (gapFill && nextSlot != std::chrono::steady_clock::time_point {}) {
@@ -316,6 +321,13 @@ void OvrDirectModeComponent::EncodeWorkerLoop() {
                 if (!m_jobCv.wait_until(lock, deadline, ready)) {
                     lock.unlock();
                     auto const now = std::chrono::steady_clock::now();
+                    // No real picture for several intervals (client gone,
+                    // application paused or loading): stop until one arrives.
+                    if (now - lastRealOutput > frameInterval() * 4) {
+                        nextSlot = {};
+                        retryAt = {};
+                        continue;
+                    }
                     if (retryAt == std::chrono::steady_clock::time_point {}) {
                         ++timeouts;
                         ++slotIndex;
@@ -483,15 +495,29 @@ void OvrDirectModeComponent::EncodeWorkerLoop() {
             }
 
             uint64_t const frame = job.frame;
-            enc.present(stampTimestampNs, warpParams, job.layers, [this, frame] {
-                MarkRead(frame);
-            });
+            auto const presentClockNs = (uint64_t)std::chrono::duration_cast<
+                                            std::chrono::nanoseconds>(
+                                            job.enqueueTime.time_since_epoch()
+            )
+                                            .count();
+            enc.present(
+                stampTimestampNs,
+                warpParams,
+                job.layers,
+                [this, frame] { MarkRead(frame); },
+                presentClockNs
+            );
             MarkRead(frame);
             if (gapFill) {
                 // Slots count from the Present that brought this picture,
                 // not from the end of its encode (which can take most of a
                 // frame interval and would push every deadline past the
                 // application's next Present).
+                if (lastRealOutput != std::chrono::steady_clock::time_point {}) {
+                    auto gap = job.enqueueTime - lastRealOutput;
+                    presentsShort += gap < std::chrono::milliseconds(20);
+                    presentsLong += gap > std::chrono::milliseconds(34);
+                }
                 lastRealOutput = job.enqueueTime;
                 nextSlot = lastRealOutput + frameInterval();
                 retryAt = {};

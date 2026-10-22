@@ -509,7 +509,8 @@ public:
         u64 targetTimestampNs,
         render::WarpParams const& warp,
         std::vector<render::Layer> const& layers,
-        std::function<void()> const& afterRead
+        std::function<void()> const& afterRead,
+        u64 presentClockNs = 0
     ) {
         if (!encoder) {
             // Say it once instead of at frame rate.
@@ -539,7 +540,9 @@ public:
             afterRead();
             if (nativeMotion) {
                 output = renderer.get().getOutput();
-                nativeMotion->capture(output.image.image, output.image.layout, targetTimestampNs);
+                nativeMotion->capture(
+                    output.image.image, output.image.layout, targetTimestampNs, presentClockNs
+                );
             }
         }
         ReportComposed(targetTimestampNs, 0);
@@ -572,12 +575,17 @@ public:
     // slot the application missed, stamped with targetTimestampNs (the
     // newest tracking pose). False when there is nothing to synthesize from
     // or the prediction is rejected; then nothing is sent.
-    bool fill(u64 targetTimestampNs) {
+    bool fill(u64 targetTimestampNs, u64 slotClockNs) {
         if (!encoder || !nativeMotion || !nativeMotion->gapFill() || !renderer.hasValue())
             return false;
         auto output = renderer.get().getOutput();
         if (!nativeMotion->predict(
-                output.image.image, output.image.view, output.image.layout, targetTimestampNs
+                output.image.image,
+                output.image.view,
+                output.image.layout,
+                targetTimestampNs,
+                {},
+                slotClockNs
             ))
             return false;
         ReportPresent(targetTimestampNs, 0);
