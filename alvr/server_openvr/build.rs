@@ -266,6 +266,7 @@ fn main() {
                 .to_string_lossy()
         );
         println!("cargo:rustc-link-lib=openvr_api");
+        println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN");
     } else if platform_name == "windows" {
         println!(
             "cargo:rustc-link-search=native={}",

@@ -207,6 +207,10 @@ pub fn build_streamer(
         )
         .unwrap();
     } else if cfg!(target_os = "linux") {
+        // The driver declares this dependency; a cold runtime must resolve it
+        // without an inherited developer LD_LIBRARY_PATH.
+        sh.copy_file(afs::workspace_dir().join("openvr/lib/linux64/libopenvr_api.so"),
+            build_layout.openvr_driver_lib_dir()).unwrap();
         let firewall_script = afs::crate_dir("xtask").join("firewall/alvr_fw_config.sh");
         let firewalld = afs::crate_dir("xtask").join("firewall/alvr-firewalld.xml");
         let ufw = afs::crate_dir("xtask").join("firewall/ufw-alvr");
