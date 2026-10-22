@@ -96,3 +96,12 @@ behaviour, not the actual Quest calibration or headset comfort.
 The root evaluator now verifies packet sizes through the whole selected
 window and fails on decoder errors, rather than only checking eight startup
 packets. A restarted or truncated stream must not be silently treated as truth.
+
+The follow-up mode-7 filter uses explicit rational colour weights and reuses
+its four vector samples, avoiding nested exponential weighting in the inverse
+solve. Reciprocal and inverse-solve errors supply continuous confidence rather
+than a hard two-pixel validity cutoff. This reduces one measured slow-yaw
+p95 (16.90 -> 13.65 ms), but does not bound the maximum or prove live deadlines.
+Slow-yaw MAE/temporal error improve against mode 5 while its Block8 score can
+slightly worsen; headset A/B remains necessary. Identical and one-code-noisy
+static synthetic output stays byte-identical to newest.

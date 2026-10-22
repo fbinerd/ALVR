@@ -122,22 +122,24 @@ vec2 flowAt(bool reverse,bool right,vec2 q) {
     vec2 v=clamp((q+0.5)*scale/4.0-0.5,vec2(0),grid-1);
     ivec2 a=ivec2(v), b=min(a+1,ivec2(grid)-1);
     vec2 f=fract(v);
-    vec2 t=mix(mix(vec2(vectorAt(reverse,right,a)),vec2(vectorAt(reverse,right,ivec2(b.x,a.y))),f.x),
-               mix(vec2(vectorAt(reverse,right,ivec2(a.x,b.y))),vec2(vectorAt(reverse,right,b)),f.x),f.y);
+    vec2 f00=vec2(vectorAt(reverse,right,a));
+    vec2 f10=vec2(vectorAt(reverse,right,ivec2(b.x,a.y)));
+    vec2 f01=vec2(vectorAt(reverse,right,ivec2(a.x,b.y)));
+    vec2 f11=vec2(vectorAt(reverse,right,b));
+    vec2 t=mix(mix(f00,f10,f.x),mix(f01,f11,f.x),f.y);
     if ((p.rotationMode&4u)!=0u) {
-        // Bilateral upsampling is continuous across flow-cell boundaries;
-        // its colour guide reduces foreground/background vector bleeding.
+        // Continuous rational colour weights avoid an exponential/loop inside
+        // every inverse-flow iteration and reuse the four vector samples.
         vec3 guide=guideAt(right,q);
-        vec2 sum=vec2(0); float weight=0;
-        for(int y=0;y<2;y++) for(int x=0;x<2;x++) {
-            ivec2 cell=ivec2(x==0?a.x:b.x,y==0?a.y:b.y);
-            vec2 center=(vec2(cell)+0.5)*4.0/scale-0.5;
-            vec3 delta=guideAt(right,center)-guide;
-            float w=(x==0?1.0-f.x:f.x)*(y==0?1.0-f.y:f.y)
-                *exp(-dot(delta,delta)/0.02);
-            sum+=w*vec2(vectorAt(reverse,right,cell)); weight+=w;
-        }
-        if(weight>1e-6) t=sum/weight;
+        vec2 c0=(vec2(a)+0.5)*4.0/scale-0.5;
+        vec2 c1=(vec2(b)+0.5)*4.0/scale-0.5;
+        vec3 d00=guideAt(right,c0)-guide;
+        vec3 d10=guideAt(right,vec2(c1.x,c0.y))-guide;
+        vec3 d01=guideAt(right,vec2(c0.x,c1.y))-guide;
+        vec3 d11=guideAt(right,c1)-guide;
+        vec4 w=vec4((1-f.x)*(1-f.y),f.x*(1-f.y),(1-f.x)*f.y,f.x*f.y)
+            /(1.0+50.0*vec4(dot(d00,d00),dot(d10,d10),dot(d01,d01),dot(d11,d11)));
+        t=(w.x*f00+w.y*f10+w.z*f01+w.w*f11)/dot(w,vec4(1));
         vec2 pixels=t/32.0/scale;
         // Thresholds are in full output pixels, independent of luma scale.
         return pixels*smoothstep(0.5,1.5,length(pixels));
@@ -148,6 +150,7 @@ bool inside(vec2 q) {
     return !any(isnan(q)) && !any(isinf(q)) && all(greaterThanEqual(q,vec2(0)))
         && all(lessThanEqual(q,vec2(p.eyeWidth-1,p.height-1)));
 }
+float residualConfidence=1.0;
 bool sourceAt(vec2 target,float distance,bool reverse,bool right,out vec2 q) {
     q=target;
     vec2 v=vec2(0);
@@ -167,6 +170,13 @@ bool sourceAt(vec2 target,float distance,bool reverse,bool right,out vec2 q) {
     if (!inside(q)) return false;
     if (!settled) v=flowAt(reverse,right,q);
     vec2 other=q+v;
+    // Mode 7 blends reciprocal/inversion disagreement continuously instead
+    // of introducing a hard valid/invalid edge at a flow-cell boundary.
+    if ((p.rotationMode&4u)!=0u) {
+        residualConfidence=(1.0-smoothstep(0.25,1.5,length(q+distance*v-target)))
+            *(1.0-smoothstep(0.75,3.0,length(v+flowAt(!reverse,right,other))));
+        return inside(other);
+    }
     // Thresholds are in full-resolution pixels at either estimator resolution.
     return inside(other) && length(q+distance*v-target)<=1.0
         && length(v+flowAt(!reverse,right,other))<=2.0;
@@ -292,7 +302,7 @@ void main() {
         vec2 older=rotatePixel(target,right,p.previousQuaternion);
         vec2 margin=min(older,vec2(p.eyeWidth-1,p.height-1)-older);
         float visible=smoothstep(0.0,8.0,min(margin.x,margin.y));
-        color=mix(rotationOnly,color,activity*visible);
+        color=mix(rotationOnly,color,activity*visible*residualConfidence);
     }
     imageStore(outputImage,ivec2(xy),color);
 }
