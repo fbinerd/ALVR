@@ -38,3 +38,35 @@ Raw RGBA is deleted after success; failed runs retain it for diagnosis.
 Recordings with dummy views have identical eyes: they cannot validate stereo
 parallax. Ten synthetic scenes and recovery cases remain a separate check:
 `tests/build_linux_native_motion.sh` and `tests/run_linux_native_motion.sh`.
+
+## Rotation-separated comparison
+
+Pass `--rotation` to the companion evaluator to align previous luma into the
+newest image's pose and rotate the residual prediction into the exact target
+pose. It interpolates recorded yaw at the frame's stamped pose time and uses
+the mock's `ViewParams::DUMMY` FOV (angles +/-1 radian). This switch is valid
+for those mock recordings, not arbitrary recordings with unknown calibration.
+The production driver computes full quaternion deltas and actual per-eye FOV.
+The old statement above that the evaluator never compensates rotation applies
+to its default baseline only.
+
+Mode 4 remains the previous gap filler. Mode 5 selects rotation separation;
+mode 6 adds continuous reciprocal-flow / photometric confidence blending.
+Use `--confidence` for mode 6 offline; it implies `--rotation`. Mode 6 is an
+experiment: it improves the Oct 21 window, but worsens MAE and boundary error
+slightly against mode 5 in the Oct 22 window. Do not silently replace mode 5.
+The blend uses a photometric cost proxy; native NVIDIA cost values have not
+been calibrated into a confidence probability.
+
+`optical_gpu_ms` now survives prepared-flow reuse. If the optical queue lacks
+timestamp support, timestamps bracket pack through unpack on the render queue;
+that fallback includes queue dependencies. GPU time excludes CPU descheduling
+and is not a proof that the display deadline will be met end to end. No
+adaptive cap is used: the current recorded samples remain below 13.9 ms in
+GPU time; wall-time tails and heavier applications still require evaluation.
+
+Depth diagnostics: create `~/.config/alvr/diag_submit_depth` before SteamVR
+starts to log up to 120 layers per submitting process. Metadata is reported
+only when the handle belongs to the driver's registered texture map; absent
+or unknown depth must not be labeled linear/reversed-Z from projection alone.
+The file is default-off; it never changes submitted layers or uses depth.
