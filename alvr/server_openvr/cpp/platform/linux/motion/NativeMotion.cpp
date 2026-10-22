@@ -52,7 +52,7 @@ struct NativeMotion::State {
     bool captureThisFrame = true, flowDirty = false, idle = true, repeatReference = false,
          gapFill = false;
     uint64_t gapRejected = 0;
-    double aheadFlowMs = -1;
+    double aheadFlowMs = -1, captureMsSum = 0, captureMsMax = 0;
     bool allowExactFlowExit, bidirectionalFlow;
     PredictionTiming timing;
 
@@ -368,9 +368,16 @@ struct NativeMotion::State {
         );
     }
 
+    // Waits for a submission left running by submit(false).
+    void waitPending() {
+        if (idle)
+            return;
+        if (ctx.dev.waitForFences(fence, true, TimeoutNs) != vk::Result::eSuccess)
+            throw std::runtime_error("Native motion GPU submission timed out");
+        idle = true;
+    }
     void begin() {
-        if (!idle)
-            throw std::runtime_error("Native motion submission still pending");
+        waitPending();
         command.reset();
         command.begin(vk::CommandBufferBeginInfo {
             .flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit });
@@ -401,15 +408,16 @@ struct NativeMotion::State {
         barrier(image.handle, image.layout, after);
         image.layout = after;
     }
-    void submit() {
+    // wait=false leaves the work running; begin(), estimate() and
+    // NativeMotion::waitIdle() wait for it before anything depends on it.
+    void submit(bool wait = true) {
         command.end();
         ctx.dev.resetFences(fence);
         vk::SubmitInfo info { .commandBufferCount = 1, .pCommandBuffers = &command };
         ctx.useQueue([&](auto& queue) { queue.submit(info, fence); });
         idle = false;
-        if (ctx.dev.waitForFences(fence, true, TimeoutNs) != vk::Result::eSuccess)
-            throw std::runtime_error("Native motion GPU submission timed out");
-        idle = true;
+        if (wait)
+            waitPending();
     }
     void dispatch(
         vk::Pipeline pipeline,
@@ -458,6 +466,8 @@ struct NativeMotion::State {
     void estimate() {
         if (!flowDirty)
             return;
+        // The optical-flow queue reads lumas a deferred capture may still write.
+        waitPending();
         double opticalGpuMs = 0;
         bool allTimed = true;
         for (unsigned eye = 0; eye < 2; ++eye)
@@ -664,6 +674,8 @@ bool NativeMotion::predict(
 
 NativeMotion::PredictionTiming NativeMotion::lastPredictionTiming() const { return state->timing; }
 
+void NativeMotion::waitIdle() { state->waitPending(); }
+
 void NativeMotion::setRepeatReference(bool repeat) { state->repeatReference = repeat; }
 
 void NativeMotion::setGapFill(bool fill) {
@@ -687,11 +699,19 @@ void NativeMotion::capture(vk::Image output, vk::ImageLayout layout, uint64_t ti
     auto& s = *state;
     if (!s.captureThisFrame || !timestamp)
         return;
+    auto const captureStart = std::chrono::steady_clock::now();
     if (s.retained && timestamp <= s.timestamps[s.latest])
         s.retained = 0;
     unsigned slot = s.retained ? 1 - s.latest : 0;
     s.begin();
-    s.barrier(output, layout, vk::ImageLayout::eTransferSrcOptimal);
+    // In the General layout the copy only reads the output, without a layout
+    // change, so it can run while the encoder reads the same picture: the
+    // capture then does not wait (the encoder calls waitIdle() before the
+    // next render writes the output). Other layouts keep the waiting path.
+    bool const deferred = layout == vk::ImageLayout::eGeneral;
+    vk::ImageLayout const copyLayout
+        = deferred ? vk::ImageLayout::eGeneral : vk::ImageLayout::eTransferSrcOptimal;
+    s.barrier(output, layout, copyLayout);
     s.transition(s.colors[slot], vk::ImageLayout::eTransferDstOptimal);
     vk::ImageCopy copy {
         .srcSubresource = { vk::ImageAspectFlagBits::eColor, 0, 0, 1 },
@@ -699,14 +719,11 @@ void NativeMotion::capture(vk::Image output, vk::ImageLayout layout, uint64_t ti
         .extent = { s.extent.width, s.extent.height, 1 },
     };
     s.command.copyImage(
-        output,
-        vk::ImageLayout::eTransferSrcOptimal,
-        s.colors[slot].handle,
-        vk::ImageLayout::eTransferDstOptimal,
-        copy
+        output, copyLayout, s.colors[slot].handle, vk::ImageLayout::eTransferDstOptimal, copy
     );
     s.transition(s.colors[slot], vk::ImageLayout::eShaderReadOnlyOptimal);
-    s.barrier(output, vk::ImageLayout::eTransferSrcOptimal, layout);
+    if (!deferred)
+        s.barrier(output, copyLayout, layout);
     for (uint32_t eye = 0; eye < 2; ++eye) {
         auto& luma = s.lumas[slot][eye];
         s.transition(luma, vk::ImageLayout::eGeneral);
@@ -720,11 +737,28 @@ void NativeMotion::capture(vk::Image output, vk::ImageLayout layout, uint64_t ti
         );
         s.transition(luma, vk::ImageLayout::eShaderReadOnlyOptimal);
     }
-    s.submit();
+    s.submit(!deferred);
     s.latest = slot;
     s.timestamps[slot] = timestamp;
     s.retained = std::min(2u, s.retained + 1);
     s.flowDirty = s.retained == 2;
     ++s.captures;
+    // Capture runs on the encode path for every retained real picture.
+    double ms = std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - captureStart
+    )
+                    .count();
+    s.captureMsMax = std::max(s.captureMsMax, ms);
+    s.captureMsSum += ms;
+    if (s.captures % 360 == 0) {
+        Info(
+            "Native motion capture: %llu pictures, mean %.2f ms, max %.2f ms (last 360)",
+            static_cast<unsigned long long>(s.captures),
+            s.captureMsSum / 360.0,
+            s.captureMsMax
+        );
+        s.captureMsSum = 0;
+        s.captureMsMax = 0;
+    }
 }
 }

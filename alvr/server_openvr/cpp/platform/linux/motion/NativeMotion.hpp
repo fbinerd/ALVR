@@ -59,6 +59,10 @@ public:
     // synthesis, the baseline synthesis has to beat.
     void setRepeatReference(bool);
 
+    // Waits for a capture still running on the GPU. Call it before anything
+    // writes the picture that was captured (the next render).
+    void waitIdle();
+
     // Runs the optical flow for the next prediction as soon as two real
     // pictures are retained. Call it after the real picture has been encoded
     // and sent: the flow then runs in the gap before the next presentation,

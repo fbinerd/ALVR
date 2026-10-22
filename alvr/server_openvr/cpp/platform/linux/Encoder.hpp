@@ -532,6 +532,9 @@ public:
                 afterRead
             );
         if (!predicted) {
+            // A deferred capture may still be reading the output image.
+            if (nativeMotion)
+                nativeMotion->waitIdle();
             renderer.get().render(vkCtx, layers);
             afterRead();
             if (nativeMotion) {
