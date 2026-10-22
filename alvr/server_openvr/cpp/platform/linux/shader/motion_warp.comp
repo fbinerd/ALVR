@@ -111,6 +111,11 @@ ivec2 vectorAt(bool reverse,bool right,ivec2 q) {
     if (right) return reverse?texelFetch(backwardRight,q,0).xy:texelFetch(forwardRight,q,0).xy;
     return reverse?texelFetch(backwardLeft,q,0).xy:texelFetch(forwardLeft,q,0).xy;
 }
+vec3 guideAt(bool right,vec2 q) {
+    q=clamp(q,vec2(0),vec2(p.eyeWidth-1,p.height-1));
+    q.x+=right?float(p.eyeWidth):0.0;
+    return texture(latestImage,(q+0.5)/vec2(2*p.eyeWidth,p.height)).rgb;
+}
 vec2 flowAt(bool reverse,bool right,vec2 q) {
     vec2 scale=vec2(p.lumaWidth,p.lumaHeight)/vec2(p.eyeWidth,p.height);
     vec2 grid=vec2(p.lumaWidth/4,p.lumaHeight/4);
@@ -119,6 +124,24 @@ vec2 flowAt(bool reverse,bool right,vec2 q) {
     vec2 f=fract(v);
     vec2 t=mix(mix(vec2(vectorAt(reverse,right,a)),vec2(vectorAt(reverse,right,ivec2(b.x,a.y))),f.x),
                mix(vec2(vectorAt(reverse,right,ivec2(a.x,b.y))),vec2(vectorAt(reverse,right,b)),f.x),f.y);
+    if ((p.rotationMode&4u)!=0u) {
+        // Bilateral upsampling is continuous across flow-cell boundaries;
+        // its colour guide reduces foreground/background vector bleeding.
+        vec3 guide=guideAt(right,q);
+        vec2 sum=vec2(0); float weight=0;
+        for(int y=0;y<2;y++) for(int x=0;x<2;x++) {
+            ivec2 cell=ivec2(x==0?a.x:b.x,y==0?a.y:b.y);
+            vec2 center=(vec2(cell)+0.5)*4.0/scale-0.5;
+            vec3 delta=guideAt(right,center)-guide;
+            float w=(x==0?1.0-f.x:f.x)*(y==0?1.0-f.y:f.y)
+                *exp(-dot(delta,delta)/0.02);
+            sum+=w*vec2(vectorAt(reverse,right,cell)); weight+=w;
+        }
+        if(weight>1e-6) t=sum/weight;
+        vec2 pixels=t/32.0/scale;
+        // Thresholds are in full output pixels, independent of luma scale.
+        return pixels*smoothstep(0.5,1.5,length(pixels));
+    }
     return t/32.0/scale;
 }
 bool inside(vec2 q) {
@@ -165,9 +188,10 @@ void main() {
     bool rotated=p.rotationMode!=0 &&
         (!all(equal(p.previousQuaternion,vec4(0,0,0,1))) ||
          !all(equal(p.targetQuaternion,vec4(0,0,0,1))));
-    if(!rotated) fitTemporalTile(base,tileRight,fullTile);
+    bool stable=(p.rotationMode&4u)!=0u;
+    if(!rotated && !stable) fitTemporalTile(base,tileRight,fullTile);
     else { if(gl_LocalInvocationIndex==0) {temporalTile=0; colorOnlyTile=0;} barrier(); }
-    if(rotated) fullTile=false;
+    if(rotated || stable) fullTile=false;
     if (gl_LocalInvocationIndex<4) {
         uint i=gl_LocalInvocationIndex;
         vec2 at=vec2(base.x%p.eyeWidth+(i%2)*7,base.y+(i/2)*7), source;
@@ -184,6 +208,19 @@ void main() {
     vec2 target=vec2(xy.x%p.eyeWidth,xy.y), q;
     if(p.rotationMode!=0) target=rotatePixel(target,right,p.targetQuaternion);
     vec4 color=p.rotationMode!=0?colorAt(true,right,target):texelFetch(latestImage,ivec2(xy),0);
+    vec4 rotationOnly=color;
+    if(stable) {
+        // Newly exposed pixels have no history. Retain the rotation-only
+        // newest picture, rather than extending a residual edge vector.
+        vec2 older=rotatePixel(target,right,p.previousQuaternion);
+        if(!inside(target) || !inside(older)) {
+            imageStore(outputImage,ivec2(xy),rotationOnly); return;
+        }
+        vec3 change=abs(rotationOnly.rgb-colorAt(false,right,target).rgb);
+        if(max(max(change.r,change.g),change.b)<=1.0/255.0) {
+            imageStore(outputImage,ivec2(xy),rotationOnly); return;
+        }
+    }
     vec4 previous=texelFetch(previousImage,ivec2(xy),0);
     vec3 delta=color.rgb-previous.rgb;
     float horizon=p.time-1.0;
@@ -211,7 +248,7 @@ void main() {
     } else {
         // Motion boundaries and failed corner checks retain per-pixel inversion.
         valid=sourceAt(target,1.0-p.time,true,right,q);
-        if (!valid) {
+        if (!valid && !stable) {
             // Occlusion edges fail the consistency check. Leaving the pixel
             // unmoved while its neighbours move tears edges into blocks, so
             // take the smallest candidate motion instead: near an occlusion
@@ -248,6 +285,14 @@ void main() {
             *(1.0-smoothstep(0.04,0.25,cost));
         if (!inside(target) || !inside(other)) confidence=0;
         color=mix(colorAt(true,right,target),color,confidence);
+    }
+    if(stable) {
+        vec3 change=abs(rotationOnly.rgb-colorAt(false,right,target).rgb);
+        float activity=smoothstep(1.0/255.0,4.0/255.0,max(max(change.r,change.g),change.b));
+        vec2 older=rotatePixel(target,right,p.previousQuaternion);
+        vec2 margin=min(older,vec2(p.eyeWidth-1,p.height-1)-older);
+        float visible=smoothstep(0.0,8.0,min(margin.x,margin.y));
+        color=mix(rotationOnly,color,activity*visible);
     }
     imageStore(outputImage,ivec2(xy),color);
 }

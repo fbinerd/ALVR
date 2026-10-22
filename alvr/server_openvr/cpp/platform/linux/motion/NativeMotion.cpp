@@ -5,6 +5,7 @@
 
 #include <array>
 #include <chrono>
+#include <cmath>
 #include <stdexcept>
 
 namespace alvr::motion {
@@ -61,7 +62,7 @@ struct NativeMotion::State {
     PredictionTiming timing;
     double cachedOpticalGpuMs = -1;
     Rotation historyRotation;
-    bool rotationMode = false, confidenceFallback = false;
+    bool rotationMode = false, confidenceFallback = false, stableResidual = false;
 
     State(
         VkContext& c,
@@ -274,9 +275,13 @@ struct NativeMotion::State {
                 );
             }
         vk::Extent2D flowSize { lumaExtent.width / 4, lumaExtent.height / 4 };
+        auto flowUsage = sampled | transferDst;
+#ifdef ALVR_NATIVE_MOTION_TESTING
+        flowUsage |= vk::ImageUsageFlagBits::eTransferSrc;
+#endif
         for (auto& pair : flows)
             for (auto& image : pair)
-                makeImage(image, flowSize, vk::Format::eR16G16Sint, sampled | transferDst);
+                makeImage(image, flowSize, vk::Format::eR16G16Sint, flowUsage);
         for (auto& image : costs)
             makeImage(image, flowSize, vk::Format::eR16G16Sint, sampled | transferDst);
         if (bidirectionalFlow)
@@ -636,7 +641,7 @@ bool NativeMotion::predict(
         s.extent.width / 2, s.extent.height, s.lumaExtent.width, s.lumaExtent.height, *time
     };
     if (s.rotationMode) {
-        push.rotationMode = s.confidenceFallback ? 3 : 1;
+        push.rotationMode = s.stableResidual ? 5 : (s.confidenceFallback ? 3 : 1);
         std::copy_n(s.historyRotation.quaternion, 4, push.previousQuaternion);
         std::copy_n(targetRotation->quaternion, 4, push.targetQuaternion);
         std::copy_n(targetRotation->leftTans, 4, push.leftTans);
@@ -706,6 +711,49 @@ void NativeMotion::waitIdle() { state->waitPending(); }
 void NativeMotion::setRepeatReference(bool repeat) { state->repeatReference = repeat; }
 
 void NativeMotion::setConfidenceFallback(bool enabled) { state->confidenceFallback = enabled; }
+#ifdef ALVR_NATIVE_MOTION_TESTING
+std::vector<float> NativeMotion::diagnosticResidualMagnitudes() {
+    auto& s=*state; s.estimate(); s.waitPending();
+    auto extent=s.flows[0][0].extent;
+    vk::DeviceSize bytes=vk::DeviceSize(extent.width)*extent.height*4;
+    auto buffer=s.ctx.dev.createBuffer(vk::BufferCreateInfo {
+        .size=bytes*4, .usage=vk::BufferUsageFlagBits::eTransferDst,
+        .sharingMode=vk::SharingMode::eExclusive });
+    auto requirements=s.ctx.dev.getBufferMemoryRequirements(buffer);
+    auto properties=s.ctx.physDev.getMemoryProperties(); uint32_t type=UINT32_MAX;
+    auto flags=vk::MemoryPropertyFlagBits::eHostVisible|vk::MemoryPropertyFlagBits::eHostCoherent;
+    for(uint32_t i=0;i<properties.memoryTypeCount;i++)
+        if((requirements.memoryTypeBits&(1u<<i)) && (properties.memoryTypes[i].propertyFlags&flags)==flags) {type=i;break;}
+    if(type==UINT32_MAX) throw std::runtime_error("No diagnostic host memory");
+    auto memory=s.ctx.dev.allocateMemory(vk::MemoryAllocateInfo {.allocationSize=requirements.size,.memoryTypeIndex=type});
+    s.ctx.dev.bindBufferMemory(buffer,memory,0);
+    s.begin();
+    for(unsigned eye=0;eye<2;eye++) for(unsigned direction=0;direction<2;direction++) {
+        auto& image=s.flows[eye][direction];auto before=image.layout;
+        s.transition(image,vk::ImageLayout::eTransferSrcOptimal);
+        vk::BufferImageCopy copy {.bufferOffset=bytes*(eye*2+direction),
+            .imageSubresource={vk::ImageAspectFlagBits::eColor,0,0,1},
+            .imageExtent={extent.width,extent.height,1}};
+        s.command.copyImageToBuffer(image.handle,image.layout,buffer,copy);
+        s.transition(image,before);
+    }
+    s.submit();
+    auto values=static_cast<int16_t*>(s.ctx.dev.mapMemory(memory,0,bytes*4));
+    std::vector<float> result;
+    // Interior only: pixels revealed by rotation do not have correspondence.
+    for(unsigned image=0;image<4;image++)
+        for(uint32_t y=extent.height/5;y<extent.height*4/5;y++)
+            for(uint32_t x=extent.width/5;x<extent.width*4/5;x++) {
+                auto at=(image*extent.width*extent.height+y*extent.width+x)*2;
+                float dx=values[at]/32.f*(s.extent.width/2)/s.lumaExtent.width;
+                float dy=values[at+1]/32.f*s.extent.height/s.lumaExtent.height;
+                result.push_back(std::sqrt(dx*dx+dy*dy));
+            }
+    s.ctx.dev.unmapMemory(memory);s.ctx.dev.destroy(buffer);s.ctx.dev.free(memory);
+    return result;
+}
+#endif
+void NativeMotion::setStableResidual(bool enabled) { state->stableResidual = enabled; }
 
 void NativeMotion::setGapFill(bool fill) {
     state->gapFill = fill;

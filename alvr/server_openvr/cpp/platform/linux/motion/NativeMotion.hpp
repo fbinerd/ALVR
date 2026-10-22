@@ -2,6 +2,7 @@
 
 #include "../VkContext.hpp"
 #include <memory>
+#include <vector>
 
 namespace alvr::motion {
 
@@ -84,6 +85,12 @@ public:
     // application missed a display slot). It then extrapolates from the two
     // newest real pictures to the given timestamp.
     void setConfidenceFallback(bool);
+    // Mode 7: continuous residual filtering, static dead zone and border fallback.
+    void setStableResidual(bool);
+#ifdef ALVR_NATIVE_MOTION_TESTING
+    // Test-only readback of raw residual vectors, in output pixels; no runtime cost.
+    std::vector<float> diagnosticResidualMagnitudes();
+#endif
     void setGapFill(bool);
     bool gapFill() const;
 

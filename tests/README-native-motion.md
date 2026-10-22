@@ -70,3 +70,29 @@ starts to log up to 120 layers per submitting process. Metadata is reported
 only when the handle belongs to the driver's registered texture map; absent
 or unknown depth must not be labeled linear/reversed-Z from projection alone.
 The file is default-off; it never changes submitted layers or uses depth.
+
+## Stable residual comparison (mode 7)
+
+`diag_native_motion = 7` retains rotation separation, disables the tile temporal
+fit/corner shortcuts, upsamples the residual with a continuous 2x2 colour guide,
+and smoothly suppresses magnitudes below 0.5--1.5 full output pixels. The
+rotation-aligned temporal colour difference supplies a second 1--4 code-value
+activity transition. Invalid history borders and failed correspondences retain
+the rotated newest image. This cannot reconstruct content outside that image.
+Modes 0/4/5/6 are retained. Use `--stable` (implies rotation) in the recording
+evaluator. `still_scene_error` is RGB MAE versus the newest retained real frame;
+interpret it as a static-scene diagnostic only, not an error target for objects
+that actually move. Full-rate recorded truth still supplies the other metrics.
+
+`rotation_test OUTPUT` independently renders a world panorama with distinct
+asymmetric per-eye FOVs, checks rotation-only prediction, reads raw residual
+flow (test-only compilation), and runs a deliberately wrong-FOV negative
+control. Its subpixel residual budget is median <=0.75 / p95 <=1.5 output
+pixels; MAE/Block8 <=0.65 (8-bit values, masked known-disocclusion border).
+It also requires byte-identical static output, including one-code-level noise
+in the previous picture for mode 7. This checks projection and numerical
+behaviour, not the actual Quest calibration or headset comfort.
+
+The root evaluator now verifies packet sizes through the whole selected
+window and fails on decoder errors, rather than only checking eight startup
+packets. A restarted or truncated stream must not be silently treated as truth.
