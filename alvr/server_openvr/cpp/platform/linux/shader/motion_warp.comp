@@ -191,6 +191,19 @@ void main() {
     } else {
         // Motion boundaries and failed corner checks retain per-pixel inversion.
         valid=sourceAt(target,1.0-p.time,true,right,q);
+        if (!valid) {
+            // Occlusion edges fail the consistency check. Leaving the pixel
+            // unmoved while its neighbours move tears edges into blocks, so
+            // take the smallest candidate motion instead: near an occlusion
+            // that is usually the background, which a disocclusion reveals.
+            vec2 best=(p.time-1.0)*flowAt(true,right,target);
+            for (int i=0;i<4;i++)
+                if (cornerValid[i]!=0
+                    && dot(cornerDisplacement[i],cornerDisplacement[i])<dot(best,best))
+                    best=cornerDisplacement[i];
+            q=target+best;
+            valid=inside(q);
+        }
     }
     if (valid) {
         vec4 source=colorAt(true,right,q);
