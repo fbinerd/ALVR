@@ -16,6 +16,7 @@ layout(push_constant) uniform Params {
     vec4 previousQuaternion,targetQuaternion,leftTans,rightTans;
 } p;
 vec2 rotatePixel(vec2 at,bool right,vec4 quat) {
+    if (all(equal(quat,vec4(0,0,0,1)))) return at;
     vec4 t=right?p.rightTans:p.leftTans;
     vec2 uv=(at+0.5)/vec2(p.eyeWidth,p.height);
     vec3 v=vec3(mix(t.x,t.y,uv.x),mix(t.z,t.w,uv.y),-1);
@@ -161,9 +162,12 @@ void main() {
     // A partial tile or a tile crossing the eye seam takes the exact path.
     bool fullTile=base.y+7<p.height
         && base.x+7<(tileRight?2*p.eyeWidth:p.eyeWidth);
-    if(p.rotationMode==0) fitTemporalTile(base,tileRight,fullTile);
+    bool rotated=p.rotationMode!=0 &&
+        (!all(equal(p.previousQuaternion,vec4(0,0,0,1))) ||
+         !all(equal(p.targetQuaternion,vec4(0,0,0,1))));
+    if(!rotated) fitTemporalTile(base,tileRight,fullTile);
     else { if(gl_LocalInvocationIndex==0) {temporalTile=0; colorOnlyTile=0;} barrier(); }
-    if(p.rotationMode!=0) fullTile=false;
+    if(rotated) fullTile=false;
     if (gl_LocalInvocationIndex<4) {
         uint i=gl_LocalInvocationIndex;
         vec2 at=vec2(base.x%p.eyeWidth+(i%2)*7,base.y+(i/2)*7), source;

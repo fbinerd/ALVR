@@ -8,6 +8,7 @@ layout(push_constant) uniform Params {
     vec4 previousQuaternion,targetQuaternion,leftTans,rightTans;
 } p;
 vec2 rotatePixel(vec2 at,bool right,vec4 quat) {
+    if (all(equal(quat,vec4(0,0,0,1)))) return at;
     vec4 t=right?p.rightTans:p.leftTans;
     vec2 uv=(at+0.5)/vec2(p.eyeWidth,p.height);
     vec3 v=vec3(mix(t.x,t.y,uv.x),mix(t.z,t.w,uv.y),-1);
