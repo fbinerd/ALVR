@@ -728,6 +728,18 @@ void OvrDirectModeComponent::CreateSwapTextureSet(
         pSwapTextureSetDesc->nSampleCount
     );
 
+    {
+        static bool const traceDepthSets = [] {
+            auto home = std::getenv("HOME");
+            return home && std::ifstream(std::string(home) + "/.config/alvr/diag_submit_depth").good();
+        }();
+        // Persisted in vrserver.txt: a depth swap set (depth format) shows an
+        // application that intends to submit depth.
+        if (traceDepthSets)
+            DriverLog("Submit depth swap set pid=%u format=%u %ux%u samples=%u",
+                unPid, pSwapTextureSetDesc->nFormat, pSwapTextureSetDesc->nWidth,
+                pSwapTextureSetDesc->nHeight, pSwapTextureSetDesc->nSampleCount);
+    }
     ProcessResource* processResource = new ProcessResource();
     processResource->textDesc = *pSwapTextureSetDesc;
     processResource->pid = unPid;
@@ -919,10 +931,39 @@ void OvrDirectModeComponent::SubmitLayer(const SubmitLayerPerEye_t (&perEye)[2])
         return home && std::ifstream(std::string(home)+"/.config/alvr/diag_submit_depth").good();
     }();
     static std::map<uint32_t,unsigned> depthCounts;
+    // Per texture-owner totals: layers seen and layers that carried a depth
+    // handle, summarized every ten seconds so the whole session is covered
+    // (an application may submit depth only once its world is loaded).
+    struct DepthTotals { uint64_t layers = 0, withDepth = 0, knownDepth = 0; };
+    static std::map<uint32_t,DepthTotals> depthTotals;
+    static auto nextDepthSummary = std::chrono::steady_clock::now();
     auto colorOwner=m_handleMap.find(perEye[0].hTexture);
     uint32_t ownerPid=colorOwner==m_handleMap.end()?0:colorOwner->second.first->pid;
     unsigned depthLayers=traceDepth?++depthCounts[ownerPid]:0;
-    if (traceDepth && depthLayers <= 120) {
+    if (traceDepth) {
+        auto& totals=depthTotals[ownerPid];
+        ++totals.layers;
+        totals.withDepth += perEye[0].hDepthTexture!=0 || perEye[1].hDepthTexture!=0;
+        totals.knownDepth += m_handleMap.count(perEye[0].hDepthTexture)!=0;
+        if (std::chrono::steady_clock::now() >= nextDepthSummary) {
+            nextDepthSummary = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+            for (auto const& [pid, sum] : depthTotals) {
+                char comm[32] = "?";
+                char path[32];
+                snprintf(path, sizeof(path), "/proc/%u/comm", pid);
+                if (FILE* f = fopen(path, "r")) {
+                    if (fgets(comm, sizeof(comm), f))
+                        comm[strcspn(comm, "\n")] = 0;
+                    fclose(f);
+                }
+                DriverLog("Submit depth summary pid=%u comm=%s layers=%llu with_depth=%llu known_depth=%llu",
+                    pid, comm, (unsigned long long)sum.layers, (unsigned long long)sum.withDepth,
+                    (unsigned long long)sum.knownDepth);
+            }
+        }
+    }
+    // Detailed records: the first 120 layers of each owner, then one in 720.
+    if (traceDepth && (depthLayers <= 120 || depthLayers % 720 == 0)) {
         for (int eye=0;eye<2;++eye) {
             auto const& layer=perEye[eye];
             bool sane=true;
