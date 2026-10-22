@@ -1,5 +1,14 @@
 #pragma once
 // Shared numerical metrics for offscreen recording and projection checks.
+// VkContext uses explicit destroy(), not an automatic destructor. Declare this
+// before Images/NativeMotion so all their resources die before device/instance.
+struct RecordingContext : alvr::VkContext {
+    RecordingContext() : alvr::VkContext(std::vector<uint8_t>{}) {}
+    ~RecordingContext() {
+        try { destroy(); }
+        catch (...) { Warn("Recording checker: Vulkan context teardown failed"); }
+    }
+};
 struct Scores { double mae=0, psnr=0, gradient=0, block=0, temporal=0; };
 Scores scoreRecording(Pixels const& prediction, Pixels const& truth, Size size,
                       std::vector<float>& previousError) {

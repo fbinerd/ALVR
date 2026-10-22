@@ -12,7 +12,7 @@ int main(int argc,char** argv) {
     std::filesystem::path output(argv[3]); std::filesystem::create_directories(output);
     std::ifstream input(argv[1],std::ios::binary), manifest(argv[2]);
     if(!input||!manifest) throw std::runtime_error("Cannot open recording inputs");
-    alvr::VkContext ctx(std::vector<uint8_t>{});
+    RecordingContext ctx;
     if(!ctx.meta.opticalFlowEnabled||ctx.meta.vendor!=alvr::Vendor::Nvidia) throw std::runtime_error("NVIDIA optical flow required");
     Images gpu(ctx,size); gpu.initialize();
     alvr::motion::NativeMotion motion(ctx,{size.width(),size.height},vk::Format::eR8G8B8A8Unorm);

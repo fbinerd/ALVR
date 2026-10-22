@@ -40,7 +40,7 @@ int main(int argc,char** argv) {
  try {
     if(argc!=2) throw std::runtime_error("Usage: rotation_test OUTPUT");
     std::filesystem::path output(argv[1]);std::filesystem::create_directories(output);
-    Size size{768,640};alvr::VkContext ctx(std::vector<uint8_t>{});Images gpu(ctx,size);gpu.initialize();
+    Size size{768,640};RecordingContext ctx;Images gpu(ctx,size);gpu.initialize();
     double correct[2]{};
     for(unsigned variant=0;variant<3;variant++) {
         alvr::motion::NativeMotion motion(ctx,{size.width(),size.height},vk::Format::eR8G8B8A8Unorm);
