@@ -108,6 +108,7 @@ class Encoder {
 
     Optional<render::Renderer> renderer;
     std::unique_ptr<motion::NativeMotion> nativeMotion;
+    bool gapFillEagerFlow = false;
 
     std::unique_ptr<EncodePipeline> encoder;
     std::unique_ptr<VkFrame> frame;
@@ -378,6 +379,12 @@ public:
                     }
                     if (motion::nativeMotionMode() == 4) {
                         nativeMotion->setGapFill(true);
+                        // Measurement switch: flow right after each real
+                        // picture instead of on the synthesized one.
+                        gapFillEagerFlow = std::ifstream(
+                            std::string(std::getenv("HOME") ? std::getenv("HOME") : "")
+                            + "/.config/alvr/diag_native_motion_eager"
+                        ).good();
                         Info("Native motion gap filling: every real picture is sent; missed "
                              "display slots get a synthesized picture");
                     }
@@ -552,7 +559,9 @@ public:
 
         // The real picture is on its way: compute the next prediction's flow
         // now, so the predicted picture only waits for the warp.
-        if (nativeMotion && !predicted)
+        // Gap filling leaves the flow to the synthesized picture, so the
+        // worker is free again before the slot it may have to fill.
+        if (nativeMotion && !predicted && (!nativeMotion->gapFill() || gapFillEagerFlow))
             nativeMotion->prepare();
     }
 

@@ -40,7 +40,8 @@ impl Default for WindowInput {
             yaw: 0.0,
             pitch: 0.0,
             // A scripted sweep (MOCK_SWEEP) should be repeatable.
-            use_random_orientation: std::env::var_os("MOCK_SWEEP").is_none(),
+            use_random_orientation: std::env::var_os("MOCK_SWEEP").is_none()
+                && std::env::var_os("MOCK_SWAY").is_none(),
             emulated_decode_ms: 5,
             emulated_compositor_ms: 1,
             emulated_vsync_ms: 25,
@@ -150,6 +151,7 @@ fn tracking_thread(
     let timestamp_origin = Instant::now();
     context.send_view_params([ViewParams::DUMMY; 2]);
     let sweep = video::Sweep::from_env();
+    let sway = video::Sway::from_env();
     let mut pose_log = video::PoseLog::open();
 
     let mut loop_deadline = Instant::now();
@@ -159,7 +161,8 @@ fn tracking_thread(
         let poll_timestamp = timestamp_origin.elapsed();
         let (sweep_yaw, yaw_velocity) = sweep.map_or((0.0, 0.0), |s| s.at(poll_timestamp));
         let yaw = input_lock.yaw + sweep_yaw;
-        pose_log.write(poll_timestamp, yaw, input_lock.pitch, yaw_velocity);
+        let (sway_x, x_velocity) = sway.map_or((0.0, 0.0), |s| s.at(poll_timestamp));
+        pose_log.write(poll_timestamp, yaw, input_lock.pitch, yaw_velocity, sway_x);
 
         let mut orientation = Quat::from_rotation_y(yaw) * Quat::from_rotation_x(input_lock.pitch);
 
@@ -167,7 +170,7 @@ fn tracking_thread(
             orientation *= Quat::from_rotation_z(rand::random::<f32>() * 0.001);
         }
 
-        let position = Vec3::new(0.0, input_lock.height, 0.0);
+        let position = Vec3::new(sway_x, input_lock.height, 0.0);
 
         context.send_tracking(TrackingData {
             poll_timestamp,
@@ -178,7 +181,7 @@ fn tracking_thread(
                         orientation,
                         position,
                     },
-                    linear_velocity: Vec3::ZERO,
+                    linear_velocity: Vec3::new(x_velocity, 0.0, 0.0),
                     angular_velocity: Vec3::new(0.0, yaw_velocity, 0.0),
                 },
             )],

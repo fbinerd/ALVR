@@ -524,7 +524,7 @@ bool NativeMotion::predict(
         if (s.retained < 2)
             return false;
         uint64_t newest = s.timestamps[s.latest], previous = s.timestamps[1 - s.latest];
-        if (!predictionTime(previous, newest, timestamp, 1.0)) {
+        if (!predictionTime(previous, newest, timestamp, 1.5)) {
             if (++s.gapRejected == 1 || s.gapRejected % 360 == 0)
                 Info(
                     "Native motion gap fill rejected=%llu previous=%llu latest=%llu target=%llu",
@@ -541,7 +541,7 @@ bool NativeMotion::predict(
             return false;
     }
     uint64_t newest = s.timestamps[s.latest], previous = s.timestamps[1 - s.latest];
-    auto time = predictionTime(previous, newest, timestamp, s.gapFill ? 1.0 : 0.55);
+    auto time = predictionTime(previous, newest, timestamp, s.gapFill ? 1.5 : 0.55);
     // A long pause, restart or missed job must not extrapolate stale motion.
     if (!time) {
         if (++s.rejected == 1 || s.rejected % 360 == 0)

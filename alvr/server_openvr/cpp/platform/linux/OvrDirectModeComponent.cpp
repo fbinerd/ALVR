@@ -49,7 +49,7 @@ constexpr int GuardSleepMs = 4;
 
 // Gap filling waits this long past a display slot for the application's
 // Present before synthesizing the slot's picture.
-constexpr std::chrono::milliseconds GapFillSlack { 2 };
+constexpr std::chrono::milliseconds GapFillSlack { 1 };
 
 // For trials: 0 in ~/.config/alvr/encoder_rewarp sends each frame as it was
 // rendered, stamped with the pose it was rendered for, and leaves all
@@ -268,7 +268,17 @@ void OvrDirectModeComponent::EncodeWorkerLoop() {
                     auto const elapsedNs = (uint64_t)std::chrono::duration_cast<
                                                std::chrono::nanoseconds>(now - lastRealOutput)
                                                .count();
-                    auto pose = m_poseHistory->GetPoseNearest(lastRealStamp + elapsedNs);
+                    // The newest tracking pose: a real picture is stamped
+                    // with (nearly) the newest pose when it is presented, so
+                    // the pose for this slot has only just arrived. The
+                    // prediction extrapolates the image to exactly that pose
+                    // time, so image and stamp agree.
+                    auto const intervalNs = (uint64_t)std::chrono::duration_cast<
+                                                std::chrono::nanoseconds>(frameInterval())
+                                                .count();
+                    uint64_t const slots
+                        = std::max<uint64_t>(1, (elapsedNs + intervalNs / 2) / intervalNs);
+                    auto pose = m_poseHistory->GetLatestPose();
                     ++attempts;
                     if (!pose) {
                         ++noPose;
@@ -293,7 +303,19 @@ void OvrDirectModeComponent::EncodeWorkerLoop() {
                         try {
                             if (m_encoderReady && enc.fill(pose->targetTimestampNs)) {
                                 lastStamp = pose->targetTimestampNs;
-                                ++filled;
+                                if (++filled <= 12 || filled % 720 == 0) {
+                                    auto newest = m_poseHistory->GetLatestPose();
+                                    Info(
+                                        "Gap fill picked: real=%llu slots=%llu wanted=%llu "
+                                        "picked=%llu newest=%llu late_us=%lld\n",
+                                        (unsigned long long)lastRealStamp,
+                                        (unsigned long long)slots,
+                                        (unsigned long long)(lastRealStamp + slots * intervalNs),
+                                        (unsigned long long)pose->targetTimestampNs,
+                                        (unsigned long long)(newest ? newest->targetTimestampNs : 0),
+                                        (long long)elapsedNs / 1000 - (long long)slots * intervalNs / 1000
+                                    );
+                                }
                             } else {
                                 ++rejected;
                             }
@@ -457,7 +479,11 @@ void OvrDirectModeComponent::EncodeWorkerLoop() {
             });
             MarkRead(frame);
             if (gapFill) {
-                lastRealOutput = std::chrono::steady_clock::now();
+                // Slots count from the Present that brought this picture,
+                // not from the end of its encode (which can take most of a
+                // frame interval and would push every deadline past the
+                // application's next Present).
+                lastRealOutput = job.enqueueTime;
                 nextSlot = lastRealOutput + frameInterval();
                 lastRealStamp = stampTimestampNs;
                 // A reconnected client starts a new timestamp timeline; an
