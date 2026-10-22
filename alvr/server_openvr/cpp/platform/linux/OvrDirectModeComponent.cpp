@@ -264,6 +264,13 @@ void OvrDirectModeComponent::EncodeWorkerLoop() {
     // newest pose when presented, so this slot's pose has only just arrived,
     // and the prediction extrapolates the image to exactly that pose time.
     bool const separateRotation = alvr::motion::nativeMotionMode() >= 5;
+    // Mode 9 interpolates: when the application skipped a slot, the picture
+    // between the previous and the newest real picture is sent first and the
+    // newest real picture is held back one slot.
+    bool const interpolate = alvr::motion::nativeMotionMode() == 9;
+    bool heldPending = false;
+    uint64_t heldStamp = 0, interpolated = 0, sentDirect = 0;
+    std::chrono::steady_clock::time_point heldSendAt {};
     vr::HmdQuaternion_t lastMotionOrientation {1,0,0,0};
     bool motionPoseValid = false, motionGenerationValid = false;
     uint64_t motionGeneration = 0;
@@ -339,7 +346,7 @@ void OvrDirectModeComponent::EncodeWorkerLoop() {
                     "Native motion gap filling: jobs=%llu slots=%llu attempts=%llu retries=%llu "
                     "pose_waits=%llu filled=%llu no_pose=%llu not_newer=%llu not_streaming=%llu "
                     "rejected=%llu presents<20ms=%llu presents>34ms=%llu with_overlays=%llu "
-                    "overlay_skips=%llu\n",
+                    "overlay_skips=%llu interpolated=%llu sent_direct=%llu\n",
                     (unsigned long long)jobsSeen,
                     (unsigned long long)timeouts,
                     (unsigned long long)attempts,
@@ -353,10 +360,33 @@ void OvrDirectModeComponent::EncodeWorkerLoop() {
                     (unsigned long long)presentsShort,
                     (unsigned long long)presentsLong,
                     (unsigned long long)jobsWithOverlays,
-                    (unsigned long long)overlaySkips
+                    (unsigned long long)overlaySkips,
+                    (unsigned long long)interpolated,
+                    (unsigned long long)sentDirect
                 );
             }
-            if (gapFill && nextSlot != std::chrono::steady_clock::time_point {}) {
+            if (interpolate) {
+                if (heldPending && !m_jobCv.wait_until(lock, heldSendAt, ready)) {
+                    lock.unlock();
+                    std::lock_guard<std::mutex> encLock(m_encMutex);
+                    try {
+                        if (m_encoderReady && m_encoderState.load() == EncoderState::Streaming)
+                            enc.sendNewestReal(heldStamp);
+                    } catch (std::exception const& e) {
+                        Error("Interpolation: %s. Tearing down encoder and going idle.\n", e.what());
+                        m_encGeneration++;
+                        try {
+                            enc.shutdown();
+                        } catch (std::exception const&) {
+                        }
+                        m_encoderState = EncoderState::Idle;
+                    }
+                    heldPending = false;
+                    continue;
+                }
+                if (!heldPending)
+                    m_jobCv.wait(lock, ready);
+            } else if (gapFill && nextSlot != std::chrono::steady_clock::time_point {}) {
                 auto const deadline = retryAt != std::chrono::steady_clock::time_point {}
                     ? retryAt
                     : nextSlot + GapFillSlack;
@@ -574,16 +604,69 @@ void OvrDirectModeComponent::EncodeWorkerLoop() {
                     continue;
                 }
             }
+            // A real picture still held from the previous Present goes first.
+            if (interpolate && heldPending) {
+                enc.sendNewestReal(heldStamp);
+                heldPending = false;
+            }
             enc.present(
                 stampTimestampNs,
                 warpParams,
                 job.layers,
                 [this, frame] { MarkRead(frame); },
-                presentClockNs, validHistoryRotation?&historyRotation:nullptr
+                presentClockNs, validHistoryRotation?&historyRotation:nullptr,
+                !interpolate
             );
             lastMotionOrientation=stampOrientation;
             motionPoseValid=validHistoryRotation;
             MarkRead(frame);
+            if (interpolate) {
+                // The application skipped a slot (gap of about two intervals):
+                // send the picture halfway between the previous and this real
+                // picture now, and this real picture one slot later.
+                bool sentMiddle = false;
+                auto const gap = job.enqueueTime - lastRealOutput;
+                if (lastRealOutput != std::chrono::steady_clock::time_point {}
+                    && gap * 2 >= frameInterval() * 3 && gap < std::chrono::milliseconds(100)
+                    && lastRealStamp && lastRealStamp < stampTimestampNs && !newestHasOverlays
+                    && motionPoseValid) {
+                    auto const previousClockNs
+                        = (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(
+                              lastRealOutput.time_since_epoch()
+                        )
+                              .count();
+                    uint64_t const middleClockNs = previousClockNs + (presentClockNs - previousClockNs) / 2;
+                    auto pose = m_poseHistory->GetPoseNearest(
+                        lastRealStamp + (stampTimestampNs - lastRealStamp) / 2
+                    );
+                    alvr::motion::NativeMotion::Rotation rotation;
+                    FfiViewParams views[2];
+                    bool viewsValid;
+                    {
+                        std::unique_lock<std::mutex> vpLock(m_viewParamsMutex);
+                        views[0] = m_viewParams[0];
+                        views[1] = m_viewParams[1];
+                        viewsValid = m_viewParamsValid;
+                    }
+                    if (pose && pose->targetTimestampNs > lastRealStamp
+                        && pose->targetTimestampNs < stampTimestampNs && viewsValid
+                        && BuildMotionRotation(
+                            lastMotionOrientation, pose->motion.pose.orientation, views, rotation
+                        )
+                        && enc.fill(pose->targetTimestampNs, middleClockNs, &rotation)) {
+                        sentMiddle = true;
+                        ++interpolated;
+                        heldPending = true;
+                        heldStamp = stampTimestampNs;
+                        heldSendAt = job.enqueueTime + frameInterval();
+                    }
+                }
+                if (!sentMiddle) {
+                    // The output still holds this real picture.
+                    enc.sendOutput(stampTimestampNs);
+                    ++sentDirect;
+                }
+            }
             if (gapFill) {
                 // Slots count from the Present that brought this picture,
                 // not from the end of its encode (which can take most of a

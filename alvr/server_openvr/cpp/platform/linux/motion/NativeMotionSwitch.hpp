@@ -12,11 +12,13 @@ namespace alvr::motion {
 // 4 gap filling (every real picture is sent; a synthesized picture fills
 // each display slot the application misses); 5 separates rotation;
 // 6 also blends unreliable flow toward the rotation-correct newest image;
-// 7 filters residual noise with a static dead zone and border fallback.
+// 7 filters residual noise with a static dead zone and border fallback;
+// 9 is mode 7 interpolating between the two newest real pictures (the newest
+// one is held back a slot) instead of extrapolating.
 // ALVR_NATIVE_MOTION=1 (plus ALVR_NATIVE_MOTION_BIDIRECTIONAL=1)
 // still works when vrserver inherits it, but when the dashboard starts
 // SteamVR through a running Steam client the variables do not reach vrserver.
-// So the file ~/.config/alvr/diag_native_motion (containing 1 to 7) is read
+// So the file ~/.config/alvr/diag_native_motion (containing 1 to 9) is read
 // too. It is read when the Vulkan context and the encoder are created, so a
 // change applies after a SteamVR restart. Absent file and variables: off.
 inline int nativeMotionMode() {
@@ -33,7 +35,7 @@ inline int nativeMotionMode() {
     }
     std::ifstream file(std::string(home) + "/.config/alvr/diag_native_motion");
     int mode = 0;
-    if (!(file >> mode) || mode < 0 || mode > 7) {
+    if (!(file >> mode) || mode < 0 || mode > 9) {
         return 0;
     }
     return mode;

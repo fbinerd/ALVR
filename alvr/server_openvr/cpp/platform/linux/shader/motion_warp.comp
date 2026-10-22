@@ -281,6 +281,21 @@ void main() {
             && all(equal(colorAt(false,right,q),source));
         if (!unchanged) color=source;
     }
+    if ((p.rotationMode&8u)!=0u) {
+        // Interpolation (time in (0, 1)): also follow the forward flow back
+        // into the older picture. Each side keeps its own consistency and
+        // the side closer in time weighs more, so content hidden in one
+        // picture (behind a moving hand) is taken from the other.
+        float confLatest=valid?residualConfidence:0.0;
+        vec4 fromLatest=color;
+        vec2 qOld;
+        bool validOld=sourceAt(target,p.time,false,right,qOld);
+        float confOld=validOld?residualConfidence:0.0;
+        vec4 fromOld=validOld?colorAt(false,right,qOld):fromLatest;
+        float wLatest=p.time*confLatest+1e-4, wOld=(1.0-p.time)*confOld;
+        color=(wLatest*fromLatest+wOld*fromOld)/(wLatest+wOld);
+        residualConfidence=max(confLatest,confOld);
+    }
     if ((p.rotationMode&2u)!=0u) {
         // Continuous per-pixel confidence; no workgroup or tile thresholds.
         // Reciprocal flow rejects occlusion; brightness disagreement provides

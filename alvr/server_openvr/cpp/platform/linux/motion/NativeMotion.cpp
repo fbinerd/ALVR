@@ -12,6 +12,15 @@ namespace alvr::motion {
 
 // Real pictures needed after a reset or pause before gap filling starts.
 constexpr unsigned GapFillWarmupPictures = 4;
+
+// Interpolation (mode 9): the target lies between the two real pictures;
+// returns its fraction from the older (0) to the newest (1) picture.
+inline std::optional<float> interpolationTime(uint64_t previous, uint64_t latest, uint64_t target) {
+    if (!previous || latest <= previous || latest - previous > 100'000'000 || target <= previous
+        || target >= latest)
+        return std::nullopt;
+    return float(double(target - previous) / double(latest - previous));
+}
 namespace {
     constexpr uint64_t TimeoutNs = 500'000'000;
     struct Image {
@@ -70,7 +79,8 @@ struct NativeMotion::State {
     PredictionTiming timing;
     double cachedOpticalGpuMs = -1;
     Rotation historyRotation;
-    bool rotationMode = false, confidenceFallback = false, stableResidual = false;
+    bool rotationMode = false, confidenceFallback = false, stableResidual = false,
+         interpolate = false;
 
     State(
         VkContext& c,
@@ -572,7 +582,8 @@ bool NativeMotion::predict(
         }
         uint64_t newest = s.clocks[s.latest], previous = s.clocks[1 - s.latest];
         uint64_t const target = clockNs ? clockNs : timestamp;
-        if (!predictionTime(previous, newest, target, 1.5)) {
+        if (s.interpolate ? !interpolationTime(previous, newest, target)
+                          : !predictionTime(previous, newest, target, 1.5)) {
             if (++s.gapRejected == 1 || s.gapRejected % 60 == 0)
                 Info(
                     "Native motion gap fill rejected=%llu previous=%llu latest=%llu target=%llu",
@@ -590,7 +601,9 @@ bool NativeMotion::predict(
     }
     uint64_t newest = s.timestamps[s.latest], previous = s.timestamps[1 - s.latest];
     auto time = s.gapFill
-        ? predictionTime(s.clocks[1 - s.latest], s.clocks[s.latest], clockNs ? clockNs : timestamp, 1.5)
+        ? (s.interpolate
+               ? interpolationTime(s.clocks[1 - s.latest], s.clocks[s.latest], clockNs ? clockNs : timestamp)
+               : predictionTime(s.clocks[1 - s.latest], s.clocks[s.latest], clockNs ? clockNs : timestamp, 1.5))
         : predictionTime(previous, newest, timestamp, 0.55);
     // A long pause, restart or missed job must not extrapolate stale motion.
     if (!time) {
@@ -658,6 +671,9 @@ bool NativeMotion::predict(
     };
     if (s.rotationMode) {
         push.rotationMode = s.stableResidual ? 5 : (s.confidenceFallback ? 3 : 1);
+        // Bit 3: interpolate between both real pictures (mode 9).
+        if (s.interpolate)
+            push.rotationMode |= 8u;
         std::copy_n(s.historyRotation.quaternion, 4, push.previousQuaternion);
         std::copy_n(targetRotation->quaternion, 4, push.targetQuaternion);
         std::copy_n(targetRotation->leftTans, 4, push.leftTans);
@@ -770,6 +786,31 @@ std::vector<float> NativeMotion::diagnosticResidualMagnitudes() {
 }
 #endif
 void NativeMotion::setStableResidual(bool enabled) { state->stableResidual = enabled; }
+
+void NativeMotion::setInterpolate(bool enabled) { state->interpolate = enabled; }
+
+bool NativeMotion::restoreNewest(vk::Image output, vk::ImageLayout layout) {
+    auto& s = *state;
+    if (!s.retained)
+        return false;
+    auto& newest = s.colors[s.latest];
+    s.begin();
+    s.barrier(output, layout, vk::ImageLayout::eTransferDstOptimal);
+    s.transition(newest, vk::ImageLayout::eTransferSrcOptimal);
+    vk::ImageCopy copy {
+        .srcSubresource = { vk::ImageAspectFlagBits::eColor, 0, 0, 1 },
+        .dstSubresource = { vk::ImageAspectFlagBits::eColor, 0, 0, 1 },
+        .extent = { s.extent.width, s.extent.height, 1 },
+    };
+    s.command.copyImage(
+        newest.handle, vk::ImageLayout::eTransferSrcOptimal, output,
+        vk::ImageLayout::eTransferDstOptimal, copy
+    );
+    s.transition(newest, vk::ImageLayout::eShaderReadOnlyOptimal);
+    s.barrier(output, vk::ImageLayout::eTransferDstOptimal, layout);
+    s.submit();
+    return true;
+}
 
 void NativeMotion::setGapFill(bool fill) {
     state->gapFill = fill;

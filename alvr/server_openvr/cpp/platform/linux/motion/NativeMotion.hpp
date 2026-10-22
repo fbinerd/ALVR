@@ -87,6 +87,16 @@ public:
     void setConfidenceFallback(bool);
     // Mode 7: continuous residual filtering, static dead zone and border fallback.
     void setStableResidual(bool);
+
+    // Mode 9: synthesize the picture BETWEEN the two newest real pictures
+    // (time in (0, 1)) instead of extrapolating past the newest; the caller
+    // holds the newest real picture back and sends it after the synthesized
+    // one. Uses both pictures, so content revealed behind moving foreground
+    // comes from the newest picture rather than being invented.
+    void setInterpolate(bool);
+    // Copies the newest retained real picture into output (for sending the
+    // held real picture after the synthesized one).
+    bool restoreNewest(vk::Image output, vk::ImageLayout);
 #ifdef ALVR_NATIVE_MOTION_TESTING
     // Test-only readback of raw residual vectors, in output pixels; no runtime cost.
     std::vector<float> diagnosticResidualMagnitudes();

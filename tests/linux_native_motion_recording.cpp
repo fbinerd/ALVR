@@ -34,35 +34,53 @@ int main(int argc,char** argv) {
         }
         return r;
     };
+    // "interpolate": the odd target is synthesized after the NEXT even
+    // picture is captured, halfway between the two (mode 9). Otherwise the
+    // odd target is extrapolated from the two previous even pictures.
+    bool const interpolate=argc==8 && std::string(argv[7])=="interpolate";
+    if(interpolate) { motion.setStableResidual(true); motion.setInterpolate(true); }
+    Pixels pendingTruth, shownBefore;
+    bool pending=false; unsigned pendingFrame=0; uint64_t pendingPose=0,pendingClock=0; double pendingYaw=0;
+    auto evaluate=[&](Pixels const& target, unsigned targetFrame, uint64_t targetPose, uint64_t targetClock,
+                      double targetYaw, Pixels const& repeated) {
+        auto transform=rotationBetween(targetYaw-latestYaw);
+        if(!motion.predict(gpu.image,gpu.view,gpu.layout,targetPose,{},targetClock,rotation?&transform:nullptr)) throw std::runtime_error("Gap-fill target rejected");
+        auto image=gpu.transfer(nullptr); auto timing=motion.lastPredictionTiming();
+        auto synth=scoreRecording(image,target,size,synthError);
+        auto repeat=scoreRecording(repeated,target,size,repeatError);
+        double stillError=0;
+        for(size_t pixel=0;pixel<image.size();pixel++) if(pixel%4!=3)
+            stillError+=std::abs(int(image[pixel])-int(repeated[pixel]));
+        stillError/=image.size()/4*3;
+        for(auto const& row: {std::make_pair("synth",synth),std::make_pair("repeat",repeat)}) {
+            auto const& s=row.second;
+            csv<<targetFrame<<','<<targetPose<<','<<targetClock<<','<<targetYaw<<','<<row.first<<','<<s.mae<<','<<s.psnr<<','<<s.gradient<<','<<s.block<<','<<s.temporal<<','<<(row.first==std::string("synth")?prepareMs+timing.flowMs:0)<<','<<(row.first==std::string("synth")?timing.warpMs:0)<<','<<(row.first==std::string("synth")?timing.opticalGpuMs:0)<<','<<(row.first==std::string("synth")?timing.warpGpuMs:0)<<','<<(row.first==std::string("synth")?stillError:0)<<'\n';
+        }
+        if(synth.mae>worst) {
+            worst=synth.mae; writePpm(output/"worst_synth.ppm",image,size); writePpm(output/"worst_truth.ppm",target,size);
+            Pixels diff=target; for(size_t i=0;i<diff.size();++i) diff[i]=i%4==3?255:uint8_t(std::min(255,4*std::abs(int(image[i])-int(target[i]))));
+            writePpm(output/"worst_diff_x4.ppm",diff,size);
+            std::ofstream(output/"worst_frame.txt")<<targetFrame<<'\n';
+        }
+        ++targets;
+    };
     while(manifest>>frame>>pose>>clock>>yaw) {
         if(!input.read(reinterpret_cast<char*>(truth.data()),truth.size())) throw std::runtime_error("Truncated raw recording");
         if(index%2==0) {
+            shownBefore=latest;
             motion.waitIdle(); gpu.transfer(&truth); auto transform=rotationBetween(index==0?0:yaw-latestYaw);
             motion.capture(gpu.image,gpu.layout,pose,clock,rotation?&transform:nullptr);
             latestYaw=yaw;
             auto prepareStart=std::chrono::steady_clock::now();
             motion.prepare(); prepareMs=elapsed(prepareStart); latest=truth;
+            // The headset would otherwise keep showing the previous real picture.
+            if(interpolate && pending && index>=8)
+                evaluate(pendingTruth,pendingFrame,pendingPose,pendingClock,pendingYaw,shownBefore);
+            pending=false;
+        } else if(interpolate) {
+            pendingTruth=truth; pending=true; pendingFrame=frame; pendingPose=pose; pendingClock=clock; pendingYaw=yaw;
         } else if(index>=7) { // gap filling waits for four real pictures (warm-up)
-            auto transform=rotationBetween(yaw-latestYaw);
-            if(!motion.predict(gpu.image,gpu.view,gpu.layout,pose,{},clock,rotation?&transform:nullptr)) throw std::runtime_error("Gap-fill target rejected");
-            auto image=gpu.transfer(nullptr); auto timing=motion.lastPredictionTiming();
-            auto synth=scoreRecording(image,truth,size,synthError);
-            auto repeat=scoreRecording(latest,truth,size,repeatError);
-            double stillError=0;
-            for(size_t pixel=0;pixel<image.size();pixel++) if(pixel%4!=3)
-                stillError+=std::abs(int(image[pixel])-int(latest[pixel]));
-            stillError/=image.size()/4*3;
-            for(auto const& row: {std::make_pair("synth",synth),std::make_pair("repeat",repeat)}) {
-                auto const& s=row.second;
-                csv<<frame<<','<<pose<<','<<clock<<','<<yaw<<','<<row.first<<','<<s.mae<<','<<s.psnr<<','<<s.gradient<<','<<s.block<<','<<s.temporal<<','<<(row.first==std::string("synth")?prepareMs+timing.flowMs:0)<<','<<(row.first==std::string("synth")?timing.warpMs:0)<<','<<(row.first==std::string("synth")?timing.opticalGpuMs:0)<<','<<(row.first==std::string("synth")?timing.warpGpuMs:0)<<','<<(row.first==std::string("synth")?stillError:0)<<'\n';
-            }
-            if(synth.mae>worst) {
-                worst=synth.mae; writePpm(output/"worst_synth.ppm",image,size); writePpm(output/"worst_truth.ppm",truth,size);
-                Pixels diff=truth; for(size_t i=0;i<diff.size();++i) diff[i]=i%4==3?255:uint8_t(std::min(255,4*std::abs(int(image[i])-int(truth[i]))));
-                writePpm(output/"worst_diff_x4.ppm",diff,size);
-                std::ofstream(output/"worst_frame.txt")<<frame<<'\n';
-            }
-            ++targets;
+            evaluate(truth,frame,pose,clock,yaw,latest);
         }
         ++index;
     }

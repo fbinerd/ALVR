@@ -380,7 +380,10 @@ public:
                     if (motion::nativeMotionMode() >= 4) {
                         nativeMotion->setGapFill(true);
                         nativeMotion->setConfidenceFallback(motion::nativeMotionMode() == 6);
-                        nativeMotion->setStableResidual(motion::nativeMotionMode() == 7);
+                        nativeMotion->setStableResidual(
+                            motion::nativeMotionMode() == 7 || motion::nativeMotionMode() == 9
+                        );
+                        nativeMotion->setInterpolate(motion::nativeMotionMode() == 9);
                         // Measurement switch: flow right after each real
                         // picture instead of on the synthesized one.
                         gapFillEagerFlow = std::ifstream(
@@ -512,7 +515,8 @@ public:
         render::WarpParams const& warp,
         std::vector<render::Layer> const& layers,
         std::function<void()> const& afterRead,
-        u64 presentClockNs = 0, motion::NativeMotion::Rotation const* historyRotation = nullptr
+        u64 presentClockNs = 0, motion::NativeMotion::Rotation const* historyRotation = nullptr,
+        bool send = true
     ) {
         if (!encoder) {
             // Say it once instead of at frame rate.
@@ -549,21 +553,12 @@ public:
         }
         ReportComposed(targetTimestampNs, 0);
 
-        encoder->SetParams(GetDynamicEncoderParams());
-        encoder->PushFrame(0, idrScheduler.CheckIDRInsertion());
+        // Interpolation holds the real picture: it is captured now and sent
+        // later with sendNewestReal(), after the synthesized one.
+        if (!send)
+            return;
 
-        alvr::FramePacket framePacket;
-        if (!encoder->GetEncoded(framePacket)) {
-            assert(false);
-        }
-
-        ParseFrameNals(
-            encoder->GetCodec(),
-            framePacket.data,
-            framePacket.size,
-            targetTimestampNs,
-            framePacket.isIDR
-        );
+        encodeAndSend(targetTimestampNs);
 
         // The real picture is on its way: compute the next prediction's flow
         // now, so the predicted picture only waits for the warp.
@@ -608,6 +603,25 @@ public:
         return true;
     }
 
+    // Interpolation: sends the held newest real picture (copied back from the
+    // motion history, since the output now holds the synthesized picture).
+    bool sendNewestReal(u64 targetTimestampNs) {
+        if (!encoder || !nativeMotion || !renderer.hasValue())
+            return false;
+        auto output = renderer.get().getOutput();
+        if (!nativeMotion->restoreNewest(output.image.image, output.image.layout))
+            return false;
+        encodeAndSend(targetTimestampNs);
+        return true;
+    }
+
+    // Sends whatever the output holds now (a real picture rendered with
+    // send=false that does not need a synthesized picture before it).
+    void sendOutput(u64 targetTimestampNs) {
+        if (encoder)
+            encodeAndSend(targetTimestampNs);
+    }
+
     void requestIdr() { idrScheduler.InsertIDR(); }
 
     // True when engaging the reprojection actually warps pixels with the
@@ -616,6 +630,23 @@ public:
     bool warpCapable() { return renderer.hasValue() && warpCapableChain; }
 
 private:
+    void encodeAndSend(u64 targetTimestampNs) {
+        encoder->SetParams(GetDynamicEncoderParams());
+        encoder->PushFrame(0, idrScheduler.CheckIDRInsertion());
+        alvr::FramePacket framePacket;
+        if (!encoder->GetEncoded(framePacket)) {
+            assert(false);
+            return;
+        }
+        ParseFrameNals(
+            encoder->GetCodec(),
+            framePacket.data,
+            framePacket.size,
+            targetTimestampNs,
+            framePacket.isIDR
+        );
+    }
+
     // Eye-tracked centers when the client supplies gaze, the negotiated static
     // ones otherwise. Looked up and reported under the timestamp the frame is
     // sent with, which after a warp is the newest pose's, so the client
