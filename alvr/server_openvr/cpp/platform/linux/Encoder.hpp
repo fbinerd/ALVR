@@ -379,6 +379,7 @@ public:
                     }
                     if (motion::nativeMotionMode() >= 4) {
                         nativeMotion->setGapFill(true);
+                        nativeMotion->setConfidenceFallback(motion::nativeMotionMode() == 6);
                         // Measurement switch: flow right after each real
                         // picture instead of on the synthesized one.
                         gapFillEagerFlow = std::ifstream(

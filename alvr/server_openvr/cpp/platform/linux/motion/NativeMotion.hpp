@@ -83,6 +83,7 @@ public:
     // only when the encoder asks for a picture between real ones (the
     // application missed a display slot). It then extrapolates from the two
     // newest real pictures to the given timestamp.
+    void setConfidenceFallback(bool);
     void setGapFill(bool);
     bool gapFill() const;
 

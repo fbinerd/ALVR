@@ -230,5 +230,20 @@ void main() {
             && all(equal(colorAt(false,right,q),source));
         if (!unchanged) color=source;
     }
+    if ((p.rotationMode&2u)!=0u) {
+        // Continuous per-pixel confidence; no workgroup or tile thresholds.
+        // Reciprocal flow rejects occlusion; brightness disagreement provides
+        // a cost proxy without treating head rotation as object motion.
+        vec2 back=flowAt(true,right,target);
+        vec2 other=target+back;
+        float disagreement=length(back+flowAt(false,right,other));
+        vec3 newest=colorAt(true,right,target).rgb;
+        vec3 alignedPrevious=colorAt(false,right,other).rgb;
+        float cost=length(newest-alignedPrevious);
+        float confidence=(1.0-smoothstep(0.5,3.0,disagreement))
+            *(1.0-smoothstep(0.04,0.25,cost));
+        if (!inside(target) || !inside(other)) confidence=0;
+        color=mix(colorAt(true,right,target),color,confidence);
+    }
     imageStore(outputImage,ivec2(xy),color);
 }

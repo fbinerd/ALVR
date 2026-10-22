@@ -61,7 +61,7 @@ struct NativeMotion::State {
     PredictionTiming timing;
     double cachedOpticalGpuMs = -1;
     Rotation historyRotation;
-    bool rotationMode = false;
+    bool rotationMode = false, confidenceFallback = false;
 
     State(
         VkContext& c,
@@ -636,7 +636,7 @@ bool NativeMotion::predict(
         s.extent.width / 2, s.extent.height, s.lumaExtent.width, s.lumaExtent.height, *time
     };
     if (s.rotationMode) {
-        push.rotationMode = 1;
+        push.rotationMode = s.confidenceFallback ? 3 : 1;
         std::copy_n(s.historyRotation.quaternion, 4, push.previousQuaternion);
         std::copy_n(targetRotation->quaternion, 4, push.targetQuaternion);
         std::copy_n(targetRotation->leftTans, 4, push.leftTans);
@@ -704,6 +704,8 @@ NativeMotion::PredictionTiming NativeMotion::lastPredictionTiming() const { retu
 void NativeMotion::waitIdle() { state->waitPending(); }
 
 void NativeMotion::setRepeatReference(bool repeat) { state->repeatReference = repeat; }
+
+void NativeMotion::setConfidenceFallback(bool enabled) { state->confidenceFallback = enabled; }
 
 void NativeMotion::setGapFill(bool fill) {
     state->gapFill = fill;

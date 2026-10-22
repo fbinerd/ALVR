@@ -28,7 +28,7 @@ Scores scoreRecording(Pixels const& prediction, Pixels const& truth, Size size,
 }
 int main(int argc,char** argv) {
  try {
-    if(argc!=6 && argc!=7) throw std::runtime_error("Usage: recording_test RAW_RGBA MANIFEST OUTPUT EYE_WIDTH HEIGHT");
+    if(argc<6 || argc>8) throw std::runtime_error("Usage: recording_test RAW_RGBA MANIFEST OUTPUT EYE_WIDTH HEIGHT");
     Size size{uint32_t(std::stoul(argv[4])),uint32_t(std::stoul(argv[5]))};
     std::filesystem::path output(argv[3]); std::filesystem::create_directories(output);
     std::ifstream input(argv[1],std::ios::binary), manifest(argv[2]);
@@ -44,7 +44,8 @@ int main(int argc,char** argv) {
     csv<<"frame,pose_ns,clock_ns,yaw_rad,variant,mae,psnr,gradient_mae,block8_gradient_mae,temporal_error_delta,flow_wall_ms,warp_wall_ms,optical_gpu_ms,warp_gpu_ms\n";
     size_t index=0,targets=0; uint64_t pose,clock; double yaw; unsigned frame;
     double worst=-1, prepareMs=0, latestYaw=0;
-    bool rotation=argc==7;
+    bool rotation=argc>=7;
+    motion.setConfidenceFallback(argc==8);
     auto rotationBetween=[](double delta) {
         alvr::motion::NativeMotion::Rotation r;
         r.quaternion[1]=float(std::sin(delta/2)); r.quaternion[3]=float(std::cos(delta/2));
