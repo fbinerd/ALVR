@@ -395,7 +395,8 @@ pub fn handshake_loop(ctx: Arc<ConnectionContext>, lifecycle_state: Arc<RwLock<L
         dbg_connection!("handshake_loop: Try connect to wired device");
 
         let mut wired_client_ips = HashMap::new();
-        if SESSION_MANAGER
+        if std::env::var("MHL_NO_HEADSET").as_deref() != Ok("1")
+            && SESSION_MANAGER
             .read()
             .client_list()
             .iter()

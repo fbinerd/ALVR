@@ -131,8 +131,10 @@ impl Launcher {
         // The ADB server might be left running because of an unclean termination of SteamVR.
         // Kill it unconditionally to ensure clean state, regardless of current connection mode.
         // Note: this will also kill a system-wide ADB server not started by ALVR.
-        if let Some(path) = adb::get_adb_path(&crate::get_filesystem_layout()) {
-            adb::kill_server(&path).ok();
+        if std::env::var("MHL_NO_HEADSET").as_deref() != Ok("1") {
+            if let Some(path) = adb::get_adb_path(&crate::get_filesystem_layout()) {
+                adb::kill_server(&path).ok();
+            }
         }
 
         #[cfg(target_os = "linux")]
