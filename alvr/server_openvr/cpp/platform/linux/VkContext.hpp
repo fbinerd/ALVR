@@ -23,6 +23,8 @@
 #include <vulkan/vulkan.h>
 #include <vulkan/vulkan.hpp>
 #include <vulkan/vulkan_core.h>
+
+#include "motion/NativeMotionSwitch.hpp"
 #include <vulkan/vulkan_enums.hpp>
 #include <vulkan/vulkan_handles.hpp>
 #include <vulkan/vulkan_structs.hpp>
@@ -300,8 +302,7 @@ public:
             });
         };
 
-        char const* motionEnv = std::getenv("ALVR_NATIVE_MOTION");
-        bool wantsOpticalFlow = motionEnv && std::string_view(motionEnv) == "1";
+        bool wantsOpticalFlow = motion::nativeMotionMode() != 0;
         std::optional<u32> opticalFlowFamily;
         if (wantsOpticalFlow) {
             bool dependencies = hasDeviceExtension(VK_NV_OPTICAL_FLOW_EXTENSION_NAME)
@@ -315,7 +316,8 @@ public:
                 .synchronization2 = VK_FALSE,
             };
             vk::PhysicalDeviceFeatures2 supportedFeatures { .pNext = &supportedSync2 };
-            if (dependencies) physDev.getFeatures2(&supportedFeatures);
+            if (dependencies)
+                physDev.getFeatures2(&supportedFeatures);
 
             for (u32 i = 0; i < queueFamilyProps.size(); ++i) {
                 auto flags = queueFamilyProps[i].queueFlags;
@@ -330,7 +332,8 @@ public:
                 || !supportedSync2.synchronization2 || !opticalFlowFamily
                 || !supportedFeatures.features.shaderStorageImageExtendedFormats
                 || !supportedFeatures.features.shaderStorageImageWriteWithoutFormat) {
-                Warn("ALVR_NATIVE_MOTION=1 requested, but this Vulkan device lacks optical-flow support, dependencies, or a compatible queue; motion synthesis stays off");
+                Warn("Native motion requested, but this Vulkan device lacks optical-flow support, "
+                     "dependencies, or a compatible queue; motion synthesis stays off");
             } else {
                 meta.opticalFlowEnabled = true;
                 meta.opticalFlowQueueFamily = *opticalFlowFamily;
@@ -343,7 +346,9 @@ public:
                 };
                 meta.synchronization2.pNext = &meta.opticalFlow;
                 meta.feats12.pNext = &meta.synchronization2;
-                Info("Native optical-flow feature requested on queue family %u", *opticalFlowFamily);
+                Info(
+                    "Native optical-flow feature requested on queue family %u", *opticalFlowFamily
+                );
             }
         }
 
@@ -379,7 +384,8 @@ public:
         meta.feats12 = vk::PhysicalDeviceVulkan12Features {
             .timelineSemaphore = 1,
         };
-        if (meta.opticalFlowEnabled) meta.feats12.pNext = &meta.synchronization2;
+        if (meta.opticalFlowEnabled)
+            meta.feats12.pNext = &meta.synchronization2;
 
         meta.feats = vk::PhysicalDeviceFeatures2 {
             .pNext = &meta.feats12,
@@ -404,7 +410,8 @@ public:
         queue = dev.getQueue(wantedQueueFamily.value(), meta.queueIndex);
         if (meta.opticalFlowEnabled) {
             meta.opticalFlowQueueIndex = 0;
-            opticalFlowQueue = dev.getQueue(meta.opticalFlowQueueFamily, meta.opticalFlowQueueIndex);
+            opticalFlowQueue
+                = dev.getQueue(meta.opticalFlowQueueFamily, meta.opticalFlowQueueIndex);
         }
 
         sharedInit();

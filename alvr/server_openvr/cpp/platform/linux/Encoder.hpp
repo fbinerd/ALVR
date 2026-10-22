@@ -11,6 +11,7 @@
 #include "EncodePipeline.h"
 #include "Renderer.hpp"
 #include "motion/NativeMotion.hpp"
+#include "motion/NativeMotionSwitch.hpp"
 
 #include "alvr_server/IDRScheduler.h"
 #include "alvr_server/Settings.h"
@@ -351,8 +352,7 @@ public:
             } else {
                 try {
                     auto output = renderer.get().getOutput();
-                    const char* bothDirections = std::getenv("ALVR_NATIVE_MOTION_BIDIRECTIONAL");
-                    bool bidirectional = bothDirections && std::strcmp(bothDirections, "1") == 0;
+                    bool bidirectional = motion::nativeMotionMode() == 2;
                     if (bidirectional) {
                         vk::PhysicalDeviceOpticalFlowPropertiesNV opticalProperties {};
                         vk::PhysicalDeviceProperties2 properties { .pNext = &opticalProperties };

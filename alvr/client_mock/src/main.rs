@@ -1,8 +1,10 @@
+mod video;
+
 use alvr_client_core::{ClientCapabilities, ClientCoreContext, ClientCoreEvent};
 use alvr_common::{
     DeviceMotion, HEAD_ID, Pose, RelaxedAtomic, ViewParams,
     glam::{Quat, UVec2, Vec3},
-    parking_lot::RwLock,
+    parking_lot::{Mutex, RwLock},
 };
 use alvr_packets::{FaceData, TrackingData};
 use alvr_session::CodecType;
@@ -37,7 +39,8 @@ impl Default for WindowInput {
             height: 1.5,
             yaw: 0.0,
             pitch: 0.0,
-            use_random_orientation: true,
+            // A scripted sweep (MOCK_SWEEP) should be repeatable.
+            use_random_orientation: std::env::var_os("MOCK_SWEEP").is_none(),
             emulated_decode_ms: 5,
             emulated_compositor_ms: 1,
             emulated_vsync_ms: 25,
@@ -146,13 +149,19 @@ fn tracking_thread(
 ) {
     let timestamp_origin = Instant::now();
     context.send_view_params([ViewParams::DUMMY; 2]);
+    let sweep = video::Sweep::from_env();
+    let mut pose_log = video::PoseLog::open();
 
     let mut loop_deadline = Instant::now();
     while streaming.value() {
         let input_lock = input.read();
 
-        let mut orientation =
-            Quat::from_rotation_y(input_lock.yaw) * Quat::from_rotation_x(input_lock.pitch);
+        let poll_timestamp = timestamp_origin.elapsed();
+        let (sweep_yaw, yaw_velocity) = sweep.map_or((0.0, 0.0), |s| s.at(poll_timestamp));
+        let yaw = input_lock.yaw + sweep_yaw;
+        pose_log.write(poll_timestamp, yaw, input_lock.pitch, yaw_velocity);
+
+        let mut orientation = Quat::from_rotation_y(yaw) * Quat::from_rotation_x(input_lock.pitch);
 
         if input_lock.use_random_orientation {
             orientation *= Quat::from_rotation_z(rand::random::<f32>() * 0.001);
@@ -161,7 +170,7 @@ fn tracking_thread(
         let position = Vec3::new(0.0, input_lock.height, 0.0);
 
         context.send_tracking(TrackingData {
-            poll_timestamp: timestamp_origin.elapsed(),
+            poll_timestamp,
             device_motions: vec![(
                 *HEAD_ID,
                 DeviceMotion {
@@ -170,7 +179,7 @@ fn tracking_thread(
                         position,
                     },
                     linear_velocity: Vec3::ZERO,
-                    angular_velocity: Vec3::ZERO,
+                    angular_velocity: Vec3::new(0.0, yaw_velocity, 0.0),
                 },
             )],
             hand_skeletons: [None, None],
@@ -208,6 +217,29 @@ fn client_thread(
 
     let streaming = Arc::new(RelaxedAtomic::new(false));
     let got_decoder_config = Arc::new(RelaxedAtomic::new(false));
+
+    // Received video goes to video::VideoSink (viewer window and recording).
+    let video_origin = Instant::now();
+    let video_sink = Arc::new(Mutex::new(None::<video::VideoSink>));
+    let latest_frame = Arc::new(Mutex::new(Duration::ZERO));
+    {
+        let sink = Arc::clone(&video_sink);
+        let latest = Arc::clone(&latest_frame);
+        let context = Arc::downgrade(&client_core_context);
+        client_core_context.set_decoder_input_callback(Box::new(move |timestamp, nal| {
+            let submitted = sink
+                .lock()
+                .as_ref()
+                .is_some_and(|sink| sink.push(timestamp, nal));
+            if submitted {
+                *latest.lock() = timestamp;
+                if let Some(context) = context.upgrade() {
+                    context.report_frame_decoded(timestamp);
+                }
+            }
+            submitted
+        }));
+    }
     let mut maybe_tracking_thread = None;
 
     let mut window_output = WindowOutput::default();
@@ -253,8 +285,18 @@ fn client_thread(
                     window_output.connected = false;
                     window_output.resolution = UVec2::ZERO;
                     window_output.decoder_codec = None;
+                    video_sink.lock().take();
                 }
-                ClientCoreEvent::DecoderConfig { codec, .. } => {
+                ClientCoreEvent::DecoderConfig { codec, config_nal } => {
+                    // Later configs are ignored until reconnection.
+                    if !got_decoder_config.value() {
+                        *video_sink.lock() = Some(video::VideoSink::start(
+                            codec,
+                            &config_nal,
+                            window_output.fps,
+                            video_origin,
+                        ));
+                    }
                     got_decoder_config.set(true);
 
                     window_output.decoder_codec = Some(codec);
@@ -267,6 +309,7 @@ fn client_thread(
 
         thread::sleep(Duration::from_millis(3));
 
+        window_output.current_frame_timestamp = *latest_frame.lock();
         client_core_context.report_compositor_start(window_output.current_frame_timestamp);
 
         thread::sleep(Duration::from_millis(input_lock.emulated_compositor_ms));
@@ -292,6 +335,7 @@ fn client_thread(
     if let Some(thread) = maybe_tracking_thread {
         thread.join().unwrap();
     }
+    video_sink.lock().take();
 
     client_core_context.pause()
 
