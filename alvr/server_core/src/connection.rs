@@ -396,6 +396,8 @@ pub fn handshake_loop(ctx: Arc<ConnectionContext>, lifecycle_state: Arc<RwLock<L
 
         let mut wired_client_ips = HashMap::new();
         if std::env::var("MHL_NO_HEADSET").as_deref() != Ok("1")
+            && !std::env::var("HOME").ok().is_some_and(|home|
+                std::path::Path::new(&home).join(".config/alvr/diag_no_headset").exists())
             && SESSION_MANAGER
             .read()
             .client_list()
