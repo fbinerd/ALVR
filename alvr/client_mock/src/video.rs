@@ -168,11 +168,15 @@ fn spawn_viewer(format: &str, fps: f32) -> Option<Child> {
             "ALVR mock client video",
             "-x",
             "1600",
-            "-fflags",
-            "nobuffer",
             "-framedrop",
+            // Small probe for a quick start. No "-fflags nobuffer": it drops
+            // the probed data, which holds the stream's only IDR picture, and
+            // every later picture then decodes against missing references
+            // (wrong colours that differ between the eyes until the next IDR).
             "-probesize",
             "32",
+            "-analyzeduration",
+            "0",
             "-f",
             format,
             "-framerate",
