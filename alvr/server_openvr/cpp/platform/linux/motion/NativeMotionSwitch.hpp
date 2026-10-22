@@ -8,10 +8,10 @@
 namespace alvr::motion {
 
 // Opt-in for native motion synthesis: 0 off, 1 on, 2 on with bidirectional
-// optical flow. ALVR_NATIVE_MOTION=1 (plus ALVR_NATIVE_MOTION_BIDIRECTIONAL=1)
+// optical flow, 3 repeat reference (half real, half repeated; no synthesis). ALVR_NATIVE_MOTION=1 (plus ALVR_NATIVE_MOTION_BIDIRECTIONAL=1)
 // still works when vrserver inherits it, but when the dashboard starts
 // SteamVR through a running Steam client the variables do not reach vrserver.
-// So the file ~/.config/alvr/diag_native_motion (containing 1 or 2) is read
+// So the file ~/.config/alvr/diag_native_motion (containing 1, 2 or 3) is read
 // too. It is read when the Vulkan context and the encoder are created, so a
 // change applies after a SteamVR restart. Absent file and variables: off.
 inline int nativeMotionMode() {
@@ -28,7 +28,7 @@ inline int nativeMotionMode() {
     }
     std::ifstream file(std::string(home) + "/.config/alvr/diag_native_motion");
     int mode = 0;
-    if (!(file >> mode) || mode < 0 || mode > 2) {
+    if (!(file >> mode) || mode < 0 || mode > 3) {
         return 0;
     }
     return mode;

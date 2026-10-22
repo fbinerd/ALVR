@@ -53,6 +53,18 @@ public:
     // Output's layout is restored; imported SteamVR images are never retained.
     void capture(vk::Image output, vk::ImageLayout, uint64_t timestamp);
 
+    // Reference mode for measurements: same real/predicted cadence, but each
+    // "predicted" picture repeats the newest real picture (no flow, no warp).
+    // It shows what the stream looks like at half the input rate without
+    // synthesis, the baseline synthesis has to beat.
+    void setRepeatReference(bool);
+
+    // Runs the optical flow for the next prediction as soon as two real
+    // pictures are retained. Call it after the real picture has been encoded
+    // and sent: the flow then runs in the gap before the next presentation,
+    // and predict() only has to warp. predict() still estimates if needed.
+    void prepare();
+
     // Valid after a successful prediction. No queue/device operation.
     PredictionTiming lastPredictionTiming() const;
 };

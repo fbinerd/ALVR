@@ -49,7 +49,8 @@ struct NativeMotion::State {
     std::array<uint64_t, 2> timestamps {};
     uint64_t presentations = 0, predictions = 0, captures = 0, rejected = 0;
     unsigned retained = 0, latest = 0;
-    bool captureThisFrame = true, flowDirty = false, idle = true;
+    bool captureThisFrame = true, flowDirty = false, idle = true, repeatReference = false;
+    double aheadFlowMs = -1;
     bool allowExactFlowExit, bidirectionalFlow;
     PredictionTiming timing;
 
@@ -544,6 +545,34 @@ bool NativeMotion::predict(
         releaseInput();
     s.timing = {};
     auto start = std::chrono::steady_clock::now();
+    if (s.repeatReference) {
+        auto& newest = s.colors[s.latest];
+        s.begin();
+        s.barrier(output, layout, vk::ImageLayout::eTransferDstOptimal);
+        s.transition(newest, vk::ImageLayout::eTransferSrcOptimal);
+        vk::ImageCopy copy {
+            .srcSubresource = { vk::ImageAspectFlagBits::eColor, 0, 0, 1 },
+            .dstSubresource = { vk::ImageAspectFlagBits::eColor, 0, 0, 1 },
+            .extent = { s.extent.width, s.extent.height, 1 },
+        };
+        s.command.copyImage(
+            newest.handle,
+            vk::ImageLayout::eTransferSrcOptimal,
+            output,
+            vk::ImageLayout::eTransferDstOptimal,
+            copy
+        );
+        s.transition(newest, vk::ImageLayout::eShaderReadOnlyOptimal);
+        s.barrier(output, vk::ImageLayout::eTransferDstOptimal, layout);
+        s.submit();
+        if (++s.predictions == 1 || s.predictions % 360 == 0)
+            Info(
+                "Native motion repeat reference: repeated=%llu real=%llu",
+                static_cast<unsigned long long>(s.predictions),
+                static_cast<unsigned long long>(s.captures)
+            );
+        return true;
+    }
     s.estimate();
     auto flowEnd = std::chrono::steady_clock::now();
     s.begin();
@@ -599,18 +628,32 @@ bool NativeMotion::predict(
             = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start)
                   .count();
         Info(
-            "Native motion predicted=%llu real=%llu timestamp=%llu t=%.3f flow+warp=%.2f ms",
+            "Native motion predicted=%llu real=%llu timestamp=%llu t=%.3f flow+warp=%.2f ms "
+            "flow ahead=%.2f ms",
             static_cast<unsigned long long>(s.predictions),
             static_cast<unsigned long long>(s.captures),
             static_cast<unsigned long long>(timestamp),
             push.time,
-            elapsed
+            elapsed,
+            s.aheadFlowMs
         );
     }
     return true;
 }
 
 NativeMotion::PredictionTiming NativeMotion::lastPredictionTiming() const { return state->timing; }
+
+void NativeMotion::setRepeatReference(bool repeat) { state->repeatReference = repeat; }
+
+void NativeMotion::prepare() {
+    auto& s = *state;
+    if (s.repeatReference || s.retained < 2 || !s.flowDirty)
+        return;
+    auto start = std::chrono::steady_clock::now();
+    s.estimate();
+    s.aheadFlowMs
+        = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+}
 
 void NativeMotion::capture(vk::Image output, vk::ImageLayout layout, uint64_t timestamp) {
     auto& s = *state;

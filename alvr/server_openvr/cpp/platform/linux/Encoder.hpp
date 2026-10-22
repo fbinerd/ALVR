@@ -371,6 +371,11 @@ public:
                         true,
                         bidirectional
                     );
+                    if (motion::nativeMotionMode() == 3) {
+                        nativeMotion->setRepeatReference(true);
+                        Info("Native motion repeat reference: predicted pictures repeat the "
+                             "newest real picture");
+                    }
                 } catch (std::exception const& e) {
                     Warn("Native motion unavailable: %s; using normal frames", e.what());
                 }
@@ -539,6 +544,11 @@ public:
             targetTimestampNs,
             framePacket.isIDR
         );
+
+        // The real picture is on its way: compute the next prediction's flow
+        // now, so the predicted picture only waits for the warp.
+        if (nativeMotion && !predicted)
+            nativeMotion->prepare();
     }
 
     void requestIdr() { idrScheduler.InsertIDR(); }
