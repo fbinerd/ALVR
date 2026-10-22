@@ -22,7 +22,8 @@ public:
     // The cap applies only to estimator luma, not color/output. Zero retains
     // the original half-resolution estimator for controlled comparisons.
     // Disabling exact flow exit is a checker control; runtime uses the default.
-    static constexpr uint32_t DefaultLumaDimension = 512;
+    // Finer estimator grid reduces measured real-frame edge and temporal error.
+    static constexpr uint32_t DefaultLumaDimension = 768;
     NativeMotion(
         VkContext&,
         vk::Extent2D,
