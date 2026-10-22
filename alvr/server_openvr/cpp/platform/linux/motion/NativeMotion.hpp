@@ -65,6 +65,13 @@ public:
     // and predict() only has to warp. predict() still estimates if needed.
     void prepare();
 
+    // Gap-filling mode: every real picture is captured, and predict() runs
+    // only when the encoder asks for a picture between real ones (the
+    // application missed a display slot). It then extrapolates from the two
+    // newest real pictures to the given timestamp.
+    void setGapFill(bool);
+    bool gapFill() const;
+
     // Valid after a successful prediction. No queue/device operation.
     PredictionTiming lastPredictionTiming() const;
 };

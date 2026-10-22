@@ -92,6 +92,23 @@ std::optional<PoseHistory::TrackingHistoryFrame> PoseHistory::GetPoseAt(uint64_t
     return {};
 }
 
+std::optional<PoseHistory::TrackingHistoryFrame>
+PoseHistory::GetPoseNearest(uint64_t timestampNs) const {
+    std::unique_lock<std::mutex> lock(m_mutex);
+    std::optional<TrackingHistoryFrame> best;
+    uint64_t bestDistance = UINT64_MAX;
+    for (auto const& frame : m_poseBuffer) {
+        uint64_t distance = frame.targetTimestampNs > timestampNs
+            ? frame.targetTimestampNs - timestampNs
+            : timestampNs - frame.targetTimestampNs;
+        if (distance < bestDistance) {
+            bestDistance = distance;
+            best = frame;
+        }
+    }
+    return best;
+}
+
 std::optional<PoseHistory::TrackingHistoryFrame> PoseHistory::GetLatestPose() const {
     std::unique_lock<std::mutex> lock(m_mutex);
     if (m_poseBuffer.empty()) {

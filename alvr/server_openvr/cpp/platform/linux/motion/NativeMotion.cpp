@@ -49,7 +49,9 @@ struct NativeMotion::State {
     std::array<uint64_t, 2> timestamps {};
     uint64_t presentations = 0, predictions = 0, captures = 0, rejected = 0;
     unsigned retained = 0, latest = 0;
-    bool captureThisFrame = true, flowDirty = false, idle = true, repeatReference = false;
+    bool captureThisFrame = true, flowDirty = false, idle = true, repeatReference = false,
+         gapFill = false;
+    uint64_t gapRejected = 0;
     double aheadFlowMs = -1;
     bool allowExactFlowExit, bidirectionalFlow;
     PredictionTiming timing;
@@ -516,11 +518,30 @@ bool NativeMotion::predict(
     std::function<void()> const& releaseInput
 ) {
     auto& s = *state;
-    s.captureThisFrame = s.presentations++ % 2 == 0;
-    if (s.captureThisFrame || s.retained < 2)
-        return false;
+    if (s.gapFill) {
+        // Real pictures are all captured; this call is for a missed slot.
+        s.captureThisFrame = true;
+        if (s.retained < 2)
+            return false;
+        uint64_t newest = s.timestamps[s.latest], previous = s.timestamps[1 - s.latest];
+        if (!predictionTime(previous, newest, timestamp, 1.0)) {
+            if (++s.gapRejected == 1 || s.gapRejected % 360 == 0)
+                Info(
+                    "Native motion gap fill rejected=%llu previous=%llu latest=%llu target=%llu",
+                    static_cast<unsigned long long>(s.gapRejected),
+                    static_cast<unsigned long long>(previous),
+                    static_cast<unsigned long long>(newest),
+                    static_cast<unsigned long long>(timestamp)
+                );
+            return false;
+        }
+    } else {
+        s.captureThisFrame = s.presentations++ % 2 == 0;
+        if (s.captureThisFrame || s.retained < 2)
+            return false;
+    }
     uint64_t newest = s.timestamps[s.latest], previous = s.timestamps[1 - s.latest];
-    auto time = predictionTime(previous, newest, timestamp);
+    auto time = predictionTime(previous, newest, timestamp, s.gapFill ? 1.0 : 0.55);
     // A long pause, restart or missed job must not extrapolate stale motion.
     if (!time) {
         if (++s.rejected == 1 || s.rejected % 360 == 0)
@@ -644,6 +665,13 @@ bool NativeMotion::predict(
 NativeMotion::PredictionTiming NativeMotion::lastPredictionTiming() const { return state->timing; }
 
 void NativeMotion::setRepeatReference(bool repeat) { state->repeatReference = repeat; }
+
+void NativeMotion::setGapFill(bool fill) {
+    state->gapFill = fill;
+    state->captureThisFrame = true;
+}
+
+bool NativeMotion::gapFill() const { return state->gapFill; }
 
 void NativeMotion::prepare() {
     auto& s = *state;

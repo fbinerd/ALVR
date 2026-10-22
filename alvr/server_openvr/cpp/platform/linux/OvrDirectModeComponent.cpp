@@ -47,6 +47,10 @@ constexpr int64_t GpuWaitPollCapFrames = 2;
 // worker, so it costs pipeline depth, not compositor-thread budget.
 constexpr int GuardSleepMs = 4;
 
+// Gap filling waits this long past a display slot for the application's
+// Present before synthesizing the slot's picture.
+constexpr std::chrono::milliseconds GapFillSlack { 2 };
+
 // For trials: 0 in ~/.config/alvr/encoder_rewarp sends each frame as it was
 // rendered, stamped with the pose it was rendered for, and leaves all
 // reprojection to the headset. Read once.
@@ -220,16 +224,101 @@ void OvrDirectModeComponent::MarkRead(uint64_t frame) {
 }
 
 void OvrDirectModeComponent::EncodeWorkerLoop() {
+    // Gap filling (diag_native_motion=4): when no Present arrives for a
+    // display slot, send a synthesized picture instead of leaving the slot
+    // empty. Read once; off by default.
+    bool const gapFill = alvr::motion::nativeMotionMode() == 4;
+    std::chrono::steady_clock::time_point nextSlot {}, lastRealOutput {};
+    uint64_t lastStamp = 0, lastRealStamp = 0;
+    uint64_t filled = 0, attempts = 0, noPose = 0, notNewer = 0, notReady = 0, rejected = 0;
+    uint64_t jobsSeen = 0, timeouts = 0;
+    auto nextReport = std::chrono::steady_clock::now();
     while (true) {
         FrameJob job;
         {
             std::unique_lock<std::mutex> lock(m_jobMutex);
-            m_jobCv.wait(lock, [this] { return m_jobPending || m_workerExit; });
+            auto ready = [this] { return m_jobPending || m_workerExit; };
+            if (gapFill && std::chrono::steady_clock::now() >= nextReport) {
+                nextReport = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+                Info(
+                    "Native motion gap filling: jobs=%llu timeouts=%llu attempts=%llu "
+                    "filled=%llu no_pose=%llu not_newer=%llu not_streaming=%llu rejected=%llu\n",
+                    (unsigned long long)jobsSeen,
+                    (unsigned long long)timeouts,
+                    (unsigned long long)attempts,
+                    (unsigned long long)filled,
+                    (unsigned long long)noPose,
+                    (unsigned long long)notNewer,
+                    (unsigned long long)notReady,
+                    (unsigned long long)rejected
+                );
+            }
+            if (gapFill && nextSlot != std::chrono::steady_clock::time_point {}) {
+                if (!m_jobCv.wait_until(lock, nextSlot + GapFillSlack, ready)) {
+                    lock.unlock();
+                    ++timeouts;
+                    auto const now = std::chrono::steady_clock::now();
+                    // After a pause (no client, application loading) start a
+                    // new grid instead of filling every slot that passed.
+                    nextSlot = now - nextSlot > frameInterval() * 2 ? now + frameInterval()
+                                                                    : nextSlot + frameInterval();
+                    // The slot shows the scene one slot-time after the newest
+                    // real picture; stamp it with the tracking pose nearest to
+                    // that time, so the client reprojects from a known pose.
+                    auto const elapsedNs = (uint64_t)std::chrono::duration_cast<
+                                               std::chrono::nanoseconds>(now - lastRealOutput)
+                                               .count();
+                    auto pose = m_poseHistory->GetPoseNearest(lastRealStamp + elapsedNs);
+                    ++attempts;
+                    if (!pose) {
+                        ++noPose;
+                    } else if (pose->targetTimestampNs <= lastStamp) {
+                        if (++notNewer <= 5 || notNewer % 500 == 0) {
+                            auto newest = m_poseHistory->GetLatestPose();
+                            Info(
+                                "Gap fill not newer: last_real=%llu last_sent=%llu wanted=%llu "
+                                "nearest=%llu newest=%llu elapsed_us=%llu\n",
+                                (unsigned long long)lastRealStamp,
+                                (unsigned long long)lastStamp,
+                                (unsigned long long)(lastRealStamp + elapsedNs),
+                                (unsigned long long)pose->targetTimestampNs,
+                                (unsigned long long)(newest ? newest->targetTimestampNs : 0),
+                                (unsigned long long)(elapsedNs / 1000)
+                            );
+                        }
+                    } else if (m_encoderState.load() != EncoderState::Streaming) {
+                        ++notReady;
+                    } else {
+                        std::lock_guard<std::mutex> encLock(m_encMutex);
+                        try {
+                            if (m_encoderReady && enc.fill(pose->targetTimestampNs)) {
+                                lastStamp = pose->targetTimestampNs;
+                                ++filled;
+                            } else {
+                                ++rejected;
+                            }
+                        } catch (std::exception const& e) {
+                            Error("Gap fill: %s. Tearing down encoder and going idle.\n", e.what());
+                            m_encGeneration++;
+                            try {
+                                enc.shutdown();
+                            } catch (std::exception const& e2) {
+                                Error("Gap fill: teardown also failed: %s\n", e2.what());
+                            }
+                            m_encoderState = EncoderState::Idle;
+                        }
+                    }
+                    continue;
+                }
+            } else {
+                m_jobCv.wait(lock, ready);
+            }
             if (m_workerExit) {
                 break;
             }
             job = m_job;
             m_jobPending = false;
+            ++jobsSeen;
         }
 
         auto const ageLimit = std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -367,6 +456,14 @@ void OvrDirectModeComponent::EncodeWorkerLoop() {
                 MarkRead(frame);
             });
             MarkRead(frame);
+            if (gapFill) {
+                lastRealOutput = std::chrono::steady_clock::now();
+                nextSlot = lastRealOutput + frameInterval();
+                lastRealStamp = stampTimestampNs;
+                // A reconnected client starts a new timestamp timeline; an
+                // older stamp than the last one sent means exactly that.
+                lastStamp = stampTimestampNs;
+            }
         } catch (std::exception const& e) {
             // An exception escaping a thread's start function is
             // std::terminate, which takes vrserver with it. Same recovery as

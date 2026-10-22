@@ -376,6 +376,11 @@ public:
                         Info("Native motion repeat reference: predicted pictures repeat the "
                              "newest real picture");
                     }
+                    if (motion::nativeMotionMode() == 4) {
+                        nativeMotion->setGapFill(true);
+                        Info("Native motion gap filling: every real picture is sent; missed "
+                             "display slots get a synthesized picture");
+                    }
                 } catch (std::exception const& e) {
                     Warn("Native motion unavailable: %s; using normal frames", e.what());
                 }
@@ -511,7 +516,7 @@ public:
         ReportPresent(targetTimestampNs, 0);
         updateFoveationCenters(targetTimestampNs);
         auto output = renderer.get().getOutput();
-        bool predicted = nativeMotion
+        bool predicted = nativeMotion && !nativeMotion->gapFill()
             && nativeMotion->predict(
                 output.image.image,
                 output.image.view,
@@ -549,6 +554,36 @@ public:
         // now, so the predicted picture only waits for the warp.
         if (nativeMotion && !predicted)
             nativeMotion->prepare();
+    }
+
+    // Gap filling: encodes and sends a synthesized picture for a display
+    // slot the application missed, stamped with targetTimestampNs (the
+    // newest tracking pose). False when there is nothing to synthesize from
+    // or the prediction is rejected; then nothing is sent.
+    bool fill(u64 targetTimestampNs) {
+        if (!encoder || !nativeMotion || !nativeMotion->gapFill() || !renderer.hasValue())
+            return false;
+        auto output = renderer.get().getOutput();
+        if (!nativeMotion->predict(
+                output.image.image, output.image.view, output.image.layout, targetTimestampNs
+            ))
+            return false;
+        ReportPresent(targetTimestampNs, 0);
+        updateFoveationCenters(targetTimestampNs);
+        ReportComposed(targetTimestampNs, 0);
+        encoder->SetParams(GetDynamicEncoderParams());
+        encoder->PushFrame(0, idrScheduler.CheckIDRInsertion());
+        alvr::FramePacket framePacket;
+        if (!encoder->GetEncoded(framePacket))
+            return false;
+        ParseFrameNals(
+            encoder->GetCodec(),
+            framePacket.data,
+            framePacket.size,
+            targetTimestampNs,
+            framePacket.isIDR
+        );
+        return true;
     }
 
     void requestIdr() { idrScheduler.InsertIDR(); }
