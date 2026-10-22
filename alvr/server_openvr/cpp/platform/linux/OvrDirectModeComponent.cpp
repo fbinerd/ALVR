@@ -259,7 +259,8 @@ void OvrDirectModeComponent::EncodeWorkerLoop() {
     // and the prediction extrapolates the image to exactly that pose time.
     bool const separateRotation = alvr::motion::nativeMotionMode() >= 5;
     vr::HmdQuaternion_t lastMotionOrientation {1,0,0,0};
-    bool motionPoseValid = false;
+    bool motionPoseValid = false, motionGenerationValid = false;
+    uint64_t motionGeneration = 0;
     auto tryFill = [&](bool lastChance) -> bool {
         ++attempts;
         // Aim at the slot's exact time after the real picture, so pictures
@@ -461,6 +462,12 @@ void OvrDirectModeComponent::EncodeWorkerLoop() {
                 continue;
             }
 
+            if (separateRotation && (!motionGenerationValid || motionGeneration != job.generation)) {
+                motionGeneration=job.generation; motionGenerationValid=true;
+                lastStamp=0; lastRealStamp=0; motionPoseValid=false;
+                nextSlot={}; retryAt={}; lastRealOutput={}; slotIndex=0;
+            }
+
             // Wait for the exact end of SteamVR's write into each texture, as
             // Steam Link does (SteamVrSync.h). Most textures are already
             // finished here; on NVIDIA the waits measured reach ~4 ms in
@@ -541,6 +548,16 @@ void OvrDirectModeComponent::EncodeWorkerLoop() {
                     FfiQuat destination {float(stampOrientation.x),float(stampOrientation.y),float(stampOrientation.z),float(stampOrientation.w)};
                     validHistoryRotation=BuildMotionRotation(motionPoseValid?lastMotionOrientation:stampOrientation,destination,views,historyRotation);
                   } }
+            }
+            if (separateRotation) {
+                auto stampPose=m_poseHistory->GetPoseNearest(stampTimestampNs);
+                if (!stampTimestampNs || (lastStamp && stampTimestampNs<=lastStamp)
+                    || !stampPose || stampPose->targetTimestampNs!=stampTimestampNs) {
+                    // Never move a stamp without moving the image. A stale
+                    // real job is released; it must not rewind the stream.
+                    MarkRead(frame);
+                    continue;
+                }
             }
             enc.present(
                 stampTimestampNs,
