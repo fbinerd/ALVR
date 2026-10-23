@@ -3,11 +3,16 @@ use std::{env, path::PathBuf};
 // Generate build-local SPIR-V and an aligned C++ array. No generated shader
 // binary is stored in the checkout; Windows/macOS do not build this path.
 fn compile_native_motion_shaders(out_dir: &std::path::Path) {
+    compile_shader_header(out_dir, "NativeMotionShaders.hpp", &[("luma", "motion_luma.comp"), ("warp", "motion_warp.comp")]);
+    compile_shader_header(out_dir, "StereoDepthShaders.hpp", &[("stereo_luma", "stereo_luma.comp"), ("stereo_depth", "stereo_depth.comp"), ("stereo_fill", "stereo_fill.comp")]);
+}
+
+fn compile_shader_header(out_dir: &std::path::Path, header_name: &str, shaders: &[(&str, &str)]) {
     let compiler = env::var("GLSLANG_VALIDATOR").unwrap_or_else(|_| "glslangValidator".into());
     let mut header =
         String::from("#pragma once\n#include <cstdint>\nnamespace alvr::motion::shader {\n");
     println!("cargo:rerun-if-env-changed=GLSLANG_VALIDATOR");
-    for (name, file) in [("luma", "motion_luma.comp"), ("warp", "motion_warp.comp")] {
+    for (name, file) in shaders {
         let source = PathBuf::from("cpp/platform/linux/shader").join(file);
         let binary = out_dir.join(format!("{file}.spv"));
         println!("cargo:rerun-if-changed={}", source.display());
@@ -30,7 +35,7 @@ fn compile_native_motion_shaders(out_dir: &std::path::Path) {
         header.push_str("\n};\n");
     }
     header.push_str("}\n");
-    std::fs::write(out_dir.join("NativeMotionShaders.hpp"), header).unwrap();
+    std::fs::write(out_dir.join(header_name), header).unwrap();
 }
 
 fn get_vulkan_headers_path(platform_name: &str) -> PathBuf {
