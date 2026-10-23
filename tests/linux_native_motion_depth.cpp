@@ -10,6 +10,7 @@
 #undef main
 
 #include "native_motion_recording_metrics.hpp"
+#include "platform/linux/motion/StereoDepth.hpp"
 #include <map>
 
 namespace depthfixture {
@@ -20,6 +21,7 @@ struct Scene {
     float yawSpeed = 0; // head yaw, radians per frame
     bool flatObject = false; // untextured object: colour cannot confirm motion
     bool sky = false; // top of the background has no depth (+0)
+    float swaySpeed = 0; // sideways head motion, metres per frame (+x = right)
 };
 // Mock-like geometry: tangents +/-tan(1) for both eyes.
 inline float tangent() { return std::tan(1.0f); }
@@ -55,12 +57,24 @@ inline alvr::motion::NativeMotion::Rotation yawRotation(double delta) {
     }
     return r;
 }
-constexpr float NearMetres = 0.5f, FarMetres = 3.0f;
+constexpr float NearMetres = 0.5f, FarMetres = 3.0f, Ipd = 0.063f;
+// Stereo parallax of a point at a distance, in pixels: the left eye sees it
+// half of this to the right, the right eye half to the left.
+inline float disparity(Size size, float metres) {
+    return Ipd * size.eyeWidth / (2 * std::tan(1.0f)) / metres;
+}
+// Image shift, in pixels, of content at a distance when the head has moved
+// sideways by the scene's sway at that time.
+inline float swayShift(Size size, float swaySpeed, double time, float metres) {
+    return -float(time) * swaySpeed * size.eyeWidth / (2 * std::tan(1.0f)) / metres;
+}
 // Object rectangle centre at a time; the eyes see it with opposite parallax.
 inline bool object(Size size, Scene const& scene, unsigned eye, float x, float y, double time) {
     if (!toWorld(size, float(time * scene.yawSpeed), x, y, x, y))
         return false;
-    float centre = size.eyeWidth * .2f + float(time) * scene.objectSpeed + (eye ? -8.f : 8.f);
+    float centre = size.eyeWidth * .2f + float(time) * scene.objectSpeed
+        + (eye ? -.5f : .5f) * disparity(size, NearMetres)
+        + swayShift(size, scene.swaySpeed, time, NearMetres);
     return std::abs(x - centre) < size.eyeWidth * .12f && std::abs(y - size.height * .5f) < size.height * .22f;
 }
 struct Frame {
@@ -77,7 +91,8 @@ inline Frame render(Size size, Scene const& scene, double time) {
             float value, metres;
             size_t at = (size_t(y) * size.width() + x) * 4;
             if (near) {
-                float local = sx - float(time) * scene.objectSpeed;
+                float local = sx - float(time) * scene.objectSpeed
+                    - swayShift(size, scene.swaySpeed, time, NearMetres);
                 value = scene.flatObject ? 150.f : fixture::texture(local, sy, 91, 6.f);
                 metres = NearMetres;
                 // A warm object on a neutral background makes ghosts visible.
@@ -85,7 +100,9 @@ inline Frame render(Size size, Scene const& scene, double time) {
                 frame.colour[at + 1] = uint8_t(value * .7f);
                 frame.colour[at + 2] = uint8_t(value * .4f);
             } else {
-                float local = sx - float(time) * scene.backgroundSpeed;
+                float local = sx - float(time) * scene.backgroundSpeed
+                    - (eye ? -.5f : .5f) * disparity(size, FarMetres)
+                    - swayShift(size, scene.swaySpeed, time, FarMetres);
                 value = fixture::texture(local, sy, 7, 10.f);
                 metres = scene.sky && sy < size.height * .3f ? 0.f : FarMetres;
                 frame.colour[at] = frame.colour[at + 1] = frame.colour[at + 2] = uint8_t(value);
@@ -108,6 +125,9 @@ int main(int argc, char** argv) {
         Size size { 1024, 640 };
         // DEPTH_DIAGNOSTIC=1 paints the depth decision instead of colour.
         bool diagnostic = std::getenv("DEPTH_DIAGNOSTIC") != nullptr;
+        // DEPTH_SOURCE=stereo estimates depth from the eyes instead of using
+        // the analytic depth (the same depth the evaluation never sees).
+        bool stereo = std::getenv("DEPTH_SOURCE") && std::string(std::getenv("DEPTH_SOURCE")) == "stereo";
         if (argc >= 4)
             size = { uint32_t(std::stoul(argv[2])), uint32_t(std::stoul(argv[3])) };
         RecordingContext ctx;
@@ -118,6 +138,17 @@ int main(int argc, char** argv) {
         Images depthImage(ctx, size);
         depthImage.format = vk::Format::eR32Sfloat;
         depthImage.initialize();
+        std::unique_ptr<alvr::motion::StereoDepth> stereoDepth;
+        alvr::motion::StereoParams stereoParams;
+        if (stereo) {
+            stereoDepth = std::make_unique<alvr::motion::StereoDepth>(
+                ctx, vk::Extent2D { size.width(), size.height }, vk::Format::eR8G8B8A8Unorm,
+                std::getenv("STEREO_LUMA_MAX") ? uint32_t(std::stoul(std::getenv("STEREO_LUMA_MAX"))) : 640u);
+            float t = std::tan(1.0f);
+            stereoParams.leftTans = stereoParams.rightTans = { -t, t, t, -t };
+            stereoParams.ipd = depthfixture::Ipd;
+        }
+        std::ofstream(output / "depth_source.txt") << (stereo ? "stereo" : "analytic") << '\n';
 
         std::vector<depthfixture::Scene> scenes {
             { "slow_object_static_background", 6, 0 },
@@ -128,6 +159,9 @@ int main(int argc, char** argv) {
             { "object_with_head_yaw", 12, 0, .006f },
             { "object_against_head_yaw_with_sky", -10, 0, .006f, false, true },
             { "head_yaw_only_with_sky", 0, 0, .008f, false, true },
+            // 2 mm per frame = 0.14 m/s sideways: near content moves 6x the far.
+            { "head_sway_static_object", 0, 0, 0, false, false, .002f },
+            { "head_sway_moving_object", 8, 0, 0, false, false, .002f },
         };
         struct Mode {
             char const* name;
@@ -146,7 +180,11 @@ int main(int argc, char** argv) {
         csv << "scene,mode,depth,frame,region,pixels,repeat_mae,synth_mae\n";
         summary << "scene,mode,depth,region,targets,repeat_mae,synth_mae\n";
         unsigned border = 16;
+        // DEPTH_SCENES=name,name runs only those scenes.
+        std::string only = std::getenv("DEPTH_SCENES") ? std::getenv("DEPTH_SCENES") : "";
         for (auto const& scene : scenes) {
+            if (!only.empty() && ("," + only + ",").find(std::string(",") + scene.name + ",") == std::string::npos)
+                continue;
             std::vector<depthfixture::Frame> frames;
             for (unsigned f = 0; f < Frames; ++f)
                 frames.push_back(depthfixture::render(size, scene, double(f)));
@@ -159,9 +197,11 @@ int main(int argc, char** argv) {
                     motion.setStableResidual(mode.stable);
                     if (diagnostic && useDepth)
                         motion.setDiagnosticFlags(2);
-                    auto rotationFor = [&](double delta) {
+                    // delta frames between source and destination pictures.
+                    auto rotationFor = [&](double frames) {
                         static alvr::motion::NativeMotion::Rotation r;
-                        r = depthfixture::yawRotation(delta);
+                        r = depthfixture::yawRotation(scene.yawSpeed * frames);
+                        r.translation[0] = float(scene.swaySpeed * frames);
                         return mode.rotation ? &r : nullptr;
                     };
                     std::map<std::string, std::array<double, 3>> totals; // pixels, repeat, synth
@@ -172,12 +212,16 @@ int main(int argc, char** argv) {
                         if (f % 2 == 0) {
                             motion.waitIdle();
                             gpu.transfer(&frames[f].colour);
-                            depthImage.transfer(&frames[f].depth);
+                            if (stereo && useDepth) {
+                                stereoDepth->estimate(gpu.image, gpu.view, gpu.layout, depthImage.image,
+                                    depthImage.view, vk::ImageLayout::eGeneral, stereoParams);
+                                depthImage.layout = vk::ImageLayout::eGeneral;
+                            } else
+                                depthImage.transfer(&frames[f].depth);
                             alvr::motion::NativeMotion::Depth depth {
                                 depthImage.image, depthImage.layout, { size.width(), size.height }
                             };
-                            double history = f ? scene.yawSpeed * 2.0 : 0.0;
-                            motion.capture(gpu.image, gpu.layout, stamp, stamp, rotationFor(history),
+                            motion.capture(gpu.image, gpu.layout, stamp, stamp, rotationFor(f ? 2.0 : 0.0),
                                 useDepth ? &depth : nullptr);
                             motion.prepare();
                             continue;
@@ -187,7 +231,7 @@ int main(int argc, char** argv) {
                         require(motion.depthActive() == useDepth, "Depth activity mismatch");
                         motion.waitIdle();
                         if (!motion.predict(gpu.image, gpu.view, gpu.layout, stamp, {}, stamp,
-                                rotationFor(scene.yawSpeed)))
+                                rotationFor(1.0)))
                             throw std::runtime_error("Gap-fill target rejected");
                         auto image = gpu.transfer(nullptr);
                         auto const& truth = frames[f].colour;

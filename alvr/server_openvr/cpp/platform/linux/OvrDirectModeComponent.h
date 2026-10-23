@@ -1,4 +1,5 @@
 #pragma once
+#include <array>
 #include "alvr_server/PoseHistory.h"
 #include "alvr_server/Utils.h"
 #include "alvr_server/bindings.h"
@@ -112,6 +113,9 @@ private:
     SubmitLayerPerEye_t m_submitLayers[MAX_LAYERS][2];
     vr::HmdQuaternion_t m_prevFramePoseRotation;
     vr::HmdQuaternion_t m_framePoseRotation;
+    // Head position the frame was rendered with (metres), for positional
+    // correction in frame synthesis.
+    std::array<float, 3> m_framePosePosition {};
     uint64_t m_targetTimestampNs;
     uint64_t m_prevTargetTimestampNs;
     // Track current texture index for each eye to avoid UB with uninitialized data
@@ -150,6 +154,9 @@ private:
         // m_framePoseRotation itself because the compositor thread has
         // overwritten it by then.
         vr::HmdQuaternion_t renderOrientation;
+        // Head position the layer was rendered with. ALVR's rewarp is
+        // rotation only, so the composed picture keeps this position.
+        std::array<float, 3> renderPosition {};
         // Encoder-state generation this job was built against. The worker
         // discards the job if the generation moved (rebuild, shutdown, set
         // switch) between enqueue and processing.

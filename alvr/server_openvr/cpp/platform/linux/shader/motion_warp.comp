@@ -18,6 +18,8 @@ layout(push_constant) uniform Params {
     uint eyeWidth,height,lumaWidth,lumaHeight;
     float time; uint rotationMode,eye,flags;
     vec4 previousQuaternion,targetQuaternion,leftTans,rightTans;
+    vec4 targetTranslation; // xyz metres, source-from-destination
+    vec4 previousTranslation; // history: older-from-newest, xyz metres
 } p;
 vec2 rotatePixel(vec2 at,bool right,vec4 quat) {
     if (all(equal(quat,vec4(0,0,0,1)))) return at;
@@ -30,6 +32,7 @@ vec2 rotatePixel(vec2 at,bool right,vec4 quat) {
     return vec2((ray.x-t.x)/(t.y-t.x),(ray.y-t.z)/(t.w-t.z))
         *vec2(p.eyeWidth,p.height)-0.5;
 }
+vec2 olderPixel(vec2 at,bool right);
 // The flow grid is coarser than output pixels. Solve four tile corners once
 // rather than repeating the iterative inversion for every output pixel.
 shared vec2 cornerDisplacement[4];
@@ -44,7 +47,7 @@ shared vec3 temporalChange[16];
 shared uint temporalTile;
 shared uint colorOnlyTile;
 vec3 historyAt(bool recent,bool right,ivec2 q) {
-    if (!recent && p.rotationMode!=0) q=ivec2(round(rotatePixel(vec2(q),right,p.previousQuaternion)));
+    if (!recent && p.rotationMode!=0) q=ivec2(round(olderPixel(vec2(q),right)));
     q=clamp(q,ivec2(0),ivec2(p.eyeWidth-1,p.height-1));
     q.x+=right?int(p.eyeWidth):0;
     return recent?texelFetch(latestImage,q,0).rgb:texelFetch(previousImage,q,0).rgb;
@@ -128,7 +131,7 @@ bool motionMatches(bool right,vec2 q,vec2 v) {
 // picture is sampled through the history rotation, like colorAt). Invalid
 // or sky depth counts as very far.
 float depthAt(bool recent,bool right,vec2 q) {
-    if (!recent && p.rotationMode!=0) q=rotatePixel(q,right,p.previousQuaternion);
+    if (!recent && p.rotationMode!=0) q=olderPixel(q,right);
     // Depth may have its own extent; both eyes side by side like the colour.
     q=clamp(q,vec2(0),vec2(p.eyeWidth-1,p.height-1));
     q.x+=right?float(p.eyeWidth):0.0;
@@ -141,6 +144,60 @@ float depthAt(bool recent,bool right,vec2 q) {
 float depthAffinity(float a,float b) {
     float r=log(a/b)/0.08;
     return 1.0/(1.0+r*r);
+}
+bool positionalHistory() {
+    return hasDepth() && dot(p.previousTranslation.xyz,p.previousTranslation.xyz)>0.0;
+}
+// Direct fetch (GLSL forbids the static recursion through depthAt).
+float newestDepth(vec2 q,bool right) {
+    q=clamp(q,vec2(0),vec2(p.eyeWidth-1,p.height-1));
+    q.x+=right?float(p.eyeWidth):0.0;
+    vec2 size=vec2(textureSize(latestDepth,0));
+    float d=texelFetch(latestDepth,clamp(ivec2((q+0.5)*size/vec2(2*p.eyeWidth,p.height)),ivec2(0),ivec2(size)-1),0).r;
+    return d>0.0 && !isinf(d) && !isnan(d)?d:1e4;
+}
+vec3 rotateVector(vec4 quat,vec3 v) {
+    return v+2.0*cross(quat.xyz,cross(quat.xyz,v)+quat.w*v);
+}
+// Older-picture position of a newest-picture position. With depth and a
+// head translation the newest depth places the content in 3D, so parallax
+// is aligned too; otherwise rotation only.
+vec2 olderPixel(vec2 at,bool right) {
+    if (!positionalHistory()) return rotatePixel(at,right,p.previousQuaternion);
+    vec4 t=right?p.rightTans:p.leftTans;
+    vec2 size=vec2(p.eyeWidth,p.height);
+    vec2 uv=(at+0.5)/size;
+    vec3 point=vec3(mix(t.x,t.y,uv.x),mix(t.z,t.w,uv.y),-1)*newestDepth(at,right);
+    vec3 v=rotateVector(p.previousQuaternion,point)+p.previousTranslation.xyz;
+    if(v.z>=-1e-5) return vec2(-10000);
+    vec2 ray=v.xy/-v.z;
+    return vec2((ray.x-t.x)/(t.y-t.x),(ray.y-t.z)/(t.w-t.z))*size-0.5;
+}
+// Positional correction (needs depth): the newest-picture position whose
+// content the destination eye, rotated and moved by the target transform,
+// sees at this pixel. Fixed point on the newest picture's depth: a source
+// position gives a 3D point, the point's destination depth gives a point on
+// the destination ray, and that point projects to the next source position.
+vec2 positionalPixel(vec2 at,bool right) {
+    vec4 t=right?p.rightTans:p.leftTans;
+    vec2 size=vec2(p.eyeWidth,p.height);
+    vec2 uv=(at+0.5)/size;
+    vec3 ray=vec3(mix(t.x,t.y,uv.x),mix(t.z,t.w,uv.y),-1);
+    vec4 inverse=vec4(-p.targetQuaternion.xyz,p.targetQuaternion.w);
+    vec2 q=rotatePixel(at,right,p.targetQuaternion);
+    for (int i=0;i<4;i++) {
+        vec2 sq=clamp(q,vec2(0),size-1.0);
+        vec2 suv=(sq+0.5)/size;
+        float z=depthAt(true,right,sq);
+        vec3 source=vec3(mix(t.x,t.y,suv.x),mix(t.z,t.w,suv.y),-1)*z;
+        vec3 destination=rotateVector(inverse,source-p.targetTranslation.xyz);
+        float zd=max(-destination.z,1e-3);
+        vec3 back=rotateVector(p.targetQuaternion,ray*zd)+p.targetTranslation.xyz;
+        if (back.z>=-1e-5) return vec2(-10000);
+        vec2 r=back.xy/-back.z;
+        q=vec2((r.x-t.x)/(t.y-t.x),(r.y-t.z)/(t.w-t.z))*size-0.5;
+    }
+    return q;
 }
 ivec2 vectorAt(bool reverse,bool right,ivec2 q) {
     if (right) return reverse?texelFetch(backwardRight,q,0).xy:texelFetch(forwardRight,q,0).xy;
@@ -238,7 +295,7 @@ bool sourceAt(vec2 target,float distance,bool reverse,bool right,out vec2 q) {
         && length(v+flowAt(!reverse,right,other))<=2.0;
 }
 vec4 colorAt(bool recent,bool right,vec2 q) {
-    if (!recent && p.rotationMode!=0) q=rotatePixel(q,right,p.previousQuaternion);
+    if (!recent && p.rotationMode!=0) q=olderPixel(q,right);
     q=clamp(q,vec2(0),vec2(p.eyeWidth-1,p.height-1));
     q.x+=right?float(p.eyeWidth):0.0;
     vec2 uv=(q+0.5)/vec2(2*p.eyeWidth,p.height);
@@ -272,7 +329,8 @@ void main() {
     if (xy.x>=2*p.eyeWidth || xy.y>=p.height) return;
     bool right=xy.x>=p.eyeWidth;
     vec2 target=vec2(xy.x%p.eyeWidth,xy.y), q;
-    if(p.rotationMode!=0) target=rotatePixel(target,right,p.targetQuaternion);
+    if(p.rotationMode!=0) target=hasDepth() && dot(p.targetTranslation.xyz,p.targetTranslation.xyz)>0.0
+        ? positionalPixel(target,right) : rotatePixel(target,right,p.targetQuaternion);
     vec4 color=p.rotationMode!=0?colorAt(true,right,target):texelFetch(latestImage,ivec2(xy),0);
     vec4 rotationOnly=color;
     // Depth edge near this pixel: the occlusion resolution below handles it,
@@ -295,7 +353,7 @@ void main() {
     if(stable && !depthEdge) {
         // Newly exposed pixels have no history. Retain the rotation-only
         // newest picture, rather than extending a residual edge vector.
-        vec2 older=rotatePixel(target,right,p.previousQuaternion);
+        vec2 older=olderPixel(target,right);
         if(!inside(target) || !inside(older)) {
             imageStore(outputImage,ivec2(xy),rotationOnly); return;
         }
@@ -430,7 +488,7 @@ void main() {
     if(stable && !depthResolved) {
         vec3 change=abs(rotationOnly.rgb-colorAt(false,right,target).rgb);
         float activity=smoothstep(1.0/255.0,4.0/255.0,max(max(change.r,change.g),change.b));
-        vec2 older=rotatePixel(target,right,p.previousQuaternion);
+        vec2 older=olderPixel(target,right);
         vec2 margin=min(older,vec2(p.eyeWidth-1,p.height-1)-older);
         float visible=smoothstep(0.0,8.0,min(margin.x,margin.y));
         color=mix(rotationOnly,color,activity*visible*residualConfidence);

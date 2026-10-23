@@ -38,8 +38,10 @@ namespace {
         uint32_t rotationMode = 0, eye = 0, flags = 0; // flags bit 0: depth
         float previousQuaternion[4] {0,0,0,1}, targetQuaternion[4] {0,0,0,1};
         float leftTans[4] {}, rightTans[4] {};
+        float targetTranslation[4] {}; // xyz metres, see Rotation::translation
+        float previousTranslation[4] {}; // history translation, older-from-newest
     };
-    static_assert(sizeof(WarpPush) == 96);
+    static_assert(sizeof(WarpPush) == 128); // the guaranteed push constant size
 }
 
 struct NativeMotion::State {
@@ -342,7 +344,7 @@ struct NativeMotion::State {
         makePipeline(
             shader::luma,
             sizeof(shader::luma),
-            2,
+            3,
             lumaDescriptors,
             lumaLayout,
             lumaShader,
@@ -684,6 +686,8 @@ bool NativeMotion::predict(
         std::copy_n(targetRotation->quaternion, 4, push.targetQuaternion);
         std::copy_n(targetRotation->leftTans, 4, push.leftTans);
         std::copy_n(targetRotation->rightTans, 4, push.rightTans);
+        std::copy_n(targetRotation->translation, 3, push.targetTranslation);
+        std::copy_n(s.historyRotation.translation, 3, push.previousTranslation);
     }
     if (s.depthValid[0] && s.depthValid[1])
         push.flags |= 1u;
@@ -929,7 +933,8 @@ void NativeMotion::capture(
         s.dispatch(
             s.lumaPipeline,
             s.lumaLayout,
-            { s.sampled(s.colors[slot]), { {}, luma.view, vk::ImageLayout::eGeneral } },
+            // Depth is unused here (flags 0); any sampled image fills the slot.
+            { s.sampled(s.colors[slot]), s.sampled(s.colors[slot]), { {}, luma.view, vk::ImageLayout::eGeneral } },
             &lumaPush,
             sizeof(lumaPush),
             s.lumaExtent
@@ -948,8 +953,15 @@ void NativeMotion::capture(
             std::copy_n(historyRotation->quaternion,4,params.previousQuaternion);
             std::copy_n(historyRotation->leftTans,4,params.leftTans);
             std::copy_n(historyRotation->rightTans,4,params.rightTans);
+            // With depth on both pictures the newest depth also aligns parallax.
+            bool positional = s.depthValid[slot] && s.depthValid[s.latest];
+            if (positional) {
+                params.flags = 1;
+                std::copy_n(historyRotation->translation,3,params.previousTranslation);
+            }
             s.dispatch(s.lumaPipeline,s.lumaLayout,
-                {s.sampled(s.colors[s.latest]), {{},luma.view,vk::ImageLayout::eGeneral}},
+                {s.sampled(s.colors[s.latest]), s.sampled(positional ? s.depths[slot] : s.colors[s.latest], true),
+                 {{},luma.view,vk::ImageLayout::eGeneral}},
                 &params,sizeof(params),s.lumaExtent);
             s.transition(luma,vk::ImageLayout::eShaderReadOnlyOptimal);
         }

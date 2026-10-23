@@ -17,6 +17,10 @@ public:
     struct Rotation {
         float quaternion[4] {0, 0, 0, 1}; // source-from-destination, xyzw
         float leftTans[4] {}, rightTans[4] {}; // left,right,up,down
+        // Source-from-destination eye translation in metres, in source eye
+        // coordinates: a point x in the destination eye is R*x + translation
+        // in the source eye. Used only with depth (positional correction).
+        float translation[3] {};
     };
     // Wall durations include completion waits. Device durations are -1 when
     // the relevant queue does not support timestamps or results are unavailable.

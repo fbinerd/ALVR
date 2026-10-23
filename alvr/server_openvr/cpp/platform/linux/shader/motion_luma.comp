@@ -1,12 +1,25 @@
 #version 450
 layout(local_size_x=8,local_size_y=8) in;
 layout(binding=0) uniform sampler2D colorImage;
-layout(binding=1,r8) uniform writeonly image2D lumaImage;
+// Newest picture's depth (flags bit 0), to align the older picture's parallax.
+layout(binding=1) uniform sampler2D depthImage;
+layout(binding=2,r8) uniform writeonly image2D lumaImage;
 layout(push_constant) uniform Params {
     uint eyeWidth,height,lumaWidth,lumaHeight;
-    float time; uint rotationMode,eye,padding;
+    float time; uint rotationMode,eye,flags;
     vec4 previousQuaternion,targetQuaternion,leftTans,rightTans;
+    vec4 targetTranslation,previousTranslation;
 } p;
+bool positionalHistory() {
+    return (p.flags&1u)!=0u && dot(p.previousTranslation.xyz,p.previousTranslation.xyz)>0.0;
+}
+float newestDepth(vec2 q,bool right) {
+    q=clamp(q,vec2(0),vec2(p.eyeWidth-1,p.height-1));
+    q.x+=right?float(p.eyeWidth):0.0;
+    vec2 size=vec2(textureSize(depthImage,0));
+    float d=texelFetch(depthImage,clamp(ivec2((q+0.5)*size/vec2(2*p.eyeWidth,p.height)),ivec2(0),ivec2(size)-1),0).r;
+    return d>0.0 && !isinf(d) && !isnan(d)?d:1e4;
+}
 vec2 rotatePixel(vec2 at,bool right,vec4 quat) {
     if (all(equal(quat,vec4(0,0,0,1)))) return at;
     vec4 t=right?p.rightTans:p.leftTans;
@@ -19,10 +32,28 @@ vec2 rotatePixel(vec2 at,bool right,vec4 quat) {
         *vec2(p.eyeWidth,p.height)-0.5;
 }
 
+vec3 rotateVector(vec4 quat,vec3 v) {
+    return v+2.0*cross(quat.xyz,cross(quat.xyz,v)+quat.w*v);
+}
+// Older-picture position of a newest-picture position. With depth and a
+// head translation the newest depth places the content in 3D, so parallax
+// is aligned too; otherwise rotation only.
+vec2 olderPixel(vec2 at,bool right) {
+    if (!positionalHistory()) return rotatePixel(at,right,p.previousQuaternion);
+    vec4 t=right?p.rightTans:p.leftTans;
+    vec2 size=vec2(p.eyeWidth,p.height);
+    vec2 uv=(at+0.5)/size;
+    vec3 point=vec3(mix(t.x,t.y,uv.x),mix(t.z,t.w,uv.y),-1)*newestDepth(at,right);
+    vec3 v=rotateVector(p.previousQuaternion,point)+p.previousTranslation.xyz;
+    if(v.z>=-1e-5) return vec2(-10000);
+    vec2 ray=v.xy/-v.z;
+    return vec2((ray.x-t.x)/(t.y-t.x),(ray.y-t.z)/(t.w-t.z))*size-0.5;
+}
+
 vec3 readColor(vec2 uv) {
     if(p.rotationMode!=0) {
         vec2 local=vec2(uv.x*2-float(p.eye),uv.y)*vec2(p.eyeWidth,p.height)-0.5;
-        local=rotatePixel(local,p.eye!=0,p.previousQuaternion);
+        local=olderPixel(local,p.eye!=0);
         local=clamp(local,vec2(0),vec2(p.eyeWidth-1,p.height-1));
         uv=(local+0.5)/vec2(p.eyeWidth,p.height);
         uv.x=(uv.x+float(p.eye))*0.5;

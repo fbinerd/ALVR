@@ -173,9 +173,13 @@ static bool BuildWarpParams(
 }
 
 // Same source-from-destination convention as the real-frame rewarp.
+// sourcePosition/destinationPosition (metres, tracking space) add the head
+// translation, expressed in the source head frame: a point x in the
+// destination frame is delta*x + translation in the source frame.
 static bool BuildMotionRotation(const vr::HmdQuaternion_t& source,
     const FfiQuat& destination, const FfiViewParams (&views)[2],
-    alvr::motion::NativeMotion::Rotation& result) {
+    alvr::motion::NativeMotion::Rotation& result,
+    const float* sourcePosition = nullptr, const float* destinationPosition = nullptr) {
     alvr::render::WarpParams validated {};
     if (!BuildWarpParams(source,destination,views[0].fov,views[1].fov,validated)) return false;
     vr::HmdQuaternion_t dest {destination.w,destination.x,destination.y,destination.z};
@@ -184,6 +188,13 @@ static bool BuildMotionRotation(const vr::HmdQuaternion_t& source,
     result.quaternion[2]=delta.z; result.quaternion[3]=delta.w;
     memcpy(result.leftTans,validated.leftTans,sizeof(result.leftTans));
     memcpy(result.rightTans,validated.rightTans,sizeof(result.rightTans));
+    if (sourcePosition && destinationPosition) {
+        vr::HmdQuaternion_t moved {0, destinationPosition[0]-sourcePosition[0],
+            destinationPosition[1]-sourcePosition[1], destinationPosition[2]-sourcePosition[2]};
+        auto local=vrmath::quaternionConjugate(source)*moved*source;
+        result.translation[0]=float(local.x); result.translation[1]=float(local.y);
+        result.translation[2]=float(local.z);
+    }
     return true;
 }
 
@@ -272,6 +283,7 @@ void OvrDirectModeComponent::EncodeWorkerLoop() {
     uint64_t heldStamp = 0, interpolated = 0, sentDirect = 0;
     std::chrono::steady_clock::time_point heldSendAt {};
     vr::HmdQuaternion_t lastMotionOrientation {1,0,0,0};
+    std::array<float, 3> lastMotionPosition {};
     bool motionPoseValid = false, motionGenerationValid = false;
     uint64_t motionGeneration = 0;
     auto tryFill = [&](bool lastChance) -> bool {
@@ -315,7 +327,8 @@ void OvrDirectModeComponent::EncodeWorkerLoop() {
                 { std::unique_lock<std::mutex> lock(m_viewParamsMutex);
                   if (!m_viewParamsValid || !motionPoseValid) return false;
                   views[0]=m_viewParams[0]; views[1]=m_viewParams[1]; }
-                if (!BuildMotionRotation(lastMotionOrientation,pose->motion.pose.orientation,views,rotation)) return false;
+                if (!BuildMotionRotation(lastMotionOrientation,pose->motion.pose.orientation,views,rotation,
+                        lastMotionPosition.data(),pose->motion.pose.position)) return false;
             }
             if (m_encoderReady && enc.fill(pose->targetTimestampNs, slotClockNs, separateRotation?&rotation:nullptr)) {
                 lastStamp = pose->targetTimestampNs;
@@ -591,7 +604,8 @@ void OvrDirectModeComponent::EncodeWorkerLoop() {
                   views[0]=m_viewParams[0]; views[1]=m_viewParams[1];
                   if (m_viewParamsValid) {
                     FfiQuat destination {float(stampOrientation.x),float(stampOrientation.y),float(stampOrientation.z),float(stampOrientation.w)};
-                    validHistoryRotation=BuildMotionRotation(motionPoseValid?lastMotionOrientation:stampOrientation,destination,views,historyRotation);
+                    validHistoryRotation=BuildMotionRotation(motionPoseValid?lastMotionOrientation:stampOrientation,destination,views,historyRotation,
+                        motionPoseValid?lastMotionPosition.data():job.renderPosition.data(),job.renderPosition.data());
                   } }
             }
             if (separateRotation) {
@@ -618,6 +632,7 @@ void OvrDirectModeComponent::EncodeWorkerLoop() {
                 !interpolate
             );
             lastMotionOrientation=stampOrientation;
+            lastMotionPosition=job.renderPosition;
             motionPoseValid=validHistoryRotation;
             MarkRead(frame);
             if (interpolate) {
@@ -651,7 +666,8 @@ void OvrDirectModeComponent::EncodeWorkerLoop() {
                     if (pose && pose->targetTimestampNs > lastRealStamp
                         && pose->targetTimestampNs < stampTimestampNs && viewsValid
                         && BuildMotionRotation(
-                            lastMotionOrientation, pose->motion.pose.orientation, views, rotation
+                            lastMotionOrientation, pose->motion.pose.orientation, views, rotation,
+                            lastMotionPosition.data(), pose->motion.pose.position
                         )
                         && enc.fill(pose->targetTimestampNs, middleClockNs, &rotation)) {
                         sentMiddle = true;
@@ -997,6 +1013,7 @@ void OvrDirectModeComponent::SubmitLayer(const SubmitLayerPerEye_t (&perEye)[2])
             m_framePoseRotation.y = pose->motion.pose.orientation.y;
             m_framePoseRotation.z = pose->motion.pose.orientation.z;
             m_framePoseRotation.w = pose->motion.pose.orientation.w;
+            std::copy_n(pose->motion.pose.position, 3, m_framePosePosition.begin());
         } else {
             m_targetTimestampNs = 0;
             m_framePoseRotation = HmdQuaternion_Init(0.0, 0.0, 0.0, 0.0);
@@ -1126,6 +1143,7 @@ void OvrDirectModeComponent::Present(vr::SharedTextureHandle_t syncTexture) {
     }
     job.targetTimestampNs = m_targetTimestampNs;
     job.renderOrientation = m_framePoseRotation;
+    job.renderPosition = m_framePosePosition;
     job.generation = m_encGeneration;
     job.enqueueTime = std::chrono::steady_clock::now();
 
