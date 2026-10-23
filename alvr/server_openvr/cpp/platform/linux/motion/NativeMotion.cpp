@@ -87,6 +87,7 @@ struct NativeMotion::State {
     bool rotationMode = false, confidenceFallback = false, stableResidual = false,
          interpolate = false;
     uint32_t diagnosticFlags = 0;
+    bool depthOcclusion = false;
 
     State(
         VkContext& c,
@@ -692,6 +693,8 @@ bool NativeMotion::predict(
     if (s.depthValid[0] && s.depthValid[1])
         push.flags |= 1u;
     push.flags |= s.diagnosticFlags;
+    if (s.depthOcclusion)
+        push.flags |= 8u;
     s.dispatch(
         s.warpPipeline,
         s.warpLayout,
@@ -837,6 +840,8 @@ void NativeMotion::setGapFill(bool fill) {
 }
 
 bool NativeMotion::gapFill() const { return state->gapFill; }
+
+void NativeMotion::setDepthOcclusion(bool enabled) { state->depthOcclusion = enabled; }
 
 bool NativeMotion::depthActive() const {
     return state->retained == 2 && state->depthValid[0] && state->depthValid[1];

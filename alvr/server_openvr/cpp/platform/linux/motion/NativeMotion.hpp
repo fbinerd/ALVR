@@ -78,6 +78,9 @@ public:
     void capture(vk::Image output, vk::ImageLayout, uint64_t timestamp, uint64_t clockNs = 0, Rotation const* historyRotation = nullptr, Depth const* depth = nullptr);
     // True when both retained pictures carry depth, so the next prediction uses it.
     bool depthActive() const;
+    // Depth always drives the positional correction. This also enables the
+    // experimental depth occlusion handling (off by default; see the warp).
+    void setDepthOcclusion(bool);
 
     // Reference mode for measurements: same real/predicted cadence, but each
     // "predicted" picture repeats the newest real picture (no flow, no warp).

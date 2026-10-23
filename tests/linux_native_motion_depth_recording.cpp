@@ -181,12 +181,19 @@ int main(int argc,char** argv) {
             std::getenv("STEREO_LUMA_MAX")?uint32_t(std::stoul(std::getenv("STEREO_LUMA_MAX"))):0u);
     }
     for(unsigned variant=0;variant<(stereo?4u:3u);variant++){
+        // DEPTH_VARIANTS=2,3 runs only those variants (quick A/B iterations;
+        // the no-depth baseline does not change with depth-path edits).
+        if(auto only=std::getenv("DEPTH_VARIANTS");only&&(","+std::string(only)+",").find(","+std::to_string(variant)+",")==std::string::npos)continue;
         std::string name=variant==0?"no_depth":variant==1?"exact_depth":variant==2?"exact_depth_translation":"stereo_depth_translation";
         auto directory=output/name;std::filesystem::create_directories(directory);
         Motion motion(ctx,{size.width(),size.height},vk::Format::eR8G8B8A8Unorm);motion.setGapFill(true);motion.setStableResidual(true);
 #ifdef ALVR_NATIVE_MOTION_TESTING
         // DEPTH_DIAGNOSTIC=1 paints the depth decision (red covered, green filled).
         if(variant&&std::getenv("DEPTH_DIAGNOSTIC"))motion.setDiagnosticFlags(2);
+        // DEPTH_OCCLUSION=1 enables the experimental occlusion handling.
+        motion.setDepthOcclusion(std::getenv("DEPTH_OCCLUSION")!=nullptr);
+        // DEPTH_FLAGS=n sets extra warp flags on depth variants (experiments).
+        if(variant&&std::getenv("DEPTH_FLAGS"))motion.setDiagnosticFlags(uint32_t(std::stoul(std::getenv("DEPTH_FLAGS"))));
 #endif
         size_t latest=0;unsigned targets=0;double prepareMs=0,worst=-1,worstEdge=-1;Totals total;
         for(size_t i=0;i<frames.size();i++){

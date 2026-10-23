@@ -198,6 +198,8 @@ int main(int argc, char** argv) {
                     motion.setStableResidual(mode.stable);
                     if (diagnostic && useDepth)
                         motion.setDiagnosticFlags(2);
+                    // These analytic scenes evaluate the occlusion handling.
+                    motion.setDepthOcclusion(std::getenv("DEPTH_OCCLUSION_OFF") == nullptr);
                     // delta frames between source and destination pictures.
                     auto rotationFor = [&](double frames) {
                         static alvr::motion::NativeMotion::Rotation r;

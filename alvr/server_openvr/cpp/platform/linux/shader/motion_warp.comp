@@ -115,6 +115,10 @@ void fitTemporalTile(uvec2 base,bool right,bool fullTile) {
     barrier();
 }
 bool hasDepth() { return (p.flags&1u)!=0u; }
+// Depth-based occlusion handling (flow affinity, edge candidates), flags bit
+// 3. Off by default: it helped analytic scenes but not real Open Brush
+// recordings, where only the positional correction improved the result.
+bool depthOcclusion() { return hasDepth() && (p.flags&8u)!=0u; }
 vec4 colorAt(bool recent,bool right,vec2 q);
 // Content at q in the newest picture was at q+v in the older one (backward
 // flow v), judged on a small cross of samples.
@@ -225,7 +229,7 @@ vec2 flowAt(bool reverse,bool right,vec2 q) {
     vec2 f01=vec2(vectorAt(reverse,right,ivec2(a.x,b.y)));
     vec2 f11=vec2(vectorAt(reverse,right,b));
     vec2 t=mix(mix(f00,f10,f.x),mix(f01,f11,f.x),f.y);
-    if (hasDepth()) {
+    if (depthOcclusion()) {
         // The flow grid is coarse: a near object's motion would otherwise
         // bleed into the background around it (drag) and vice versa. Weigh
         // each grid vector by how close its depth is to this pixel's depth.
@@ -348,7 +352,7 @@ void main() {
     const float radii[3]=float[3](3.0,8.0,20.0);
     bool depthEdge=false;
     float farthestInverse=0.0;
-    if (hasDepth() && (p.rotationMode&8u)==0u) {
+    if (depthOcclusion() && (p.rotationMode&8u)==0u) {
         // A discontinuity breaks the affine inverse depth: test the second
         // difference across the pixel on four axes at three radii. A plane
         // gives zero whatever its slant.
@@ -449,9 +453,16 @@ void main() {
         // The nearest such content covers the pixel. When none does, the
         // pixel was just uncovered: take the nearest visible background.
         float distance=1.0-p.time;
+        // The ordinary inverse solution stays unless depth shows it wrong:
+        // on real pictures replacing a sound solution only adds resampling
+        // error, and a background fill where nothing was uncovered smears.
+        bool baseline=valid && motionMatches(right,q,flowAt(true,right,q));
+        // Without a solution the pixel shows its rotation-only content.
+        vec2 baselineAt=valid?q:target;
+        float baselineInverse=1.0/depthAt(true,right,baselineAt);
         {
-            float coverDepth=1e9; vec2 cover=vec2(0); bool covered=false;
-            float fillScore=1e9; vec2 fill=target;
+            float coverDepth=1e9; vec2 cover=vec2(0), coverMotion=vec2(0); bool covered=false;
+            float fillScore=1e9; vec2 fill=target; vec2 fillMotion=vec2(0);
             for (int k=0;k<25;k++) {
                 vec2 c=k==0?target:target+radii[(k-1)/8]*directions[(k-1)%8];
                 if (!inside(c)) continue;
@@ -466,19 +477,52 @@ void main() {
                     // at qc+v in the older picture.
                     bool moves=motionMatches(right,qc,v);
                     if (moves && depthAffinity(zq,zc)>0.5 && zq<coverDepth) {
-                        coverDepth=zq; cover=qc; covered=true;
+                        coverDepth=zq; cover=qc; coverMotion=v; covered=true;
                     }
                 }
                 // Background candidates near the pixel fill an uncovered area.
                 float score=length(c-target)+(1.0/zc-farthestInverse<=0.5*InverseDepthEdge?0.0:1e5);
-                if (score<fillScore) { fillScore=score; fill=c; }
+                if (score<fillScore) { fillScore=score; fill=c; fillMotion=v; }
             }
-            q=covered?cover:fill;
-            valid=inside(q);
-            depthResolved=valid;
-            if (depthResolved) color=colorAt(true,right,q);
-            // Diagnostic: red covered, green filled from background.
-            if ((p.flags&2u)!=0u) color=covered?vec4(1,0,0,1):vec4(0,1,0,1);
+            // A cover replaces a sound baseline only when clearly nearer
+            // (a near object arriving over the background).
+            // ...and only an object with its own motion arrives: under a head
+            // rotation everything moves together and the baseline is right.
+            bool nearer=covered && 1.0/coverDepth>baselineInverse+0.5*InverseDepthEdge
+                && length(coverMotion-flowAt(true,right,baselineAt))>1.0;
+            // Uncovered: nothing consistent lands here and the newest picture
+            // shows the near side of the edge here (the object that left).
+            // The background now revealed is hidden in the newest picture but
+            // may be visible in the older one: follow the background motion
+            // there and use it when the older depth confirms background.
+            // Otherwise keep the ordinary result: stretching the nearby
+            // background measured worse than it on real pictures.
+            // Measured on real recordings, both fills (stretching the nearby
+            // background, and the older picture along background motion)
+            // were worse than the ordinary result; kept off (flags bit 2
+            // re-enables the older-picture fill for experiments).
+            bool uncovered=false;
+            if ((p.flags&4u)!=0u && !baseline && !covered
+                && 1.0/depthAt(true,right,target)-farthestInverse>InverseDepthEdge) {
+                vec2 older=target-distance*fillMotion+fillMotion;
+                uncovered=inside(older)
+                    && 1.0/depthAt(false,right,older)-farthestInverse<=0.5*InverseDepthEdge;
+                if (uncovered) {
+                    color=colorAt(false,right,older);
+                    depthResolved=true;
+                }
+            }
+            if (nearer) {
+                q=cover;
+                valid=inside(q);
+                depthResolved=valid;
+                if (depthResolved) color=colorAt(true,right,q);
+            }
+            // Diagnostic: red covered, green filled, blue baseline kept.
+            if ((p.flags&2u)!=0u) {
+                color=nearer?vec4(1,0,0,1):uncovered?vec4(0,1,0,1):vec4(0,0,1,1);
+                depthResolved=true;
+            }
         }
     }
     if ((p.rotationMode&8u)!=0u) {
