@@ -140,9 +140,15 @@ float depthAt(bool recent,bool right,vec2 q) {
     float d=recent?texelFetch(latestDepth,i,0).r:texelFetch(previousDepth,i,0).r;
     return d>0.0 && !isinf(d) && !isnan(d)?d:1e4;
 }
-// 1 on the same surface, falling off with relative depth difference.
+// Depth edges are judged in inverse depth (1/m): on any plane, slanted
+// floors included, inverse depth is affine in the picture, and the parallax
+// a head or object motion causes scales with inverse-depth differences.
+// Far/far boundaries (5 m against 10 m, ground against sky) barely move
+// apart and do not count.
+const float InverseDepthEdge=0.15;
+// 1 on the same surface, falling off with inverse-depth difference.
 float depthAffinity(float a,float b) {
-    float r=log(a/b)/0.08;
+    float r=abs(1.0/a-1.0/b)/InverseDepthEdge;
     return 1.0/(1.0+r*r);
 }
 bool positionalHistory() {
@@ -336,19 +342,39 @@ void main() {
     // Depth edge near this pixel: the occlusion resolution below handles it,
     // so the static shortcuts (which would leave an arriving object behind)
     // do not apply.
+    // Opposite directions in consecutive pairs (second differences).
     const vec2 directions[8]=vec2[8](vec2(1,0),vec2(-1,0),vec2(0,1),vec2(0,-1),
-        vec2(.7071,.7071),vec2(-.7071,.7071),vec2(.7071,-.7071),vec2(-.7071,-.7071));
+        vec2(.7071,.7071),vec2(-.7071,-.7071),vec2(.7071,-.7071),vec2(-.7071,.7071));
     const float radii[3]=float[3](3.0,8.0,20.0);
     bool depthEdge=false;
-    float farthest=0.0;
+    float farthestInverse=0.0;
     if (hasDepth() && (p.rotationMode&8u)==0u) {
-        float nearest=depthAt(true,right,target);
-        farthest=nearest;
-        for (int r=0;r<3;r++) for (int d=0;d<8;d++) {
-            float z=depthAt(true,right,target+radii[r]*directions[d]);
-            nearest=min(nearest,z); farthest=max(farthest,z);
+        // A discontinuity breaks the affine inverse depth: test the second
+        // difference across the pixel on four axes at three radii. A plane
+        // gives zero whatever its slant.
+        float w0=1.0/depthAt(true,right,target);
+        farthestInverse=w0;
+        float nearestInverse=w0;
+        for (int r=0;r<3;r++) for (int d=0;d<8;d+=2) {
+            float wp=1.0/depthAt(true,right,target+radii[r]*directions[d]);
+            float wm=1.0/depthAt(true,right,target+radii[r]*directions[d+1]);
+            farthestInverse=min(farthestInverse,min(wp,wm));
+            nearestInverse=max(nearestInverse,max(wp,wm));
+            depthEdge=depthEdge || abs(wp+wm-2.0*w0)>InverseDepthEdge;
         }
-        depthEdge=farthest>nearest*1.15;
+        // An edge that nothing moves across needs no occlusion handling, and
+        // the exact static path (mode 7 keeps unchanged pixels) is better
+        // there than resampling. Require visible motion nearby: flow, or the
+        // parallax the head translation opens across this edge.
+        if (depthEdge) {
+            vec4 t=right?p.rightTans:p.leftTans;
+            float pixelsPerTangent=float(p.eyeWidth)/abs(t.y-t.x);
+            float parallax=pixelsPerTangent*length(p.targetTranslation.xy)*(nearestInverse-farthestInverse);
+            bool moving=parallax>0.75 || length(flowAt(true,right,target))>0.75;
+            for (int d=0;d<8 && !moving;d++)
+                moving=length(flowAt(true,right,target+radii[2]*directions[d]))>0.75;
+            depthEdge=moving;
+        }
     }
     if(stable && !depthEdge) {
         // Newly exposed pixels have no history. Retain the rotation-only
@@ -444,7 +470,7 @@ void main() {
                     }
                 }
                 // Background candidates near the pixel fill an uncovered area.
-                float score=length(c-target)+(zc>=farthest*0.87?0.0:1e5);
+                float score=length(c-target)+(1.0/zc-farthestInverse<=0.5*InverseDepthEdge?0.0:1e5);
                 if (score<fillScore) { fillScore=score; fill=c; }
             }
             q=covered?cover:fill;

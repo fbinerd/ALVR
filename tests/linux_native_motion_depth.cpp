@@ -92,6 +92,7 @@ inline Frame render(Size size, Scene const& scene, double time) {
             size_t at = (size_t(y) * size.width() + x) * 4;
             if (near) {
                 float local = sx - float(time) * scene.objectSpeed
+                    - (eye ? -.5f : .5f) * disparity(size, NearMetres)
                     - swayShift(size, scene.swaySpeed, time, NearMetres);
                 value = scene.flatObject ? 150.f : fixture::texture(local, sy, 91, 6.f);
                 metres = NearMetres;
@@ -216,6 +217,63 @@ int main(int argc, char** argv) {
                                 stereoDepth->estimate(gpu.image, gpu.view, gpu.layout, depthImage.image,
                                     depthImage.view, vk::ImageLayout::eGeneral, stereoParams);
                                 depthImage.layout = vk::ImageLayout::eGeneral;
+                                if (f == 20 && mode.stable) {
+                                    // Estimated vs exact depth on one frame: validity and error by surface.
+                                    auto estimated = depthImage.transfer(nullptr);
+                                    double n[2] {}, valid[2] {};
+                                    std::vector<double> err[2];
+                                    for (size_t i = 0; i < estimated.size(); i += 4) {
+                                        float e, x;
+                                        std::memcpy(&e, &estimated[i], 4);
+                                        std::memcpy(&x, &frames[f].depth[i], 4);
+                                        if (x <= 0) continue;
+                                        int k = x < 1 ? 0 : 1;
+                                        n[k]++;
+                                        if (e > 0) { valid[k]++; err[k].push_back(std::abs(e - x) / x); }
+                                    }
+                                    // Near/far confusion within 12 px of the object edge, by side.
+                                    {
+                                        long c[2][2][2] {}; // side(left/right of centre), truth near, estimate near
+                                        for (unsigned y = 0; y < size.height; ++y)
+                                            for (unsigned x = 0; x < size.width(); ++x) {
+                                                unsigned eye = x / size.eyeWidth; float ex = float(x % size.eyeWidth);
+                                                bool in = depthfixture::object(size, scene, eye, ex, float(y), double(f));
+                                                bool edge = false;
+                                                for (int dx = -12; dx <= 12 && !edge; dx += 3)
+                                                    edge = depthfixture::object(size, scene, eye, ex + dx, float(y), double(f)) != in;
+                                                if (!edge) continue;
+                                                size_t i = (size_t(y) * size.width() + x) * 4;
+                                                float e; std::memcpy(&e, &estimated[i], 4);
+                                                bool en = e > 0 && e < 1.2f;
+                                                bool leftSide = !depthfixture::object(size, scene, eye, ex - 12, float(y), double(f))
+                                                    && !(in && depthfixture::object(size, scene, eye, ex - 12, float(y), double(f)));
+                                                c[eye][in][en]++;
+                                                (void)leftSide;
+                                            }
+                                        for (unsigned eye = 0; eye < 2; ++eye)
+                                            std::cout << "  eye " << eye << " edge band: truth near->est near " << c[eye][1][1]
+                                                      << " near->far " << c[eye][1][0] << " far->near " << c[eye][0][1]
+                                                      << " far->far " << c[eye][0][0] << '\n';
+                                    }
+                                    auto median = [](std::vector<double> v) {
+                                        if (v.empty()) return 0.0;
+                                        std::nth_element(v.begin(), v.begin() + v.size() / 2, v.end());
+                                        return v[v.size() / 2];
+                                    };
+                                    std::cout << scene.name << " stereo depth frame 20: near valid "
+                                              << 100 * valid[0] / n[0] << "% median rel err " << 100 * median(err[0])
+                                              << "%; far valid " << 100 * valid[1] / n[1] << "% median rel err "
+                                              << 100 * median(err[1]) << "%\n";
+                                    writePpm(output / (std::string(scene.name) + "_stereo_depth.ppm"), [&] {
+                                        Pixels v(estimated.size());
+                                        for (size_t i = 0; i < estimated.size(); i += 4) {
+                                            float e; std::memcpy(&e, &estimated[i], 4);
+                                            uint8_t g = e <= 0 ? 0 : uint8_t(std::clamp(255.f / (1.f + e), 1.f, 255.f));
+                                            v[i] = e <= 0 ? 255 : g; v[i + 1] = g; v[i + 2] = g; v[i + 3] = 255;
+                                        }
+                                        return v;
+                                    }(), size);
+                                }
                             } else
                                 depthImage.transfer(&frames[f].depth);
                             alvr::motion::NativeMotion::Depth depth {
