@@ -169,6 +169,9 @@ fn spawn_viewer(format: &str, fps: f32) -> Option<Child> {
             "-x",
             "1600",
             "-framedrop",
+            // Close the window at end of input: when the mock is killed (its
+            // Drop never runs) the pipe closes and ffplay exits with it.
+            "-autoexit",
             // Small probe for a quick start. No "-fflags nobuffer": it drops
             // the probed data, which holds the stream's only IDR picture, and
             // every later picture then decodes against missing references
