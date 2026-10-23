@@ -35,7 +35,7 @@ namespace {
     struct WarpPush {
         uint32_t eyeWidth, height, lumaWidth, lumaHeight;
         float time;
-        uint32_t rotationMode = 0, eye = 0, padding = 0;
+        uint32_t rotationMode = 0, eye = 0, flags = 0; // flags bit 0: depth
         float previousQuaternion[4] {0,0,0,1}, targetQuaternion[4] {0,0,0,1};
         float leftTans[4] {}, rightTans[4] {};
     };
@@ -47,6 +47,9 @@ struct NativeMotion::State {
     vk::Extent2D extent, lumaExtent;
     vk::Format format;
     std::array<Image, 2> colors;
+    // Optional per-picture depth (R32F, producer extent), allocated on first use.
+    std::array<Image, 2> depths;
+    std::array<bool, 2> depthValid {};
     std::array<std::array<Image, 2>, 2> lumas; // retained frame / eye
     std::array<std::array<Image, 2>, 2> flows; // eye / forward, backward
     std::array<Image, 2> costs, backwardCosts;
@@ -142,6 +145,8 @@ struct NativeMotion::State {
             ctx.dev.free(image.memory);
         };
         for (auto& image : colors)
+            destroy(image);
+        for (auto& image : depths)
             destroy(image);
         for (auto& pair : lumas)
             for (auto& image : pair)
@@ -353,7 +358,7 @@ struct NativeMotion::State {
         makePipeline(
             shader::warp,
             sizeof(shader::warp),
-            7,
+            9,
             warpDescriptors,
             warpLayout,
             warpShader,
@@ -679,6 +684,8 @@ bool NativeMotion::predict(
         std::copy_n(targetRotation->leftTans, 4, push.leftTans);
         std::copy_n(targetRotation->rightTans, 4, push.rightTans);
     }
+    if (s.depthValid[0] && s.depthValid[1])
+        push.flags |= 1u;
     s.dispatch(
         s.warpPipeline,
         s.warpLayout,
@@ -688,6 +695,9 @@ bool NativeMotion::predict(
           s.sampled(s.flows[0][1], true),
           s.sampled(s.flows[1][0], true),
           s.sampled(s.flows[1][1], true),
+          // Without depth the colour images stand in; the shader skips them.
+          s.sampled(s.depths[0].handle ? s.depths[1 - s.latest] : s.colors[1 - s.latest], true),
+          s.sampled(s.depths[0].handle ? s.depths[s.latest] : s.colors[s.latest], true),
           { {}, view, vk::ImageLayout::eGeneral } },
         &push,
         sizeof(push),
@@ -819,6 +829,10 @@ void NativeMotion::setGapFill(bool fill) {
 
 bool NativeMotion::gapFill() const { return state->gapFill; }
 
+bool NativeMotion::depthActive() const {
+    return state->retained == 2 && state->depthValid[0] && state->depthValid[1];
+}
+
 void NativeMotion::prepare() {
     auto& s = *state;
     if (s.repeatReference || s.retained < 2 || !s.flowDirty)
@@ -830,7 +844,8 @@ void NativeMotion::prepare() {
 }
 
 void NativeMotion::capture(
-    vk::Image output, vk::ImageLayout layout, uint64_t timestamp, uint64_t clockNs, Rotation const* historyRotation
+    vk::Image output, vk::ImageLayout layout, uint64_t timestamp, uint64_t clockNs, Rotation const* historyRotation,
+    Depth const* depth
 ) {
     auto& s = *state;
     if (!s.captureThisFrame || !timestamp)
@@ -869,6 +884,36 @@ void NativeMotion::capture(
     s.transition(s.colors[slot], vk::ImageLayout::eShaderReadOnlyOptimal);
     if (!deferred)
         s.barrier(output, copyLayout, layout);
+    s.depthValid[slot] = depth && depth->image && depth->extent.width && depth->extent.height;
+    if (s.depthValid[slot]) {
+        // Kept at the producer's extent: a plain copy works on any queue
+        // (a blit needs a graphics queue). The warp scales coordinates.
+        if (s.depths[0].extent != depth->extent) {
+            // begin() waited for earlier work, so nothing still reads them.
+            for (auto& image : s.depths) {
+                s.ctx.dev.destroy(image.view);
+                s.ctx.dev.destroy(image.handle);
+                s.ctx.dev.free(image.memory);
+                image = {};
+                s.makeImage(image, depth->extent, vk::Format::eR32Sfloat,
+                    vk::ImageUsageFlagBits::eSampled | vk::ImageUsageFlagBits::eTransferDst);
+                // Both are bound on every prediction, written or not.
+                s.transition(image, vk::ImageLayout::eShaderReadOnlyOptimal);
+            }
+            s.depthValid[1 - slot] = false;
+        }
+        s.barrier(depth->image, depth->layout, vk::ImageLayout::eTransferSrcOptimal);
+        s.transition(s.depths[slot], vk::ImageLayout::eTransferDstOptimal);
+        vk::ImageCopy depthCopy {
+            .srcSubresource = { vk::ImageAspectFlagBits::eColor, 0, 0, 1 },
+            .dstSubresource = { vk::ImageAspectFlagBits::eColor, 0, 0, 1 },
+            .extent = { depth->extent.width, depth->extent.height, 1 },
+        };
+        s.command.copyImage(depth->image, vk::ImageLayout::eTransferSrcOptimal, s.depths[slot].handle,
+            vk::ImageLayout::eTransferDstOptimal, depthCopy);
+        s.transition(s.depths[slot], vk::ImageLayout::eShaderReadOnlyOptimal);
+        s.barrier(depth->image, vk::ImageLayout::eTransferSrcOptimal, depth->layout);
+    }
     for (uint32_t eye = 0; eye < 2; ++eye) {
         WarpPush lumaPush {};
         lumaPush.eye = eye;

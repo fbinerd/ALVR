@@ -62,7 +62,18 @@ public:
     // presented. Gap filling times its extrapolation with these clocks rather
     // than with pose timestamps, whose association to a picture can jump by
     // a tracking sample; the pose timestamp stays the picture's stamp.
-    void capture(vk::Image output, vk::ImageLayout, uint64_t timestamp, uint64_t clockNs = 0, Rotation const* historyRotation = nullptr);
+    // depth (optional) belongs to the same picture: canonical R32F view distance
+    // in metres, +0 for invalid or sky, both eyes side by side like the colour.
+    // Any extent (it is sampled at the matching position, nearest). The caller
+    // keeps the image alive and unwritten until waitIdle() returns.
+    struct Depth {
+        vk::Image image {};
+        vk::ImageLayout layout = vk::ImageLayout::eUndefined;
+        vk::Extent2D extent {};
+    };
+    void capture(vk::Image output, vk::ImageLayout, uint64_t timestamp, uint64_t clockNs = 0, Rotation const* historyRotation = nullptr, Depth const* depth = nullptr);
+    // True when both retained pictures carry depth, so the next prediction uses it.
+    bool depthActive() const;
 
     // Reference mode for measurements: same real/predicted cadence, but each
     // "predicted" picture repeats the newest real picture (no flow, no warp).

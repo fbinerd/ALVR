@@ -72,6 +72,8 @@ struct Images {
     vk::Fence fence {};
     vk::ImageLayout layout = vk::ImageLayout::eUndefined;
     void* mapped = nullptr;
+    // Any 4-byte texel format (R32F depth reuses the same staging).
+    vk::Format format = vk::Format::eR8G8B8A8Unorm;
     explicit Images(alvr::VkContext& c, Size dimensions)
         : ctx(c)
         , size(dimensions) { }
@@ -101,7 +103,7 @@ struct Images {
     void initialize() {
         image = ctx.dev.createImage(vk::ImageCreateInfo {
             .imageType = vk::ImageType::e2D,
-            .format = vk::Format::eR8G8B8A8Unorm,
+            .format = format,
             .extent = { size.width(), size.height, 1 },
             .mipLevels = 1,
             .arrayLayers = 1,
@@ -121,7 +123,7 @@ struct Images {
         view = ctx.dev.createImageView(vk::ImageViewCreateInfo {
             .image = image,
             .viewType = vk::ImageViewType::e2D,
-            .format = vk::Format::eR8G8B8A8Unorm,
+            .format = format,
             .subresourceRange = { vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1 },
         });
         staging = ctx.dev.createBuffer(vk::BufferCreateInfo {

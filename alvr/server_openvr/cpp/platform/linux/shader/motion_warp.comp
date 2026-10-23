@@ -9,10 +9,14 @@ layout(binding=2) uniform isampler2D forwardLeft;
 layout(binding=3) uniform isampler2D backwardLeft;
 layout(binding=4) uniform isampler2D forwardRight;
 layout(binding=5) uniform isampler2D backwardRight;
-layout(binding=6) uniform writeonly image2D outputImage;
+// Optional canonical depth (view distance in metres, +0 invalid/sky) of the
+// two retained pictures, at any extent. Sampled only when flags bit 0.
+layout(binding=6) uniform sampler2D previousDepth;
+layout(binding=7) uniform sampler2D latestDepth;
+layout(binding=8) uniform writeonly image2D outputImage;
 layout(push_constant) uniform Params {
     uint eyeWidth,height,lumaWidth,lumaHeight;
-    float time; uint rotationMode,eye,padding;
+    float time; uint rotationMode,eye,flags;
     vec4 previousQuaternion,targetQuaternion,leftTans,rightTans;
 } p;
 vec2 rotatePixel(vec2 at,bool right,vec4 quat) {
@@ -107,6 +111,25 @@ void fitTemporalTile(uvec2 base,bool right,bool fullTile) {
     }
     barrier();
 }
+bool hasDepth() { return (p.flags&1u)!=0u; }
+// Depth of a picture position, in that picture's own geometry (the older
+// picture is sampled through the history rotation, like colorAt). Invalid
+// or sky depth counts as very far.
+float depthAt(bool recent,bool right,vec2 q) {
+    if (!recent && p.rotationMode!=0) q=rotatePixel(q,right,p.previousQuaternion);
+    // Depth may have its own extent; both eyes side by side like the colour.
+    q=clamp(q,vec2(0),vec2(p.eyeWidth-1,p.height-1));
+    q.x+=right?float(p.eyeWidth):0.0;
+    vec2 size=vec2(textureSize(latestDepth,0));
+    ivec2 i=clamp(ivec2((q+0.5)*size/vec2(2*p.eyeWidth,p.height)),ivec2(0),ivec2(size)-1);
+    float d=recent?texelFetch(latestDepth,i,0).r:texelFetch(previousDepth,i,0).r;
+    return d>0.0 && !isinf(d) && !isnan(d)?d:1e4;
+}
+// 1 on the same surface, falling off with relative depth difference.
+float depthAffinity(float a,float b) {
+    float r=log(a/b)/0.08;
+    return 1.0/(1.0+r*r);
+}
 ivec2 vectorAt(bool reverse,bool right,ivec2 q) {
     if (right) return reverse?texelFetch(backwardRight,q,0).xy:texelFetch(forwardRight,q,0).xy;
     return reverse?texelFetch(backwardLeft,q,0).xy:texelFetch(forwardLeft,q,0).xy;
@@ -127,6 +150,27 @@ vec2 flowAt(bool reverse,bool right,vec2 q) {
     vec2 f01=vec2(vectorAt(reverse,right,ivec2(a.x,b.y)));
     vec2 f11=vec2(vectorAt(reverse,right,b));
     vec2 t=mix(mix(f00,f10,f.x),mix(f01,f11,f.x),f.y);
+    if (hasDepth()) {
+        // The flow grid is coarse: a near object's motion would otherwise
+        // bleed into the background around it (drag) and vice versa. Weigh
+        // each grid vector by how close its depth is to this pixel's depth.
+        // The backward field lives on the newest picture, the forward one
+        // on the older picture.
+        vec2 c0=(vec2(a)+0.5)*4.0/scale-0.5;
+        vec2 c1=(vec2(b)+0.5)*4.0/scale-0.5;
+        float dq=depthAt(reverse,right,q);
+        vec4 w=vec4((1-f.x)*(1-f.y),f.x*(1-f.y),(1-f.x)*f.y,f.x*f.y)*vec4(
+            depthAffinity(depthAt(reverse,right,c0),dq),
+            depthAffinity(depthAt(reverse,right,vec2(c1.x,c0.y)),dq),
+            depthAffinity(depthAt(reverse,right,vec2(c0.x,c1.y)),dq),
+            depthAffinity(depthAt(reverse,right,c1),dq))+1e-6;
+        t=(w.x*f00+w.y*f10+w.z*f01+w.w*f11)/dot(w,vec4(1));
+        if ((p.rotationMode&4u)!=0u) {
+            vec2 pixels=t/32.0/scale;
+            return pixels*smoothstep(0.5,1.5,length(pixels));
+        }
+        return t/32.0/scale;
+    }
     if ((p.rotationMode&4u)!=0u) {
         // Continuous rational colour weights avoid an exponential/loop inside
         // every inverse-flow iteration and reuse the four vector samples.
@@ -219,7 +263,24 @@ void main() {
     if(p.rotationMode!=0) target=rotatePixel(target,right,p.targetQuaternion);
     vec4 color=p.rotationMode!=0?colorAt(true,right,target):texelFetch(latestImage,ivec2(xy),0);
     vec4 rotationOnly=color;
-    if(stable) {
+    // Depth edge near this pixel: the occlusion resolution below handles it,
+    // so the static shortcuts (which would leave an arriving object behind)
+    // do not apply.
+    const vec2 directions[8]=vec2[8](vec2(1,0),vec2(-1,0),vec2(0,1),vec2(0,-1),
+        vec2(.7071,.7071),vec2(-.7071,.7071),vec2(.7071,-.7071),vec2(-.7071,-.7071));
+    const float radii[3]=float[3](3.0,8.0,20.0);
+    bool depthEdge=false;
+    float farthest=0.0;
+    if (hasDepth() && (p.rotationMode&8u)==0u) {
+        float nearest=depthAt(true,right,target);
+        farthest=nearest;
+        for (int r=0;r<3;r++) for (int d=0;d<8;d++) {
+            float z=depthAt(true,right,target+radii[r]*directions[d]);
+            nearest=min(nearest,z); farthest=max(farthest,z);
+        }
+        depthEdge=farthest>nearest*1.15;
+    }
+    if(stable && !depthEdge) {
         // Newly exposed pixels have no history. Retain the rotation-only
         // newest picture, rather than extending a residual edge vector.
         vec2 older=rotatePixel(target,right,p.previousQuaternion);
@@ -234,12 +295,12 @@ void main() {
     vec4 previous=texelFetch(previousImage,ivec2(xy),0);
     vec3 delta=color.rgb-previous.rgb;
     float horizon=p.time-1.0;
-    if (colorOnlyTile!=0 && all(lessThanEqual(abs(delta-temporalChange[0]),
+    if (!depthEdge && colorOnlyTile!=0 && all(lessThanEqual(abs(delta-temporalChange[0]),
                                             vec3(1.25/255.0)))) {
         imageStore(outputImage,ivec2(xy),color);
         return;
     }
-    if (temporalTile!=0 && horizon>0
+    if (!depthEdge && temporalTile!=0 && horizon>0
         && max(max(abs(delta.r),abs(delta.g)),abs(delta.b))<=16.0/255.0) {
         color.rgb=clamp(color.rgb+horizon*delta,vec3(0),vec3(1));
         imageStore(outputImage,ivec2(xy),color);
@@ -281,6 +342,43 @@ void main() {
             && all(equal(colorAt(false,right,q),source));
         if (!unchanged) color=source;
     }
+    bool depthResolved=false;
+    if (depthEdge) {
+        // Near a depth edge the single inverse solution above can land on
+        // the wrong surface: the background dragged with a near hand, or
+        // the hand left behind where it uncovered the background (a shadow).
+        // Gather motion candidates around the pixel; each one says where its
+        // content would come from. A candidate counts when the content found
+        // there really moves that way and is on the candidate's surface.
+        // The nearest such content covers the pixel. When none does, the
+        // pixel was just uncovered: take the nearest visible background.
+        float distance=1.0-p.time;
+        {
+            float coverDepth=1e9; vec2 cover=vec2(0); bool covered=false;
+            float fillScore=1e9; vec2 fill=target;
+            for (int k=0;k<25;k++) {
+                vec2 c=k==0?target:target+radii[(k-1)/8]*directions[(k-1)%8];
+                if (!inside(c)) continue;
+                vec2 v=flowAt(true,right,c);
+                float zc=depthAt(true,right,c);
+                vec2 qc=target-distance*v;
+                if (inside(qc)) {
+                    float zq=depthAt(true,right,qc);
+                    bool moves=length(flowAt(true,right,qc)-v)<=1.0+0.15*length(v);
+                    if (moves && depthAffinity(zq,zc)>0.5 && zq<coverDepth) {
+                        coverDepth=zq; cover=qc; covered=true;
+                    }
+                }
+                // Background candidates near the pixel fill an uncovered area.
+                float score=length(c-target)+(zc>=farthest*0.87?0.0:1e5);
+                if (score<fillScore) { fillScore=score; fill=c; }
+            }
+            q=covered?cover:fill;
+            valid=inside(q);
+            depthResolved=valid;
+            if (depthResolved) color=colorAt(true,right,q);
+        }
+    }
     if ((p.rotationMode&8u)!=0u) {
         // Interpolation (time in (0, 1)): also follow the forward flow back
         // into the older picture. Each side keeps its own consistency and
@@ -311,7 +409,7 @@ void main() {
         if (!inside(target) || !inside(other)) confidence=0;
         color=mix(colorAt(true,right,target),color,confidence);
     }
-    if(stable) {
+    if(stable && !depthResolved) {
         vec3 change=abs(rotationOnly.rgb-colorAt(false,right,target).rgb);
         float activity=smoothstep(1.0/255.0,4.0/255.0,max(max(change.r,change.g),change.b));
         vec2 older=rotatePixel(target,right,p.previousQuaternion);
