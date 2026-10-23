@@ -1,0 +1,48 @@
+#version 450
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(binding = 0) uniform sampler2D colorImage;
+layout(binding = 1, r8) uniform writeonly image2D leftLuma;
+layout(binding = 2, r8) uniform writeonly image2D rightLuma;
+
+layout(push_constant) uniform LumaParams {
+    uint eyeWidth;
+    uint height;
+    uint lumaWidth;
+    uint lumaHeight;
+} p;
+
+float rgbToLuma(vec3 rgb) {
+    return dot(rgb, vec3(0.2126, 0.7152, 0.0722));
+}
+
+vec3 sampleEye(float eyeOffset, vec2 uv) {
+    // uv is in [0, 1] within the single eye
+    vec2 fullUv = vec2((uv.x + eyeOffset) * 0.5, uv.y);
+    vec2 eyeSize = vec2(p.eyeWidth, p.height);
+    vec2 lumaSize = vec2(p.lumaWidth, p.lumaHeight);
+
+    // Multi-tap box filter if downscaling significantly
+    if (any(greaterThan(eyeSize / lumaSize, vec2(1.5)))) {
+        vec2 d = vec2(0.25) / eyeSize;
+        vec3 c0 = texture(colorImage, fullUv + vec2(-d.x, -d.y)).rgb;
+        vec3 c1 = texture(colorImage, fullUv + vec2( d.x, -d.y)).rgb;
+        vec3 c2 = texture(colorImage, fullUv + vec2(-d.x,  d.y)).rgb;
+        vec3 c3 = texture(colorImage, fullUv + vec2( d.x,  d.y)).rgb;
+        return (c0 + c1 + c2 + c3) * 0.25;
+    }
+    return texture(colorImage, fullUv).rgb;
+}
+
+void main() {
+    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+    if (coord.x >= int(p.lumaWidth) || coord.y >= int(p.lumaHeight)) return;
+
+    vec2 uv = (vec2(coord) + 0.5) / vec2(p.lumaWidth, p.lumaHeight);
+
+    float lumaL = rgbToLuma(sampleEye(0.0, uv));
+    float lumaR = rgbToLuma(sampleEye(1.0, uv));
+
+    imageStore(leftLuma, coord, vec4(lumaL));
+    imageStore(rightLuma, coord, vec4(lumaR));
+}

@@ -1,0 +1,57 @@
+#version 450
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(binding = 0, r32f) uniform readonly image2D rawDepth;
+layout(binding = 1, r32f) uniform writeonly image2D outputDepth;
+
+layout(push_constant) uniform FillParams {
+    uint eyeWidth;
+    uint height;
+    uint radius;
+    uint minValidNeighbors;
+} p;
+
+void main() {
+    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+    if (coord.x >= int(2 * p.eyeWidth) || coord.y >= int(p.height)) return;
+
+    float d = imageLoad(rawDepth, coord).r;
+    if (d > 0.0) {
+        imageStore(outputDepth, coord, vec4(d));
+        return;
+    }
+
+    // It is an invalid pixel / hole. Fill small holes from farther neighbour.
+    bool isRight = (coord.x >= int(p.eyeWidth));
+    int minX = isRight ? int(p.eyeWidth) : 0;
+    int maxX = isRight ? int(2 * p.eyeWidth - 1) : int(p.eyeWidth - 1);
+
+    float maxFar = 0.0;
+    uint validCount = 0;
+    int r = int(p.radius);
+
+    for (int dy = -2; dy <= 2; ++dy) {
+        int ny = coord.y + dy;
+        if (ny < 0 || ny >= int(p.height)) continue;
+
+        for (int dx = -r; dx <= r; ++dx) {
+            if (dx == 0 && dy == 0) continue;
+            int nx = coord.x + dx;
+            if (nx < minX || nx > maxX) continue;
+
+            float val = imageLoad(rawDepth, ivec2(nx, ny)).r;
+            if (val > 0.0) {
+                validCount++;
+                if (val > maxFar) {
+                    maxFar = val;
+                }
+            }
+        }
+    }
+
+    if (validCount >= p.minValidNeighbors && maxFar > 0.0) {
+        imageStore(outputDepth, coord, vec4(maxFar));
+    } else {
+        imageStore(outputDepth, coord, vec4(0.0));
+    }
+}
