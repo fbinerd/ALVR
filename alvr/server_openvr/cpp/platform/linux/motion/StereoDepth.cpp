@@ -382,7 +382,8 @@ struct StereoDepth::State {
             sizeof(shader::stereo_depth),
             { vk::DescriptorType::eCombinedImageSampler,
               vk::DescriptorType::eCombinedImageSampler,
-              vk::DescriptorType::eStorageImage },
+              vk::DescriptorType::eStorageImage,
+              vk::DescriptorType::eCombinedImageSampler },
             sizeof(DepthPush),
             depthDescriptors,
             depthLayout,
@@ -395,7 +396,8 @@ struct StereoDepth::State {
             shader::stereo_fill,
             sizeof(shader::stereo_fill),
             { vk::DescriptorType::eStorageImage,
-              vk::DescriptorType::eStorageImage },
+              vk::DescriptorType::eStorageImage,
+              vk::DescriptorType::eCombinedImageSampler },
             sizeof(FillPush),
             fillDescriptors,
             fillLayout,
@@ -648,11 +650,13 @@ bool StereoDepth::estimate(
         { s.nearestSampler, s.leftToRightFlow.view, vk::ImageLayout::eShaderReadOnlyOptimal },
         { s.nearestSampler, s.rightToLeftFlow.view, vk::ImageLayout::eShaderReadOnlyOptimal },
         { {}, s.rawDepth.view, vk::ImageLayout::eGeneral },
+        { s.linearSampler, inputColorView, vk::ImageLayout::eShaderReadOnlyOptimal },
     };
     std::vector<vk::DescriptorType> depthTypes = {
         vk::DescriptorType::eCombinedImageSampler,
         vk::DescriptorType::eCombinedImageSampler,
         vk::DescriptorType::eStorageImage,
+        vk::DescriptorType::eCombinedImageSampler,
     };
     s.dispatch(s.depthPipeline, s.depthLayout, depthImages, depthTypes, &depthPush, sizeof(depthPush), s.fullExtent);
 
@@ -684,10 +688,12 @@ bool StereoDepth::estimate(
     std::vector<vk::DescriptorImageInfo> fillImages = {
         { {}, s.rawDepth.view, vk::ImageLayout::eGeneral },
         { {}, targetDepthView, vk::ImageLayout::eGeneral },
+        { s.linearSampler, inputColorView, vk::ImageLayout::eShaderReadOnlyOptimal },
     };
     std::vector<vk::DescriptorType> fillTypes = {
         vk::DescriptorType::eStorageImage,
         vk::DescriptorType::eStorageImage,
+        vk::DescriptorType::eCombinedImageSampler,
     };
     s.dispatch(s.fillPipeline, s.fillLayout, fillImages, fillTypes, &fillPush, sizeof(fillPush), s.fullExtent);
 

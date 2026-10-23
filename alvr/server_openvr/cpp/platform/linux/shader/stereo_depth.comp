@@ -4,6 +4,9 @@ layout(local_size_x = 8, local_size_y = 8) in;
 layout(binding = 0) uniform isampler2D leftToRightFlow;
 layout(binding = 1) uniform isampler2D rightToLeftFlow;
 layout(binding = 2, r32f) uniform writeonly image2D rawDepth;
+// The stereo picture itself, side by side: guides the coarse disparity grid
+// so depth edges follow colour edges instead of 8-pixel flow blocks.
+layout(binding = 3) uniform sampler2D colorImage;
 
 layout(push_constant) uniform DepthParams {
     uint eyeWidth;
@@ -17,6 +20,12 @@ layout(push_constant) uniform DepthParams {
     vec4 leftTans;  // tan_left, tan_right, tan_up, tan_down
     vec4 rightTans; // tan_left, tan_right, tan_up, tan_down
 } p;
+
+vec3 guideAt(bool isRightEye, vec2 q) {
+    q = clamp(q, vec2(0.0), vec2(p.eyeWidth - 1, p.height - 1));
+    q.x += isRightEye ? float(p.eyeWidth) : 0.0;
+    return texture(colorImage, (q + 0.5) / vec2(2 * p.eyeWidth, p.height)).rgb;
+}
 
 vec2 sampleFlowGrid(bool isRightEye, vec2 pixelCoord) {
     vec2 scale = vec2(p.lumaWidth, p.lumaHeight) / vec2(p.eyeWidth, p.height);
@@ -44,7 +53,26 @@ vec2 sampleFlowGrid(bool isRightEye, vec2 pixelCoord) {
     vec2 f01 = vec2(f01_raw);
     vec2 f11 = vec2(f11_raw);
 
-    vec2 t = mix(mix(f00, f10, f.x), mix(f01, f11, f.x), f.y);
+    // Colour-guided 4x4 cells: next to an object edge the nearest cells can
+    // all carry the other surface's disparity, so also look one cell further
+    // and weigh each cell by distance and by how much its centre looks like
+    // this pixel.
+    vec3 guide = guideAt(isRightEye, pixelCoord);
+    vec2 sum = vec2(0.0);
+    float total = 0.0;
+    for (int j = -1; j <= 2; ++j)
+        for (int i = -1; i <= 2; ++i) {
+            ivec2 cell = clamp(a + ivec2(i, j), ivec2(0), ivec2(grid) - 1);
+            vec2 centre = (vec2(cell) + 0.5) * 4.0 / scale - 0.5;
+            vec2 offset = vec2(i, j) - f;
+            float spatial = exp(-dot(offset, offset) * 0.7);
+            vec3 d = guideAt(isRightEye, centre) - guide;
+            float w = spatial / (1.0 + 200.0 * dot(d, d));
+            ivec2 raw = isRightEye ? texelFetch(rightToLeftFlow, cell, 0).xy : texelFetch(leftToRightFlow, cell, 0).xy;
+            sum += w * vec2(raw);
+            total += w;
+        }
+    vec2 t = sum / max(total, 1e-6);
     return t / 32.0 / scale;
 }
 

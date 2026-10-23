@@ -3,6 +3,10 @@ layout(local_size_x = 8, local_size_y = 8) in;
 
 layout(binding = 0, r32f) uniform readonly image2D rawDepth;
 layout(binding = 1, r32f) uniform writeonly image2D outputDepth;
+// Stereo picture: a hole takes the depth of the neighbour that looks most
+// like it, so an object's rim keeps the object's depth (a farthest-neighbour
+// rule ate several pixels into every near object).
+layout(binding = 2) uniform sampler2D colorImage;
 
 layout(push_constant) uniform FillParams {
     uint eyeWidth;
@@ -26,7 +30,9 @@ void main() {
     int minX = isRight ? int(p.eyeWidth) : 0;
     int maxX = isRight ? int(2 * p.eyeWidth - 1) : int(p.eyeWidth - 1);
 
-    float maxFar = 0.0;
+    vec2 pictureSize = vec2(2 * p.eyeWidth, p.height);
+    vec3 own = texture(colorImage, (vec2(coord) + 0.5) / pictureSize).rgb;
+    float maxFar = 0.0, best = 1e9;
     uint validCount = 0;
     int r = int(p.radius);
 
@@ -42,7 +48,12 @@ void main() {
             float val = imageLoad(rawDepth, ivec2(nx, ny)).r;
             if (val > 0.0) {
                 validCount++;
-                if (val > maxFar) {
+                vec3 d = texture(colorImage, (vec2(nx, ny) + 0.5) / pictureSize).rgb - own;
+                // Colour distance first; a small distance term breaks ties
+                // toward the nearer neighbour position.
+                float cost = dot(d, d) + 1e-4 * float(dx * dx + dy * dy);
+                if (cost < best) {
+                    best = cost;
                     maxFar = val;
                 }
             }
