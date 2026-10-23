@@ -2,7 +2,7 @@ mod video;
 
 use alvr_client_core::{ClientCapabilities, ClientCoreContext, ClientCoreEvent};
 use alvr_common::{
-    DeviceMotion, HEAD_ID, Pose, RelaxedAtomic, ViewParams,
+    DeviceMotion, Fov, HEAD_ID, Pose, RelaxedAtomic, ViewParams,
     glam::{Quat, UVec2, Vec3},
     parking_lot::{Mutex, RwLock},
 };
@@ -142,6 +142,115 @@ impl eframe::App for Window {
     }
 }
 
+fn mock_view_params() -> [ViewParams; 2] {
+    if std::env::var("MOCK_DUMMY_VIEWS").as_deref() == Ok("1") {
+        alvr_common::info!("Using dummy view params (MOCK_DUMMY_VIEWS=1)");
+        return [ViewParams::DUMMY; 2];
+    }
+
+    let ipd = std::env::var("MOCK_IPD")
+        .ok()
+        .and_then(|s| s.trim().parse::<f32>().ok())
+        .unwrap_or(0.063);
+
+    let left_pose = Pose {
+        orientation: Quat::IDENTITY,
+        position: Vec3::new(-ipd / 2.0, 0.0, 0.0),
+    };
+    let right_pose = Pose {
+        orientation: Quat::IDENTITY,
+        position: Vec3::new(ipd / 2.0, 0.0, 0.0),
+    };
+
+    // Quest-2-like asymmetric FOV default:
+    // Outer: ~52 deg, Inner: ~42 deg, Up: ~47 deg, Down: ~45 deg
+    let mut left_fov = Fov {
+        left: -(52.0_f32).to_radians(),
+        right: (42.0_f32).to_radians(),
+        up: (47.0_f32).to_radians(),
+        down: -(45.0_f32).to_radians(),
+    };
+    let mut right_fov = Fov {
+        left: -(42.0_f32).to_radians(),
+        right: (52.0_f32).to_radians(),
+        up: (47.0_f32).to_radians(),
+        down: -(45.0_f32).to_radians(),
+    };
+
+    if let Ok(fov_str) = std::env::var("MOCK_FOV") {
+        let parts = fov_str
+            .split(',')
+            .map(|s| s.trim().parse::<f32>())
+            .collect::<Result<Vec<f32>, _>>();
+        if let Ok(vals) = parts {
+            let to_rad = |v: f32| if v.abs() > std::f32::consts::PI { v.to_radians() } else { v };
+            if vals.len() == 1 {
+                let v = to_rad(vals[0]).abs();
+                left_fov = Fov {
+                    left: -v,
+                    right: v,
+                    up: v,
+                    down: -v,
+                };
+                right_fov = Fov {
+                    left: -v,
+                    right: v,
+                    up: v,
+                    down: -v,
+                };
+            } else if vals.len() == 4 {
+                let outer = to_rad(vals[0]).abs();
+                let inner = to_rad(vals[1]).abs();
+                let up = to_rad(vals[2]).abs();
+                let down = -to_rad(vals[3]).abs();
+                left_fov = Fov {
+                    left: -outer,
+                    right: inner,
+                    up,
+                    down,
+                };
+                right_fov = Fov {
+                    left: -inner,
+                    right: outer,
+                    up,
+                    down,
+                };
+            } else if vals.len() == 8 {
+                left_fov = Fov {
+                    left: to_rad(vals[0]),
+                    right: to_rad(vals[1]),
+                    up: to_rad(vals[2]),
+                    down: to_rad(vals[3]),
+                };
+                right_fov = Fov {
+                    left: to_rad(vals[4]),
+                    right: to_rad(vals[5]),
+                    up: to_rad(vals[6]),
+                    down: to_rad(vals[7]),
+                };
+            }
+        }
+    }
+
+    alvr_common::info!(
+        "Mock client view params: IPD = {} m, Left FOV = {:?}, Right FOV = {:?}",
+        ipd,
+        left_fov,
+        right_fov
+    );
+
+    [
+        ViewParams {
+            pose: left_pose,
+            fov: left_fov,
+        },
+        ViewParams {
+            pose: right_pose,
+            fov: right_fov,
+        },
+    ]
+}
+
 fn tracking_thread(
     context: Arc<ClientCoreContext>,
     streaming: Arc<RelaxedAtomic>,
@@ -149,7 +258,7 @@ fn tracking_thread(
     input: Arc<RwLock<WindowInput>>,
 ) {
     let timestamp_origin = Instant::now();
-    context.send_view_params([ViewParams::DUMMY; 2]);
+    context.send_view_params(mock_view_params());
     let sweep = video::Sweep::from_env();
     let sway = video::Sway::from_env();
     let mut pose_log = video::PoseLog::open();
