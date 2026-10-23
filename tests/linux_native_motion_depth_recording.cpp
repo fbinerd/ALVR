@@ -178,7 +178,8 @@ int main(int argc,char** argv) {
             t={float(std::tan(p.eyes[eye].fov[0])),float(std::tan(p.eyes[eye].fov[1])),float(std::tan(p.eyes[eye].fov[2])),float(std::tan(p.eyes[eye].fov[3]))};
         }
         estimator=std::make_unique<alvr::motion::StereoDepth>(ctx,vk::Extent2D{size.width(),size.height},vk::Format::eR8G8B8A8Unorm,
-            std::getenv("STEREO_LUMA_MAX")?uint32_t(std::stoul(std::getenv("STEREO_LUMA_MAX"))):0u);
+            std::getenv("STEREO_LUMA_MAX")?uint32_t(std::stoul(std::getenv("STEREO_LUMA_MAX"))):0u,
+            std::getenv("STEREO_REDUCED")!=nullptr);
     }
     for(unsigned variant=0;variant<(stereo?4u:3u);variant++){
         // DEPTH_VARIANTS=2,3 runs only those variants (quick A/B iterations;
@@ -200,11 +201,12 @@ int main(int argc,char** argv) {
             auto const& f=frames[i];uint64_t clock=f.packet.display_time_ns;
             if(i%2==0){
                 motion.waitIdle();gpu.transfer(&f.colour);
-                if(variant==3){estimator->estimate(gpu.image,gpu.view,gpu.layout,depth.image,depth.view,vk::ImageLayout::eGeneral,stereoParams);depth.layout=vk::ImageLayout::eGeneral;}
+                if(variant==3){estimator->estimate(gpu.image,gpu.view,gpu.layout,{},{},vk::ImageLayout::eGeneral,stereoParams);}
                 else if(variant)depth.transfer(&f.depth);
                 auto transform=between(frames[latest].packet,f.packet,variant>=2);
                 Motion::Depth input{depth.image,depth.layout,{ds.width(),ds.height}};
-                motion.capture(gpu.image,gpu.layout,clock,clock,&transform,variant?&input:nullptr);
+                Motion::Depth stereoInput{variant==3?estimator->internalDepthImage():vk::Image{},vk::ImageLayout::eGeneral,variant==3?estimator->depthExtent():vk::Extent2D{}};
+                motion.capture(gpu.image,gpu.layout,clock,clock,&transform,variant==3?&stereoInput:variant?&input:nullptr);
                 auto start=std::chrono::steady_clock::now();motion.prepare();prepareMs=elapsed(start);latest=i;
             }else if(i>=7){
                 auto transform=between(frames[latest].packet,f.packet,variant>=2);

@@ -144,7 +144,7 @@ private:
                 // A 640 luma cap keeps near objects within the flow's reach
                 // and costs about 3.5 ms at 1832x1920 per eye (offline).
                 stereoDepth = std::make_unique<motion::StereoDepth>(
-                    vkCtx, outExtent, static_cast<vk::Format>(output.imageCI.format), 640
+                    vkCtx, outExtent, static_cast<vk::Format>(output.imageCI.format), 640, true
                 );
             motion::StereoDepthTiming timing;
             stereoDepth->estimate(output.image.image, output.image.view, output.image.layout,
@@ -157,7 +157,7 @@ private:
                 stereoMsSum = stereoMsMax = 0;
             }
             return motion::NativeMotion::Depth { stereoDepth->internalDepthImage(),
-                vk::ImageLayout::eGeneral, outExtent };
+                vk::ImageLayout::eGeneral, stereoDepth->depthExtent() };
         } catch (std::exception const& e) {
             Warn("Stereo depth unavailable: %s; positional correction off", e.what());
             stereoFailed = true;

@@ -46,7 +46,11 @@ public:
         VkContext& ctx,
         vk::Extent2D fullExtent, // Side-by-side dimensions (width = 2 * eyeWidth, height)
         vk::Format colorFormat = vk::Format::eR8G8B8A8Unorm,
-        uint32_t maxLumaDimension = DefaultLumaDimension
+        uint32_t maxLumaDimension = DefaultLumaDimension,
+        // Output depth at the luma grid instead of the colour extent: much
+        // cheaper, enough for the positional correction. An outputDepth
+        // image passed to estimate() must then have depthExtent().
+        bool reducedDepth = false
     );
     ~StereoDepth();
     StereoDepth(const StereoDepth&) = delete;
@@ -71,6 +75,7 @@ public:
     vk::Extent2D fullExtent() const;
     vk::Extent2D eyeExtent() const;
     vk::Extent2D lumaExtent() const;
+    vk::Extent2D depthExtent() const;
 
     vk::Image internalDepthImage() const;
     vk::ImageView internalDepthView() const;

@@ -57,6 +57,9 @@ struct StereoDepth::State {
     VkContext& ctx;
     vk::Extent2D fullExtent {};
     vk::Extent2D eyeExtent {};
+    // Output depth extent (both eyes): the colour extent, or the luma grid
+    // when reduced (the positional correction does not need full detail).
+    vk::Extent2D depthExtent {};
     vk::Extent2D lumaExtent {};
     vk::Extent2D flowExtent {};
     vk::Format colorFormat {};
@@ -99,7 +102,8 @@ struct StereoDepth::State {
         VkContext& c,
         vk::Extent2D extent,
         vk::Format format,
-        uint32_t maxLumaDimension
+        uint32_t maxLumaDimension,
+        bool reducedDepth
     )
         : ctx(c)
         , fullExtent(extent)
@@ -123,6 +127,7 @@ struct StereoDepth::State {
         }
 
         flowExtent = vk::Extent2D { lumaExtent.width / 4, lumaExtent.height / 4 };
+        depthExtent = reducedDepth ? vk::Extent2D { 2 * lumaExtent.width, lumaExtent.height } : fullExtent;
         initialize();
     }
 
@@ -283,8 +288,8 @@ struct StereoDepth::State {
         makeImage(rightCost, flowExtent, vk::Format::eR16G16Sint, sampled | transferDst);
 
         // Allocate raw & internal depth
-        makeImage(rawDepth, fullExtent, vk::Format::eR32Sfloat, storage | sampled | transferSrc);
-        makeImage(internalDepth, fullExtent, vk::Format::eR32Sfloat, storage | sampled | transferSrc | transferDst);
+        makeImage(rawDepth, depthExtent, vk::Format::eR32Sfloat, storage | sampled | transferSrc);
+        makeImage(internalDepth, depthExtent, vk::Format::eR32Sfloat, storage | sampled | transferSrc | transferDst);
 
         // Command pool, buffer, fence
         pool = ctx.dev.createCommandPool(vk::CommandPoolCreateInfo {
@@ -474,14 +479,16 @@ StereoDepth::StereoDepth(
     VkContext& ctx,
     vk::Extent2D fullExtent,
     vk::Format colorFormat,
-    uint32_t maxLumaDimension
+    uint32_t maxLumaDimension,
+    bool reducedDepth
 )
-    : state(std::make_unique<State>(ctx, fullExtent, colorFormat, maxLumaDimension)) {}
+    : state(std::make_unique<State>(ctx, fullExtent, colorFormat, maxLumaDimension, reducedDepth)) {}
 
 StereoDepth::~StereoDepth() = default;
 
 vk::Extent2D StereoDepth::fullExtent() const { return state->fullExtent; }
 vk::Extent2D StereoDepth::eyeExtent() const { return state->eyeExtent; }
+vk::Extent2D StereoDepth::depthExtent() const { return state->depthExtent; }
 vk::Extent2D StereoDepth::lumaExtent() const { return state->lumaExtent; }
 
 vk::Image StereoDepth::internalDepthImage() const { return state->internalDepth.handle; }
@@ -634,8 +641,8 @@ bool StereoDepth::estimate(
     s.rawDepth.layout = vk::ImageLayout::eGeneral;
 
     DepthPush depthPush {
-        .eyeWidth = s.eyeExtent.width,
-        .height = s.eyeExtent.height,
+        .eyeWidth = s.depthExtent.width / 2,
+        .height = s.depthExtent.height,
         .lumaWidth = s.lumaExtent.width,
         .lumaHeight = s.lumaExtent.height,
         .ipd = params.ipd,
@@ -658,7 +665,7 @@ bool StereoDepth::estimate(
         vk::DescriptorType::eStorageImage,
         vk::DescriptorType::eCombinedImageSampler,
     };
-    s.dispatch(s.depthPipeline, s.depthLayout, depthImages, depthTypes, &depthPush, sizeof(depthPush), s.fullExtent);
+    s.dispatch(s.depthPipeline, s.depthLayout, depthImages, depthTypes, &depthPush, sizeof(depthPush), s.depthExtent);
 
     // Barrier: rawDepth write -> read
     s.barrier(
@@ -679,8 +686,8 @@ bool StereoDepth::estimate(
     );
 
     FillPush fillPush {
-        .eyeWidth = s.eyeExtent.width,
-        .height = s.eyeExtent.height,
+        .eyeWidth = s.depthExtent.width / 2,
+        .height = s.depthExtent.height,
         .radius = params.fillRadius,
         .minValidNeighbors = params.fillMinNeighbors,
     };
@@ -695,7 +702,7 @@ bool StereoDepth::estimate(
         vk::DescriptorType::eStorageImage,
         vk::DescriptorType::eCombinedImageSampler,
     };
-    s.dispatch(s.fillPipeline, s.fillLayout, fillImages, fillTypes, &fillPush, sizeof(fillPush), s.fullExtent);
+    s.dispatch(s.fillPipeline, s.fillLayout, fillImages, fillTypes, &fillPush, sizeof(fillPush), s.depthExtent);
 
     // Transition output to target layout
     if (targetDepthLayout != vk::ImageLayout::eGeneral) {
