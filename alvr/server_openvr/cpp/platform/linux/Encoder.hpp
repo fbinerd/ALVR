@@ -11,6 +11,7 @@
 #include "EncodePipeline.h"
 #include "Renderer.hpp"
 #include "motion/NativeMotion.hpp"
+#include <optional>
 #include "motion/NativeMotionSwitch.hpp"
 
 #include "alvr_server/IDRScheduler.h"
@@ -102,12 +103,18 @@ inline auto makeFoveation(Settings const& settings) {
 }
 
 class Encoder {
+public:
+    // See setDepthSource().
+    using DepthSource = std::function<std::optional<motion::NativeMotion::Depth>(u64 targetTimestampNs)>;
+
+private:
     vk::Extent2D outExtent;
 
     VkContext vkCtx;
 
     Optional<render::Renderer> renderer;
     std::unique_ptr<motion::NativeMotion> nativeMotion;
+    DepthSource depthSource;
     bool gapFillEagerFlow = false;
 
     std::unique_ptr<EncodePipeline> encoder;
@@ -507,6 +514,15 @@ public:
         }
     }
 
+    // Optional depth for frame synthesis. Called once per real picture, with
+    // that picture's target timestamp, just before it is captured; it returns
+    // the matching depth or nothing (then synthesis works without depth).
+    // The depth must be canonical (R32F view distance in metres, +0 invalid,
+    // both eyes side by side) and in the geometry of the composed picture
+    // (same FOV and eye layout). Its image must stay valid and unwritten
+    // until the next present() call returns. Set it from the present() thread.
+    void setDepthSource(DepthSource source) { depthSource = std::move(source); }
+
     // layers[0] is the scene, later layers are blended over it. afterRead
     // runs once the GPU has finished reading SteamVR's textures, before the
     // encode, so the driver can release a held PostPresent early.
@@ -546,8 +562,10 @@ public:
             afterRead();
             if (nativeMotion) {
                 output = renderer.get().getOutput();
+                auto depth = depthSource ? depthSource(targetTimestampNs) : std::nullopt;
                 nativeMotion->capture(
-                    output.image.image, output.image.layout, targetTimestampNs, presentClockNs, historyRotation
+                    output.image.image, output.image.layout, targetTimestampNs, presentClockNs, historyRotation,
+                    depth ? &*depth : nullptr
                 );
             }
         }
