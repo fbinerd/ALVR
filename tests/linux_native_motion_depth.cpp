@@ -17,10 +17,49 @@ struct Scene {
     char const* name;
     float objectSpeed; // eye pixels per frame
     float backgroundSpeed;
+    float yawSpeed = 0; // head yaw, radians per frame
+    bool flatObject = false; // untextured object: colour cannot confirm motion
+    bool sky = false; // top of the background has no depth (+0)
 };
+// Mock-like geometry: tangents +/-tan(1) for both eyes.
+inline float tangent() { return std::tan(1.0f); }
+// Maps a picture pixel seen with head yaw to the yaw-0 picture plane, in
+// pixels, where the scene is defined. Rotation is about +y, the same
+// convention as the warp's quaternions.
+inline bool toWorld(Size size, float yaw, float x, float y, float& wx, float& wy) {
+    if (yaw == 0) {
+        wx = x;
+        wy = y;
+        return true;
+    }
+    float t = tangent();
+    float rx = -t + (x + .5f) / size.eyeWidth * 2 * t, ry = t - (y + .5f) / size.height * 2 * t, rz = -1;
+    float c = std::cos(yaw), sn = std::sin(yaw);
+    float qx = rx * c + rz * sn, qz = -rx * sn + rz * c;
+    if (qz >= -1e-5f)
+        return false;
+    float px = qx / -qz, py = ry / -qz;
+    wx = (px + t) / (2 * t) * size.eyeWidth - .5f;
+    wy = (t - py) / (2 * t) * size.height - .5f;
+    return true;
+}
+inline alvr::motion::NativeMotion::Rotation yawRotation(double delta) {
+    alvr::motion::NativeMotion::Rotation r;
+    r.quaternion[1] = float(std::sin(delta / 2));
+    r.quaternion[3] = float(std::cos(delta / 2));
+    for (auto t : { r.leftTans, r.rightTans }) {
+        t[0] = -tangent();
+        t[1] = tangent();
+        t[2] = tangent();
+        t[3] = -tangent();
+    }
+    return r;
+}
 constexpr float NearMetres = 0.5f, FarMetres = 3.0f;
 // Object rectangle centre at a time; the eyes see it with opposite parallax.
 inline bool object(Size size, Scene const& scene, unsigned eye, float x, float y, double time) {
+    if (!toWorld(size, float(time * scene.yawSpeed), x, y, x, y))
+        return false;
     float centre = size.eyeWidth * .2f + float(time) * scene.objectSpeed + (eye ? -8.f : 8.f);
     return std::abs(x - centre) < size.eyeWidth * .12f && std::abs(y - size.height * .5f) < size.height * .22f;
 }
@@ -32,13 +71,14 @@ inline Frame render(Size size, Scene const& scene, double time) {
     for (uint32_t y = 0; y < size.height; ++y)
         for (uint32_t x = 0; x < size.width(); ++x) {
             unsigned eye = x / size.eyeWidth;
-            float sx = float(x % size.eyeWidth), sy = float(y);
-            bool near = object(size, scene, eye, sx, sy, time);
+            float px = float(x % size.eyeWidth), py = float(y), sx, sy;
+            bool seen = toWorld(size, float(time * scene.yawSpeed), px, py, sx, sy);
+            bool near = seen && object(size, scene, eye, px, py, time);
             float value, metres;
             size_t at = (size_t(y) * size.width() + x) * 4;
             if (near) {
                 float local = sx - float(time) * scene.objectSpeed;
-                value = fixture::texture(local, sy, 91, 6.f);
+                value = scene.flatObject ? 150.f : fixture::texture(local, sy, 91, 6.f);
                 metres = NearMetres;
                 // A warm object on a neutral background makes ghosts visible.
                 frame.colour[at] = uint8_t(std::min(255.f, value * 1.1f + 20));
@@ -47,7 +87,7 @@ inline Frame render(Size size, Scene const& scene, double time) {
             } else {
                 float local = sx - float(time) * scene.backgroundSpeed;
                 value = fixture::texture(local, sy, 7, 10.f);
-                metres = FarMetres;
+                metres = scene.sky && sy < size.height * .3f ? 0.f : FarMetres;
                 frame.colour[at] = frame.colour[at + 1] = frame.colour[at + 2] = uint8_t(value);
             }
             frame.colour[at + 3] = 255;
@@ -84,6 +124,10 @@ int main(int argc, char** argv) {
             { "fast_object_static_background", 16, 0 },
             { "fast_object_panning_background", 16, -4 },
             { "object_with_background_same_direction", 12, 4 },
+            { "flat_object_static_background", 12, 0, 0, true },
+            { "object_with_head_yaw", 12, 0, .006f },
+            { "object_against_head_yaw_with_sky", -10, 0, .006f, false, true },
+            { "head_yaw_only_with_sky", 0, 0, .008f, false, true },
         };
         struct Mode {
             char const* name;
@@ -115,7 +159,11 @@ int main(int argc, char** argv) {
                     motion.setStableResidual(mode.stable);
                     if (diagnostic && useDepth)
                         motion.setDiagnosticFlags(2);
-                    auto const* rotation = mode.rotation ? &identity : nullptr;
+                    auto rotationFor = [&](double delta) {
+                        static alvr::motion::NativeMotion::Rotation r;
+                        r = depthfixture::yawRotation(delta);
+                        return mode.rotation ? &r : nullptr;
+                    };
                     std::map<std::string, std::array<double, 3>> totals; // pixels, repeat, synth
                     unsigned targets = 0;
                     bool saved = false;
@@ -128,7 +176,8 @@ int main(int argc, char** argv) {
                             alvr::motion::NativeMotion::Depth depth {
                                 depthImage.image, depthImage.layout, { size.width(), size.height }
                             };
-                            motion.capture(gpu.image, gpu.layout, stamp, stamp, rotation,
+                            double history = f ? scene.yawSpeed * 2.0 : 0.0;
+                            motion.capture(gpu.image, gpu.layout, stamp, stamp, rotationFor(history),
                                 useDepth ? &depth : nullptr);
                             motion.prepare();
                             continue;
@@ -137,7 +186,8 @@ int main(int argc, char** argv) {
                             continue;
                         require(motion.depthActive() == useDepth, "Depth activity mismatch");
                         motion.waitIdle();
-                        if (!motion.predict(gpu.image, gpu.view, gpu.layout, stamp, {}, stamp, rotation))
+                        if (!motion.predict(gpu.image, gpu.view, gpu.layout, stamp, {}, stamp,
+                                rotationFor(scene.yawSpeed)))
                             throw std::runtime_error("Gap-fill target rejected");
                         auto image = gpu.transfer(nullptr);
                         auto const& truth = frames[f].colour;
