@@ -112,6 +112,18 @@ void fitTemporalTile(uvec2 base,bool right,bool fullTile) {
     barrier();
 }
 bool hasDepth() { return (p.flags&1u)!=0u; }
+vec4 colorAt(bool recent,bool right,vec2 q);
+// Content at q in the newest picture was at q+v in the older one (backward
+// flow v), judged on a small cross of samples.
+bool motionMatches(bool right,vec2 q,vec2 v) {
+    const vec2 taps[5]=vec2[5](vec2(0),vec2(2,0),vec2(-2,0),vec2(0,2),vec2(0,-2));
+    float error=0.0;
+    for (int i=0;i<5;i++) {
+        vec3 d=colorAt(true,right,q+taps[i]).rgb-colorAt(false,right,q+v+taps[i]).rgb;
+        error+=abs(d.r)+abs(d.g)+abs(d.b);
+    }
+    return error/15.0<=12.0/255.0;
+}
 // Depth of a picture position, in that picture's own geometry (the older
 // picture is sampled through the history rotation, like colorAt). Invalid
 // or sky depth counts as very far.
@@ -364,7 +376,11 @@ void main() {
                 vec2 qc=target-distance*v;
                 if (inside(qc)) {
                     float zq=depthAt(true,right,qc);
-                    bool moves=length(flowAt(true,right,qc)-v)<=1.0+0.15*length(v);
+                    // Photometric check: the coarse flow itself can be wrong
+                    // next to an edge (background motion leaking into the
+                    // object), so test whether the content at qc really was
+                    // at qc+v in the older picture.
+                    bool moves=motionMatches(right,qc,v);
                     if (moves && depthAffinity(zq,zc)>0.5 && zq<coverDepth) {
                         coverDepth=zq; cover=qc; covered=true;
                     }
@@ -377,6 +393,8 @@ void main() {
             valid=inside(q);
             depthResolved=valid;
             if (depthResolved) color=colorAt(true,right,q);
+            // Diagnostic: red covered, green filled from background.
+            if ((p.flags&2u)!=0u) color=covered?vec4(1,0,0,1):vec4(0,1,0,1);
         }
     }
     if ((p.rotationMode&8u)!=0u) {

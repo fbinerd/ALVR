@@ -84,6 +84,7 @@ struct NativeMotion::State {
     Rotation historyRotation;
     bool rotationMode = false, confidenceFallback = false, stableResidual = false,
          interpolate = false;
+    uint32_t diagnosticFlags = 0;
 
     State(
         VkContext& c,
@@ -686,6 +687,7 @@ bool NativeMotion::predict(
     }
     if (s.depthValid[0] && s.depthValid[1])
         push.flags |= 1u;
+    push.flags |= s.diagnosticFlags;
     s.dispatch(
         s.warpPipeline,
         s.warpLayout,
@@ -794,6 +796,9 @@ std::vector<float> NativeMotion::diagnosticResidualMagnitudes() {
     s.ctx.dev.unmapMemory(memory);s.ctx.dev.destroy(buffer);s.ctx.dev.free(memory);
     return result;
 }
+#endif
+#ifdef ALVR_NATIVE_MOTION_TESTING
+void NativeMotion::setDiagnosticFlags(uint32_t flags) { state->diagnosticFlags = flags; }
 #endif
 void NativeMotion::setStableResidual(bool enabled) { state->stableResidual = enabled; }
 

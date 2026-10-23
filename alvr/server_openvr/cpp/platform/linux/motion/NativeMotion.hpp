@@ -111,6 +111,8 @@ public:
 #ifdef ALVR_NATIVE_MOTION_TESTING
     // Test-only readback of raw residual vectors, in output pixels; no runtime cost.
     std::vector<float> diagnosticResidualMagnitudes();
+    // Test-only extra warp flags (bit 1: paint the depth decision per pixel).
+    void setDiagnosticFlags(uint32_t);
 #endif
     void setGapFill(bool);
     bool gapFill() const;

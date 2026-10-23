@@ -66,6 +66,8 @@ int main(int argc, char** argv) {
             throw std::runtime_error("Use a new output directory");
         std::filesystem::create_directories(output);
         Size size { 1024, 640 };
+        // DEPTH_DIAGNOSTIC=1 paints the depth decision instead of colour.
+        bool diagnostic = std::getenv("DEPTH_DIAGNOSTIC") != nullptr;
         if (argc >= 4)
             size = { uint32_t(std::stoul(argv[2])), uint32_t(std::stoul(argv[3])) };
         RecordingContext ctx;
@@ -111,6 +113,8 @@ int main(int argc, char** argv) {
                     );
                     motion.setGapFill(true);
                     motion.setStableResidual(mode.stable);
+                    if (diagnostic && useDepth)
+                        motion.setDiagnosticFlags(2);
                     auto const* rotation = mode.rotation ? &identity : nullptr;
                     std::map<std::string, std::array<double, 3>> totals; // pixels, repeat, synth
                     unsigned targets = 0;
