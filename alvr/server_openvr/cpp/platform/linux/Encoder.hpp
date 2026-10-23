@@ -11,6 +11,7 @@
 #include "EncodePipeline.h"
 #include "Renderer.hpp"
 #include "motion/NativeMotion.hpp"
+#include "motion/StereoDepth.hpp"
 #include <optional>
 #include "motion/NativeMotionSwitch.hpp"
 
@@ -115,6 +116,54 @@ private:
     Optional<render::Renderer> renderer;
     std::unique_ptr<motion::NativeMotion> nativeMotion;
     DepthSource depthSource;
+    // Stereo depth for the positional correction, computed from each real
+    // picture's two eyes. Experimental: on while ~/.config/alvr/diag_stereo_depth
+    // exists (checked about once a second).
+    std::unique_ptr<motion::StereoDepth> stereoDepth;
+    motion::StereoParams stereoParams;
+    bool stereoViews = false, stereoSwitch = false, stereoFailed = false;
+    std::chrono::steady_clock::time_point stereoChecked {};
+    uint64_t stereoFrames = 0;
+    double stereoMsSum = 0, stereoMsMax = 0;
+
+    std::optional<motion::NativeMotion::Depth> stereoDepthFor(render::Output const& output) {
+        auto now = std::chrono::steady_clock::now();
+        if (now - stereoChecked > std::chrono::seconds(1)) {
+            stereoChecked = now;
+            bool on = std::ifstream(std::string(std::getenv("HOME") ? std::getenv("HOME") : "")
+                                    + "/.config/alvr/diag_stereo_depth")
+                          .good();
+            if (on != stereoSwitch)
+                Info("Stereo depth for positional correction %s", on ? "on" : "off");
+            stereoSwitch = on;
+        }
+        if (!stereoSwitch || !stereoViews || stereoFailed || !nativeMotion)
+            return std::nullopt;
+        try {
+            if (!stereoDepth)
+                // A 640 luma cap keeps near objects within the flow's reach
+                // and costs about 3.5 ms at 1832x1920 per eye (offline).
+                stereoDepth = std::make_unique<motion::StereoDepth>(
+                    vkCtx, outExtent, static_cast<vk::Format>(output.imageCI.format), 640
+                );
+            motion::StereoDepthTiming timing;
+            stereoDepth->estimate(output.image.image, output.image.view, output.image.layout,
+                {}, {}, vk::ImageLayout::eGeneral, stereoParams, &timing);
+            stereoMsSum += timing.totalWallMs;
+            stereoMsMax = std::max(stereoMsMax, timing.totalWallMs);
+            if (++stereoFrames % 360 == 0) {
+                Info("Stereo depth: %llu pictures, mean %.2f ms, max %.2f ms (last 360)",
+                    static_cast<unsigned long long>(stereoFrames), stereoMsSum / 360, stereoMsMax);
+                stereoMsSum = stereoMsMax = 0;
+            }
+            return motion::NativeMotion::Depth { stereoDepth->internalDepthImage(),
+                vk::ImageLayout::eGeneral, outExtent };
+        } catch (std::exception const& e) {
+            Warn("Stereo depth unavailable: %s; positional correction off", e.what());
+            stereoFailed = true;
+            return std::nullopt;
+        }
+    }
     bool gapFillEagerFlow = false;
 
     std::unique_ptr<EncodePipeline> encoder;
@@ -522,6 +571,11 @@ public:
     // (same FOV and eye layout). Its image must stay valid and unwritten
     // until the next present() call returns. Set it from the present() thread.
     void setDepthSource(DepthSource source) { depthSource = std::move(source); }
+    // Eye FOV tangents and separation for the stereo depth (see stereoDepthFor).
+    void setStereoViews(motion::StereoParams const& params) {
+        stereoParams = params;
+        stereoViews = true;
+    }
 
     // layers[0] is the scene, later layers are blended over it. afterRead
     // runs once the GPU has finished reading SteamVR's textures, before the
@@ -563,6 +617,8 @@ public:
             if (nativeMotion) {
                 output = renderer.get().getOutput();
                 auto depth = depthSource ? depthSource(targetTimestampNs) : std::nullopt;
+                if (!depth)
+                    depth = stereoDepthFor(output);
                 nativeMotion->capture(
                     output.image.image, output.image.layout, targetTimestampNs, presentClockNs, historyRotation,
                     depth ? &*depth : nullptr
