@@ -3,6 +3,8 @@
 #include "NativeOpticalFlow.hpp"
 
 #include <chrono>
+#include <cstdlib>
+#include <string>
 #include <cmath>
 #include <iostream>
 #include <stdexcept>
@@ -346,8 +348,17 @@ struct StereoDepth::State {
             native,
             lumaExtent.width,
             lumaExtent.height,
-            VK_OPTICAL_FLOW_PERFORMANCE_LEVEL_SLOW_NV,
-            true // bidirectional flow
+            // STEREO_FLOW_LEVEL=slow|medium (default fast, as native motion).
+            [] {
+                char const* level = std::getenv("STEREO_FLOW_LEVEL");
+                std::string text = level ? level : "";
+                return text == "slow" ? VK_OPTICAL_FLOW_PERFORMANCE_LEVEL_SLOW_NV
+                    : text == "medium" ? VK_OPTICAL_FLOW_PERFORMANCE_LEVEL_MEDIUM_NV
+                                       : VK_OPTICAL_FLOW_PERFORMANCE_LEVEL_FAST_NV;
+            }(),
+            // Two one-way estimates: the combined backward output came back
+            // empty at some luma sizes (every match then failed consistency).
+            false
         );
 
         // Build Pipelines
@@ -581,17 +592,17 @@ bool StereoDepth::estimate(
     auto costR2L = s.resource(s.rightCost);
 
     std::string flowError;
-    if (!s.estimator->execute(
-            inLeft,
-            refRight,
-            motionL2R,
-            costL2R,
-            flowError,
-            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-            &motionR2L,
-            &costR2L
-        )) {
-        throw std::runtime_error("StereoDepth: Optical flow failed: " + flowError);
+    double opticalMs = 0;
+    bool timed = true;
+    for (bool rightToLeft : { false, true }) {
+        auto& a = rightToLeft ? refRight : inLeft;
+        auto& b = rightToLeft ? inLeft : refRight;
+        if (!s.estimator->execute(a, b, rightToLeft ? motionR2L : motionL2R, rightToLeft ? costR2L : costL2R,
+                flowError, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, nullptr, nullptr))
+            throw std::runtime_error("StereoDepth: Optical flow failed: " + flowError);
+        double ms = s.estimator->opticalGpuMilliseconds();
+        timed &= ms >= 0;
+        opticalMs += ms;
     }
     s.leftToRightFlow.layout = vk::ImageLayout::eShaderReadOnlyOptimal;
     s.rightToLeftFlow.layout = vk::ImageLayout::eShaderReadOnlyOptimal;
@@ -722,7 +733,7 @@ bool StereoDepth::estimate(
         timing->flowWallMs = std::chrono::duration<double, std::milli>(tFlow1 - tFlow0).count();
         timing->depthWallMs = std::chrono::duration<double, std::milli>(tDepth1 - tDepth0).count();
         timing->fillWallMs = timing->depthWallMs; // integrated pass
-        timing->opticalGpuMs = s.estimator->opticalGpuMilliseconds();
+        timing->opticalGpuMs = timed ? opticalMs : -1.0;
         timing->depthGpuMs = depthGpuMs;
     }
 
