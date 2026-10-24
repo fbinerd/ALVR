@@ -1,5 +1,7 @@
 #pragma once
 
+#include <climits>
+
 #include <fstream>
 #include <functional>
 #include <map>
@@ -162,6 +164,22 @@ class Encoder {
         }
     }
 
+    // Kernel driver bound to a DRM render node's GPU ("nvidia", "nouveau",
+    // "i915", "xe", "amdgpu", ...), from sysfs, or "" if unknown.
+    static std::string kernelDriverOfNode(std::string const& path) {
+        auto slash = path.rfind('/');
+        std::string node = slash == std::string::npos ? path : path.substr(slash + 1);
+        char target[PATH_MAX] = {};
+        auto link = "/sys/class/drm/" + node + "/device/driver";
+        ssize_t len = readlink(link.c_str(), target, sizeof(target) - 1);
+        if (len <= 0) {
+            return "";
+        }
+        std::string driver(target, len);
+        auto base = driver.rfind('/');
+        return base == std::string::npos ? driver : driver.substr(base + 1);
+    }
+
     // PCI vendor of a DRM render node, from sysfs (0 if unknown).
     static u32 vendorIdOfNode(std::string const& path) {
         auto slash = path.rfind('/');
@@ -270,16 +288,28 @@ class Encoder {
         if (settings->m_forceSwEncoding) {
             backend = EncoderBackend::Software;
         }
+        // NVENC needs NVIDIA's proprietary kernel driver; an NVIDIA GPU on
+        // nouveau (Mesa NVK) has no encoder ALVR can use.
+        std::string const kernelDriver = kernelDriverOfNode(resolved.devicePath);
+        bool const nouveau = resolved.vendor == Vendor::Nvidia && kernelDriver == "nouveau";
         if (backend == EncoderBackend::Automatic) {
-            backend
-                = resolved.vendor == Vendor::Nvidia ? EncoderBackend::Nvenc : EncoderBackend::Vaapi;
+            backend = resolved.vendor == Vendor::Nvidia && !nouveau ? EncoderBackend::Nvenc
+                                                                     : EncoderBackend::Vaapi;
+        }
+        if (nouveau) {
+            Warn(
+                "Encoder GPU %s is an NVIDIA GPU on nouveau (Mesa NVK), which has no NVENC; "
+                "set \"Encoder GPU\" to another GPU with VAAPI or use NVIDIA's driver",
+                resolved.devicePath.c_str()
+            );
         }
         resolved.backend = backend;
 
         Info(
-            "Encoder: %s on %s%s (render GPU node %s)",
+            "Encoder: %s on %s (kernel driver %s)%s (render GPU node %s)",
             encoderBackendName(resolved.backend),
             resolved.devicePath.c_str(),
+            kernelDriver.empty() ? "unknown" : kernelDriver.c_str(),
             resolved.crossDevice ? ", a different GPU (linear dma-buf hand-over)" : "",
             renderNode.empty() ? "unknown" : renderNode.c_str()
         );
