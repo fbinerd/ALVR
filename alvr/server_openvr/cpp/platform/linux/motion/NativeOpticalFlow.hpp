@@ -22,6 +22,7 @@ struct Context {
     // command buffers. A standalone caller using loader entry points may omit it.
     PFN_vkSetDeviceLoaderData set_loader_data = nullptr;
     bool optical_flow_enabled = false, synchronization2_enabled = false;
+    bool profile = false; // Optional diagnostics; no extra queries by default.
     uint64_t timeout_ns = 500'000'000;
     // The caller must serialize application submissions/resource destruction
     // with this whole operation, not just serialize this estimator's calls.
@@ -92,5 +93,11 @@ public:
     // Last successful optical-queue execution plus packed-output copy, device
     // milliseconds. Excludes input/final copies on render queue; -1 unavailable.
     double opticalGpuMilliseconds() const;
+    struct ExecutionTiming {
+        double recordCpuMs = 0, submitCpuMs = 0, waitCpuMs = 0;
+        double inputCopyGpuMs = -1, outputCopyGpuMs = -1;
+        bool opticalIncludesCopies = false;
+    };
+    ExecutionTiming executionTiming() const;
 };
 } // namespace alvr::motion

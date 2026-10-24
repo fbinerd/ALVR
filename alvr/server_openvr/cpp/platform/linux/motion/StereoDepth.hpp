@@ -32,7 +32,14 @@ struct StereoDepthTiming {
     double depthWallMs = 0.0;
     double fillWallMs = 0.0;
     double opticalGpuMs = -1.0;
-    double depthGpuMs = -1.0;
+    double depthGpuMs = -1.0; // Legacy bracket includes coarse/host gaps.
+    bool profiled = false, flowGpuIncludesCopies = false;
+    double coarseWallMs = 0, fineDepthWallMs = 0, mergeWallMs = 0;
+    double passWaitCpuMs = 0, flowWaitCpuMs = 0, flowRecordCpuMs = 0, flowSubmitCpuMs = 0;
+    uint32_t passWaitCalls = 0;
+    double lumaGpuMs = -1, fineDepthGpuMs = -1, mergeGpuMs = -1;
+    double flowInputCopyGpuMs = -1, flowOutputCopyGpuMs = -1;
+    double coarseLumaGpuMs = -1, coarseDepthGpuMs = -1;
 };
 
 class StereoDepth {

@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
+#include <fstream>
 #include <string>
 #include <cmath>
 #include <iostream>
@@ -130,6 +131,7 @@ struct StereoDepth::State {
     vk::ShaderModule mergeShader {};
     vk::Pipeline mergePipeline {};
     std::unique_ptr<StereoDepth> coarse;
+    bool profile = false;
 
     State(
         VkContext& c,
@@ -355,6 +357,11 @@ struct StereoDepth::State {
         })[0];
         fence = ctx.dev.createFence({});
 
+        // Explicit profiling only; ordinary mode allocates no extra queries.
+        auto home = std::getenv("HOME");
+        int requested = 0;
+        if(home)std::ifstream(std::string(home)+"/.config/alvr/diag_stereo_profile") >> requested;
+        profile = requested == 1 || (std::getenv("STEREO_PROFILE") && std::string(std::getenv("STEREO_PROFILE"))=="1");
         // Timestamps
         auto families = ctx.physDev.getQueueFamilyProperties();
         timestampBits = families.at(ctx.meta.queueFamily).timestampValidBits;
@@ -362,7 +369,7 @@ struct StereoDepth::State {
         if (timestampBits && timestampPeriod > 0) {
             queries = ctx.dev.createQueryPool(vk::QueryPoolCreateInfo {
                 .queryType = vk::QueryType::eTimestamp,
-                .queryCount = 2,
+                .queryCount = profile ? 6u : 2u,
             });
         }
 
@@ -399,6 +406,7 @@ struct StereoDepth::State {
             vkGetInstanceProcAddr(ctx.instance, "vkGetPhysicalDeviceOpticalFlowImageFormatsNV")
         );
         native.optical_flow_enabled = native.synchronization2_enabled = true;
+        native.profile = profile;
         native.log = [](void*, const char* text) { std::cerr << "StereoDepth OF: " << text << std::endl; };
 
         estimator = std::make_unique<NativeOpticalFlow>(
@@ -573,6 +581,18 @@ bool StereoDepth::estimate(
 ) {
     auto& s = *state;
     auto tStart = std::chrono::steady_clock::now();
+    double passWaitCpuMs=0,flowWaitCpuMs=0,flowRecordCpuMs=0,flowSubmitCpuMs=0;
+    double inputCopyGpuMs=0,outputCopyGpuMs=0;
+    bool copiesTimed=true,flowIncludesCopies=false;
+    uint32_t passWaitCalls=0;
+    StereoDepthTiming coarseTiming{};
+    auto fineEnd=tStart,mergeStart=tStart;
+    auto waitFence=[&]{
+        auto start=s.profile?std::chrono::steady_clock::now():std::chrono::steady_clock::time_point{};
+        auto result=s.ctx.dev.waitForFences(s.fence,true,TimeoutNs);
+        if(s.profile){passWaitCpuMs+=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count();++passWaitCalls;}
+        return result;
+    };
 
     vk::Image targetDepth = outputDepth ? outputDepth : s.internalDepth.handle;
     vk::ImageView targetDepthView = outputDepthView ? outputDepthView : s.internalDepth.view;
@@ -590,6 +610,10 @@ bool StereoDepth::estimate(
         .flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit,
     });
 
+    if(s.profile && s.queries){
+        s.command.resetQueryPool(s.queries,4,2);
+        s.command.writeTimestamp(vk::PipelineStageFlagBits::eTopOfPipe,s.queries,4);
+    }
     // Ensure inputColor in shader read layout
     if (inputColorLayout != vk::ImageLayout::eShaderReadOnlyOptimal &&
         inputColorLayout != vk::ImageLayout::eGeneral) {
@@ -656,11 +680,12 @@ bool StereoDepth::estimate(
         vk::AccessFlagBits::eMemoryRead
     );
 
+    if(s.profile && s.queries)s.command.writeTimestamp(vk::PipelineStageFlagBits::eBottomOfPipe,s.queries,5);
     s.command.end();
     s.ctx.dev.resetFences(s.fence);
     vk::SubmitInfo lumaSubmit { .commandBufferCount = 1, .pCommandBuffers = &s.command };
     s.ctx.useQueue([&](auto& queue) { queue.submit(lumaSubmit, s.fence); });
-    if (s.ctx.dev.waitForFences(s.fence, true, TimeoutNs) != vk::Result::eSuccess) {
+    if (waitFence() != vk::Result::eSuccess) {
         throw std::runtime_error("StereoDepth: Luma pass timed out");
     }
     auto tLuma1 = std::chrono::steady_clock::now();
@@ -686,6 +711,13 @@ bool StereoDepth::estimate(
         double ms = s.estimator->opticalGpuMilliseconds();
         timed &= ms >= 0;
         opticalMs += ms;
+        if(s.profile){
+            auto t=s.estimator->executionTiming();
+            flowWaitCpuMs+=t.waitCpuMs;flowRecordCpuMs+=t.recordCpuMs;flowSubmitCpuMs+=t.submitCpuMs;
+            flowIncludesCopies|=t.opticalIncludesCopies;
+            copiesTimed &= t.inputCopyGpuMs>=0 && t.outputCopyGpuMs>=0;
+            inputCopyGpuMs+=t.inputCopyGpuMs;outputCopyGpuMs+=t.outputCopyGpuMs;
+        }
     }
     s.leftToRightFlow.layout = vk::ImageLayout::eShaderReadOnlyOptimal;
     s.rightToLeftFlow.layout = vk::ImageLayout::eShaderReadOnlyOptimal;
@@ -725,7 +757,7 @@ bool StereoDepth::estimate(
             s.ctx.dev.resetFences(s.fence);
             vk::SubmitInfo submit { .commandBufferCount = 1, .pCommandBuffers = &s.command };
             s.ctx.useQueue([&](auto& queue) { queue.submit(submit, s.fence); });
-            if (s.ctx.dev.waitForFences(s.fence, true, TimeoutNs) != vk::Result::eSuccess)
+            if (waitFence() != vk::Result::eSuccess)
                 throw std::runtime_error("StereoDepth: flow readback timed out");
             auto* v = static_cast<int16_t const*>(s.ctx.dev.mapMemory(memory, 0, bytes));
             std::vector<float> xs, ys;
@@ -754,7 +786,7 @@ bool StereoDepth::estimate(
     });
 
     if (s.queries) {
-        s.command.resetQueryPool(s.queries, 0, 2);
+        s.command.resetQueryPool(s.queries, 0, s.profile ? 4 : 2);
         s.command.writeTimestamp(vk::PipelineStageFlagBits::eTopOfPipe, s.queries, 0);
     }
 
@@ -835,15 +867,19 @@ bool StereoDepth::estimate(
 
     if (s.coarse) {
         // Finish the fine estimate, run the coarse one, then merge.
+        if(s.profile && s.queries)s.command.writeTimestamp(vk::PipelineStageFlagBits::eBottomOfPipe,s.queries,1);
         s.command.end();
         s.ctx.dev.resetFences(s.fence);
         vk::SubmitInfo fineSubmit { .commandBufferCount = 1, .pCommandBuffers = &s.command };
         s.ctx.useQueue([&](auto& queue) { queue.submit(fineSubmit, s.fence); });
-        if (s.ctx.dev.waitForFences(s.fence, true, TimeoutNs) != vk::Result::eSuccess)
+        if (waitFence() != vk::Result::eSuccess)
             throw std::runtime_error("StereoDepth: Depth/fill pass timed out");
-        s.coarse->estimate(inputColor, inputColorView, sampledInputLayout, {}, {}, vk::ImageLayout::eGeneral, params);
+        fineEnd=std::chrono::steady_clock::now();
+        s.coarse->estimate(inputColor, inputColorView, sampledInputLayout, {}, {}, vk::ImageLayout::eGeneral, params, &coarseTiming);
+        mergeStart=std::chrono::steady_clock::now();
         s.command.reset();
         s.command.begin(vk::CommandBufferBeginInfo { .flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit });
+        if(s.profile && s.queries)s.command.writeTimestamp(vk::PipelineStageFlagBits::eTopOfPipe,s.queries,2);
         s.barrier(targetDepth, vk::ImageLayout::eGeneral, vk::ImageLayout::eGeneral,
             vk::AccessFlagBits::eShaderWrite, vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eShaderWrite);
         struct {
@@ -884,26 +920,31 @@ bool StereoDepth::estimate(
     }
 
     if (s.queries) {
-        s.command.writeTimestamp(vk::PipelineStageFlagBits::eBottomOfPipe, s.queries, 1);
+        s.command.writeTimestamp(vk::PipelineStageFlagBits::eBottomOfPipe, s.queries, s.profile && s.coarse ? 3 : 1);
     }
 
     s.command.end();
     s.ctx.dev.resetFences(s.fence);
     vk::SubmitInfo depthSubmit { .commandBufferCount = 1, .pCommandBuffers = &s.command };
     s.ctx.useQueue([&](auto& queue) { queue.submit(depthSubmit, s.fence); });
-    if (s.ctx.dev.waitForFences(s.fence, true, TimeoutNs) != vk::Result::eSuccess) {
+    if (waitFence() != vk::Result::eSuccess) {
         throw std::runtime_error("StereoDepth: Depth/fill pass timed out");
     }
     auto tDepth1 = std::chrono::steady_clock::now();
 
-    double depthGpuMs = -1.0;
-    if (s.queries && s.timestampBits) {
-        std::array<uint64_t, 2> ticks {};
-        if (s.ctx.dev.getQueryPoolResults(
-                s.queries, 0, 2, sizeof(ticks), ticks.data(), sizeof(uint64_t), vk::QueryResultFlagBits::e64
-            ) == vk::Result::eSuccess) {
-            uint64_t mask = s.timestampBits == 64 ? UINT64_MAX : (uint64_t(1) << s.timestampBits) - 1;
-            depthGpuMs = double((ticks[1] - ticks[0]) & mask) * s.timestampPeriod / 1e6;
+    auto gpuPair=[&](uint32_t first){
+        if(!s.queries||!s.timestampBits)return -1.0;
+        std::array<uint64_t,2> ticks{};
+        if(s.ctx.dev.getQueryPoolResults(s.queries,first,2,sizeof(ticks),ticks.data(),sizeof(uint64_t),vk::QueryResultFlagBits::e64)!=vk::Result::eSuccess)return -1.0;
+        uint64_t mask=s.timestampBits==64?UINT64_MAX:(uint64_t(1)<<s.timestampBits)-1;
+        return double((ticks[1]-ticks[0])&mask)*s.timestampPeriod/1e6;
+    };
+    double fineGpuMs=gpuPair(0),depthGpuMs=fineGpuMs;
+    if(s.profile&&s.coarse&&s.queries){
+        std::array<uint64_t,4> ticks{};
+        if(s.ctx.dev.getQueryPoolResults(s.queries,0,4,sizeof(ticks),ticks.data(),sizeof(uint64_t),vk::QueryResultFlagBits::e64)==vk::Result::eSuccess){
+            uint64_t mask=s.timestampBits==64?UINT64_MAX:(uint64_t(1)<<s.timestampBits)-1;
+            depthGpuMs=double((ticks[3]-ticks[0])&mask)*s.timestampPeriod/1e6;
         }
     }
 
@@ -916,6 +957,23 @@ bool StereoDepth::estimate(
         timing->fillWallMs = timing->depthWallMs; // integrated pass
         timing->opticalGpuMs = timed ? opticalMs : -1.0;
         timing->depthGpuMs = depthGpuMs;
+        timing->profiled=s.profile;
+        if(s.profile){
+            timing->coarseWallMs=coarseTiming.totalWallMs;
+            timing->fineDepthWallMs=std::chrono::duration<double,std::milli>((s.coarse?fineEnd:tDepth1)-tDepth0).count();
+            timing->mergeWallMs=s.coarse?std::chrono::duration<double,std::milli>(tDepth1-mergeStart).count():0;
+            timing->passWaitCpuMs=passWaitCpuMs+coarseTiming.passWaitCpuMs;
+            timing->passWaitCalls=passWaitCalls+coarseTiming.passWaitCalls;
+            timing->flowWaitCpuMs=flowWaitCpuMs+coarseTiming.flowWaitCpuMs;
+            timing->flowRecordCpuMs=flowRecordCpuMs+coarseTiming.flowRecordCpuMs;
+            timing->flowSubmitCpuMs=flowSubmitCpuMs+coarseTiming.flowSubmitCpuMs;
+            timing->flowGpuIncludesCopies=flowIncludesCopies||coarseTiming.flowGpuIncludesCopies;
+            timing->flowInputCopyGpuMs=copiesTimed&&(!s.coarse||coarseTiming.flowInputCopyGpuMs>=0)?inputCopyGpuMs+(s.coarse?coarseTiming.flowInputCopyGpuMs:0):-1;
+            timing->flowOutputCopyGpuMs=copiesTimed&&(!s.coarse||coarseTiming.flowOutputCopyGpuMs>=0)?outputCopyGpuMs+(s.coarse?coarseTiming.flowOutputCopyGpuMs:0):-1;
+            timing->lumaGpuMs=gpuPair(4);timing->fineDepthGpuMs=fineGpuMs;
+            timing->mergeGpuMs=s.coarse?gpuPair(2):-1;
+            timing->coarseLumaGpuMs=coarseTiming.lumaGpuMs;timing->coarseDepthGpuMs=coarseTiming.fineDepthGpuMs;
+        }
     }
 
     return true;

@@ -13,4 +13,5 @@ bool NativeOpticalFlow::execute(ImageResource const&,ImageResource const&,ImageR
 bool NativeOpticalFlow::quiesce(std::string&) noexcept{return true;}
 bool NativeOpticalFlow::faulted()const{return false;}
 double NativeOpticalFlow::opticalGpuMilliseconds()const{return -1;}
+NativeOpticalFlow::ExecutionTiming NativeOpticalFlow::executionTiming()const{return {};}
 }

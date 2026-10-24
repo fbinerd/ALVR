@@ -13,6 +13,7 @@
 #include "motion/NativeMotion.hpp"
 #include "depth/ProductionDepthSource.hpp"
 #include "motion/StereoDepth.hpp"
+#include "motion/StereoProfileLog.hpp"
 #include <optional>
 #include "motion/NativeMotionSwitch.hpp"
 
@@ -127,6 +128,7 @@ private:
     std::chrono::steady_clock::time_point stereoChecked {};
     uint64_t stereoFrames = 0;
     double stereoMsSum = 0, stereoMsMax = 0;
+    motion::StereoProfileLog stereoProfile;
 
     bool stereoPending = false;
 
@@ -174,6 +176,7 @@ private:
             motion::StereoDepthTiming timing;
             stereoDepth->estimate(output.image.image, output.image.view, output.image.layout,
                 {}, {}, vk::ImageLayout::eGeneral, stereoParams, &timing);
+            if(auto line=stereoProfile.add(timing))Info("%s",line->c_str());
             stereoMsSum += timing.totalWallMs;
             stereoMsMax = std::max(stereoMsMax, timing.totalWallMs);
             if (++stereoFrames % 360 == 0) {
@@ -380,6 +383,7 @@ public:
     void createImages(render::RendererCreateInfo rendererCI) {
         nativeMotion.reset();
         stereoPending = false;
+        stereoProfile = {};
         stereoDepth.reset();
         gameDepth.reset();
         if (renderer.hasValue()) {
@@ -525,6 +529,7 @@ public:
         frame.reset();
         nativeMotion.reset();
         stereoPending = false;
+        stereoProfile = {};
         stereoDepth.reset();
         gameDepth.reset();
         if (renderer.hasValue()) {
@@ -804,6 +809,7 @@ public:
         frame.reset();
         nativeMotion.reset();
         stereoPending = false;
+        stereoProfile = {};
         stereoDepth.reset(); // Its destructor calls Vulkan; the device must still exist.
         gameDepth.reset(); // Detach and drain before the borrowed Vulkan device dies.
 

@@ -931,6 +931,7 @@ int main(int argc, char** argv) {
                         std::getenv("STEREO_COARSE") ? uint32_t(std::stoul(std::getenv("STEREO_COARSE"))) : 0u
                     );
                     std::vector<double> wall, flow, depth;
+                    std::vector<alvr::motion::StereoDepthTiming> profiles;
                     for (int run = 0; run < 55; ++run) {
                         alvr::motion::StereoDepthTiming t {};
                         estimator.estimate(
@@ -943,6 +944,7 @@ int main(int argc, char** argv) {
                         wall.push_back(t.totalWallMs);
                         flow.push_back(t.opticalGpuMs);
                         depth.push_back(t.depthGpuMs);
+                        if(t.profiled)profiles.push_back(t);
                     }
                     auto mean = [](std::vector<double> const& v) {
                         double s = 0;
@@ -956,6 +958,20 @@ int main(int argc, char** argv) {
                               << "  " << std::setw(5) << sorted[size_t(sorted.size() * 0.95)] << "  "
                               << std::setw(5) << sorted.back() << " | " << std::setw(6) << mean(flow)
                               << "        | " << std::setw(6) << mean(depth) << "\n";
+                    if(!profiles.empty()){
+                        auto avg=[&](auto member){double sum=0;for(auto const& p:profiles){if(p.*member<0)return -1.0;sum+=p.*member;}return sum/profiles.size();};
+                        using T=alvr::motion::StereoDepthTiming;
+                        std::cout<<"PROFILE mean_ms "
+                          <<"luma_wall="<<avg(&T::lumaWallMs)<<" fine_flow_wall="<<avg(&T::flowWallMs)
+                          <<" fine_depth_wall="<<avg(&T::fineDepthWallMs)<<" coarse_wall="<<avg(&T::coarseWallMs)<<" merge_wall="<<avg(&T::mergeWallMs)
+                          <<" pass_wait_cpu="<<avg(&T::passWaitCpuMs)<<" nv_wait_cpu="<<avg(&T::flowWaitCpuMs)
+                          <<" nv_record_cpu="<<avg(&T::flowRecordCpuMs)<<" nv_submit_cpu="<<avg(&T::flowSubmitCpuMs)
+                          <<" input_copy_gpu="<<avg(&T::flowInputCopyGpuMs)<<" output_copy_gpu="<<avg(&T::flowOutputCopyGpuMs)
+                          <<" luma_gpu="<<avg(&T::lumaGpuMs)<<" fine_depth_gpu="<<avg(&T::fineDepthGpuMs)
+                          <<" coarse_luma_gpu="<<avg(&T::coarseLumaGpuMs)<<" coarse_depth_gpu="<<avg(&T::coarseDepthGpuMs)
+                          <<" merge_gpu="<<avg(&T::mergeGpuMs)
+                          <<" pass_wait_calls="<<profiles.back().passWaitCalls<<" optical_includes_copies="<<profiles.back().flowGpuIncludesCopies<<"\n";
+                    }
                 }
             }
             return 0;

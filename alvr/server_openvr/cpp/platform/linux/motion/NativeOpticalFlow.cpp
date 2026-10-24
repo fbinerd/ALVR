@@ -1,5 +1,6 @@
 #include "NativeOpticalFlow.hpp"
 #include <array>
+#include <chrono>
 #include <mutex>
 #include <stdexcept>
 #include <vector>
@@ -121,7 +122,9 @@ struct NativeOpticalFlow::State {
     std::array<VkCommandBuffer, 3> commands {};
     std::array<VkFence, 3> fences {};
     VkSemaphore inputs_ready = VK_NULL_HANDLE, results_ready = VK_NULL_HANDLE;
-    VkQueryPool queries = VK_NULL_HANDLE;
+    VkQueryPool queries = VK_NULL_HANDLE, copy_queries = VK_NULL_HANDLE;
+    uint32_t copy_timestamp_bits = 0;
+    ExecutionTiming execution_timing {};
     uint32_t timestamp_bits = 0;
     bool renderTimestampBracket = false;
     double timestamp_period = 0, optical_gpu_ms = -1;
@@ -161,6 +164,8 @@ struct NativeOpticalFlow::State {
             f.DestroySemaphore(c.device, results_ready, nullptr);
         if (queries)
             f.DestroyQueryPool(c.device, queries, nullptr);
+        if (copy_queries)
+            f.DestroyQueryPool(c.device, copy_queries, nullptr);
         if (render_pool)
             f.DestroyCommandPool(c.device, render_pool, nullptr);
         if (optical_pool)
@@ -323,6 +328,7 @@ struct NativeOpticalFlow::State {
                 & (VK_QUEUE_OPTICAL_FLOW_BIT_NV | VK_QUEUE_TRANSFER_BIT))
                 != (VK_QUEUE_OPTICAL_FLOW_BIT_NV | VK_QUEUE_TRANSFER_BIT))
             throw std::runtime_error("invalid native queue families");
+        copy_timestamp_bits = families[c.render_family].timestampValidBits;
         VkPhysicalDeviceOpticalFlowPropertiesNV caps {
             VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_OPTICAL_FLOW_PROPERTIES_NV
         };
@@ -476,6 +482,12 @@ struct NativeOpticalFlow::State {
             f.CreateSemaphore(c.device, &si, nullptr, &results_ready),
             "create native result semaphore"
         );
+        if (c.profile && copy_timestamp_bits && timestamp_period > 0 && f.CmdWriteTimestamp2) {
+            VkQueryPoolCreateInfo qi { VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO };
+            qi.queryType = VK_QUERY_TYPE_TIMESTAMP;
+            qi.queryCount = 4;
+            checked(f.CreateQueryPool(c.device, &qi, nullptr, &copy_queries), "create copy timestamp pool");
+        }
         if (timestamp_bits && timestamp_period > 0 && f.CmdWriteTimestamp2) {
             VkQueryPoolCreateInfo qi { VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO };
             qi.queryType = VK_QUERY_TYPE_TIMESTAMP;
@@ -559,6 +571,10 @@ struct NativeOpticalFlow::State {
     }
     void prepare_inputs(const ImageResource& a, const ImageResource& b) {
         begin(0);
+        if (copy_queries) {
+            f.CmdResetQueryPool(commands[0], copy_queries, 0, 4);
+            f.CmdWriteTimestamp2(commands[0], VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, copy_queries, 0);
+        }
         if (queries && renderTimestampBracket) {
             f.CmdResetQueryPool(commands[0],queries,0,2);
             f.CmdWriteTimestamp2(commands[0],VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,queries,0);
@@ -625,6 +641,8 @@ struct NativeOpticalFlow::State {
                 VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT
             );
         }
+        if (copy_queries)
+            f.CmdWriteTimestamp2(commands[0], VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, copy_queries, 1);
         checked(f.EndCommandBuffer(commands[0]), "end native input copy");
     }
     void estimate() {
@@ -670,6 +688,8 @@ struct NativeOpticalFlow::State {
     }
     void finish(const std::array<ImageResource*, 4>& targets, VkImageLayout after) {
         begin(2);
+        if (copy_queries)
+            f.CmdWriteTimestamp2(commands[2], VK_PIPELINE_STAGE_2_COPY_BIT, copy_queries, 2);
         for (unsigned i = 0; i < outputCount(); ++i) {
             const auto& dst = *targets[i];
             image_barrier(
@@ -706,6 +726,8 @@ struct NativeOpticalFlow::State {
         }
         if (queries && renderTimestampBracket)
             f.CmdWriteTimestamp2(commands[2],VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,queries,1);
+        if (copy_queries)
+            f.CmdWriteTimestamp2(commands[2], VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, copy_queries, 3);
         checked(f.EndCommandBuffer(commands[2]), "end native output copy");
     }
     void submit(
@@ -762,6 +784,8 @@ bool NativeOpticalFlow::execute(
         if (s.poisoned || !s.idle)
             throw std::runtime_error("native estimator faulted or busy");
         s.optical_gpu_ms = -1;
+        s.execution_timing = {};
+        s.execution_timing.opticalIncludesCopies = s.renderTimestampBracket;
         s.validate(input, false);
         s.validate(reference, false);
         if (s.bothDirections != bool(backwardMotion) || s.bothDirections != bool(backwardCost))
@@ -790,13 +814,17 @@ bool NativeOpticalFlow::execute(
         // Record all phases before submission so ordinary validation/recording
         // errors cannot leave a semaphore chain half submitted.
         s.poisoned = true;
+        using ProfileClock = std::chrono::steady_clock;
+        auto recordStart = s.c.profile ? ProfileClock::now() : ProfileClock::time_point{};
         s.prepare_inputs(input, reference);
         s.estimate();
         s.finish(outputs, after);
+        if (s.c.profile) s.execution_timing.recordCpuMs = std::chrono::duration<double,std::milli>(ProfileClock::now()-recordStart).count();
         checked(
             s.f.ResetFences(s.c.device, s.fences.size(), s.fences.data()), "reset native fences"
         );
         try {
+            auto submitStart = s.c.profile ? ProfileClock::now() : ProfileClock::time_point{};
             s.submit(0, s.c.render_queue, VK_NULL_HANDLE, 0, s.inputs_ready);
             s.submit(
                 1,
@@ -808,7 +836,18 @@ bool NativeOpticalFlow::execute(
             s.submit(
                 2, s.c.render_queue, s.results_ready, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_NULL_HANDLE
             );
+            auto waitStart = s.c.profile ? ProfileClock::now() : ProfileClock::time_point{};
+            if (s.c.profile) s.execution_timing.submitCpuMs = std::chrono::duration<double,std::milli>(waitStart-submitStart).count();
             s.wait();
+            if (s.c.profile) s.execution_timing.waitCpuMs = std::chrono::duration<double,std::milli>(ProfileClock::now()-waitStart).count();
+            if (s.copy_queries) {
+                std::array<uint64_t,4> ticks{};
+                if (s.f.GetQueryPoolResults(s.c.device,s.copy_queries,0,4,sizeof(ticks),ticks.data(),sizeof(uint64_t),VK_QUERY_RESULT_64_BIT)==VK_SUCCESS) {
+                    uint64_t mask=s.copy_timestamp_bits==64?UINT64_MAX:(uint64_t(1)<<s.copy_timestamp_bits)-1;
+                    s.execution_timing.inputCopyGpuMs=double((ticks[1]-ticks[0])&mask)*s.timestamp_period/1e6;
+                    s.execution_timing.outputCopyGpuMs=double((ticks[3]-ticks[2])&mask)*s.timestamp_period/1e6;
+                }
+            }
             if (s.queries) {
                 std::array<uint64_t, 2> ticks {};
                 if (s.f.GetQueryPoolResults(
@@ -864,5 +903,9 @@ bool NativeOpticalFlow::faulted() const {
 double NativeOpticalFlow::opticalGpuMilliseconds() const {
     std::lock_guard lock(state->mutex);
     return state->optical_gpu_ms;
+}
+NativeOpticalFlow::ExecutionTiming NativeOpticalFlow::executionTiming() const {
+    std::lock_guard lock(state->mutex);
+    return state->execution_timing;
 }
 } // namespace alvr::motion
