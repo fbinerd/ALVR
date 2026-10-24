@@ -324,6 +324,9 @@ Counters Receiver::counters()const{return p->stats;}
 std::optional<Image> Receiver::acquire(Query const& query){
     p->update();p->retire();if(!p->enabled){p->stats.disabled++;return {};}
     p->poll();std::optional<Image> result;
+    // Two history images plus four GPU-pending loans, including across peer
+    // reconnects. Never grow private image retention on a stalled queue.
+    if(p->delivered.size()>=Capacity+2){p->stats.busy++;p->stats.missing++;p->report();return {};}
     for(auto it=p->pending.begin();it!=p->pending.end();){
         auto& in=**it;auto reason=p->match(in.wire.packet,query);
         if(reason!=Impl::Good){
