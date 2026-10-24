@@ -200,6 +200,20 @@ private:
         else if (devProps.properties.vendorID == 0x10de)
             meta.vendor = Vendor::Nvidia;
 
+        // Which driver drives it (for example NVIDIA's proprietary driver or
+        // Mesa's NVK on the same NVIDIA GPU).
+        auto driverProps = physDev
+                               .getProperties2<
+                                   vk::PhysicalDeviceProperties2,
+                                   vk::PhysicalDeviceDriverProperties>()
+                               .get<vk::PhysicalDeviceDriverProperties>();
+        Info(
+            "Vulkan render device: %s, driver %s (%s)",
+            devProps.properties.deviceName.data(),
+            driverProps.driverName.data(),
+            driverProps.driverInfo.data()
+        );
+
         dispatch = { instance, vkGetInstanceProcAddr };
     }
 
