@@ -1,6 +1,8 @@
 use std::fs;
 use std::path::Path;
 use std::process::Command;
+use std::thread;
+use std::time::Duration;
 
 use alvr_common::{
     anyhow::{Result, bail},
@@ -9,10 +11,181 @@ use alvr_common::{
 use sysinfo::Process;
 
 pub fn launch_steamvr_with_steam() {
+    if running_steam_pids().is_empty()
+        && let Some(adapter) = selected_render_gpu_adapter()
+    {
+        let Some(steam_script) = steam_script_path() else {
+            error!("Render GPU is selected, but Steam's steam.sh script could not be located");
+            return;
+        };
+        info!(
+            "Starting Steam and SteamVR on ALVR Render GPU {}",
+            adapter.get_info().name
+        );
+        let mut command = Command::new(steam_script);
+        command.arg("steam://rungameid/250820");
+        apply_render_gpu_environment(&mut command, &adapter);
+        if let Err(e) = super::spawn_and_reap(&mut command) {
+            error!("Failed to launch SteamVR with the selected Render GPU: {e}");
+        }
+        return;
+    }
     if let Err(e) = super::spawn_and_reap(Command::new("steam").args(["steam://rungameid/250820"]))
     {
         error!("Failed to launch SteamVR through Steam: {e}");
     }
+}
+
+// An already-running Steam process cannot have its environment changed. When
+// the user explicitly asks to apply ALVR's Render GPU, shut Steam down cleanly
+// and start a fresh client with the selected GPU environment.
+pub fn restart_steam_with_render_gpu() {
+    let Some(adapter) = selected_render_gpu_adapter() else {
+        error!("Cannot apply the Render GPU: no explicit Vulkan GPU selection matches");
+        return;
+    };
+    let gpu_name = adapter.get_info().name;
+    thread::spawn(move || {
+        info!("Closing Steam so it can restart on ALVR's selected Render GPU ({gpu_name})");
+        if let Err(e) = Command::new("steam").arg("-shutdown").status() {
+            error!("Could not request a graceful Steam shutdown: {e}");
+            return;
+        }
+
+        for _ in 0..60 {
+            if running_steam_pids().is_empty() {
+                break;
+            }
+            thread::sleep(Duration::from_secs(1));
+        }
+        if !running_steam_pids().is_empty() {
+            error!("Steam did not close within 60 seconds; leaving it running");
+            return;
+        }
+
+        let Some(steam_script) = steam_script_path() else {
+            error!(
+                "Could not locate Steam's steam.sh script to restart it with ALVR's GPU environment"
+            );
+            return;
+        };
+        let mut command = Command::new(steam_script);
+        command.arg("steam://rungameid/250820");
+        apply_render_gpu_environment(&mut command, &adapter);
+        if let Err(e) = super::spawn_and_reap(&mut command) {
+            error!("Failed to restart SteamVR with Render GPU {gpu_name}: {e}");
+        } else {
+            info!("Started Steam and SteamVR with ALVR Render GPU {gpu_name}");
+        }
+    });
+}
+
+pub fn render_gpu_conflict_for_confirmation() -> Option<(String, String)> {
+    let adapter = selected_render_gpu_adapter()?;
+    let conflicts = conflicting_steam_overrides(&adapter);
+    if conflicts.is_empty() || running_steam_pids().is_empty() {
+        return None;
+    }
+    Some((adapter.get_info().name, conflicts.join(" ")))
+}
+
+fn selected_render_gpu_adapter() -> Option<wgpu::Adapter> {
+    let selector = crate::data_sources::get_read_only_local_session()
+        .settings()
+        .video
+        .encoder_config
+        .linux_gpu
+        .render_gpu
+        .clone()
+        .filter(|selector| !selector.trim().is_empty())?;
+    let wanted = selector.trim().to_lowercase();
+    wgpu::Instance::new(&wgpu::InstanceDescriptor {
+        backends: wgpu::Backends::VULKAN,
+        ..Default::default()
+    })
+    .enumerate_adapters(wgpu::Backends::VULKAN)
+    .into_iter()
+    .filter(|adapter| {
+        let device_type = adapter.get_info().device_type;
+        device_type == wgpu::DeviceType::DiscreteGpu
+            || device_type == wgpu::DeviceType::IntegratedGpu
+    })
+    .enumerate()
+    .find(|(index, adapter)| {
+        let info = adapter.get_info();
+        wanted == index.to_string() || info.name.to_lowercase().contains(&wanted)
+    })
+    .map(|(_, adapter)| adapter)
+}
+
+fn running_steam_pids() -> Vec<u32> {
+    fs::read_dir("/proc")
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| {
+            (fs::read_to_string(entry.path().join("comm")).ok()?.trim() == "steam")
+                .then(|| entry.file_name().to_string_lossy().parse().ok())
+                .flatten()
+        })
+        .collect()
+}
+
+fn steam_script_path() -> Option<std::path::PathBuf> {
+    let home = std::env::var_os("HOME")?;
+    [".steam/root/steam.sh", ".local/share/Steam/steam.sh"]
+        .iter()
+        .map(|relative| std::path::PathBuf::from(&home).join(relative))
+        .find(|path| path.is_file())
+}
+
+fn apply_render_gpu_environment(command: &mut Command, adapter: &wgpu::Adapter) {
+    for name in GPU_OVERRIDE_VARS {
+        command.env_remove(name);
+    }
+    let info = adapter.get_info();
+    if info.vendor == 0x10de {
+        command.env("__GLX_VENDOR_LIBRARY_NAME", "nvidia");
+        command.env("__NV_PRIME_RENDER_OFFLOAD", "1");
+        let base = "/usr/share/vulkan/icd.d/nvidia_icd";
+        let path = [format!("{base}.json"), format!("{base}.x86_64.json")]
+            .into_iter()
+            .find(|path| Path::new(path).is_file());
+        if let Some(path) = path {
+            command.env("VK_DRIVER_FILES", path);
+        } else {
+            command.env("__VK_LAYER_NV_optimus", "NVIDIA_only");
+        }
+    } else {
+        let ids = format!("{:04x}:{:04x}", info.vendor, info.device);
+        command.env("DRI_PRIME", &ids);
+        command.env("MESA_VK_DEVICE_SELECT", format!("{ids}!"));
+        command.env("__GLX_VENDOR_LIBRARY_NAME", "mesa");
+        let mesa_egl = "/usr/share/glvnd/egl_vendor.d/50_mesa.json";
+        if Path::new(mesa_egl).is_file() {
+            command.env("__EGL_VENDOR_LIBRARY_FILENAMES", mesa_egl);
+        }
+        let icd_names: &[&str] = match info.vendor {
+            0x8086 => &["intel_icd.json", "intel_icd.x86_64.json"],
+            0x1002 => &["radeon_icd.json", "radeon_icd.x86_64.json"],
+            _ => &[],
+        };
+        if let Some(path) = icd_names
+            .iter()
+            .map(|name| format!("/usr/share/vulkan/icd.d/{name}"))
+            .find(|path| Path::new(path).is_file())
+        {
+            command.env("VK_DRIVER_FILES", path);
+        }
+    }
+}
+
+pub fn apply_selected_render_gpu_environment(command: &mut Command) -> bool {
+    let Some(adapter) = selected_render_gpu_adapter() else {
+        return false;
+    };
+    apply_render_gpu_environment(command, &adapter);
+    true
 }
 
 pub fn terminate_process(process: &Process) {

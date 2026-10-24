@@ -1,5 +1,5 @@
 #[cfg(target_os = "linux")]
-mod linux_steamvr;
+pub(crate) mod linux_steamvr;
 #[cfg(windows)]
 mod windows_steamvr;
 
@@ -165,6 +165,14 @@ impl Launcher {
             return;
         }
 
+        #[cfg(target_os = "linux")]
+        if let Some((gpu, variables)) = linux_steamvr::render_gpu_conflict_for_confirmation() {
+            warn!(
+                "Not launching SteamVR: Steam GPU environment conflicts with ALVR Render GPU {gpu} ({variables}). Use the dashboard Launch/Restart button to review the Steam restart."
+            );
+            return;
+        }
+
         debug!("SteamVR is dead. Launching...");
 
         if data_sources::get_read_only_local_session()
@@ -178,7 +186,10 @@ impl Launcher {
             if start_script.exists() {
                 debug!("Running VR server start script: {}", start_script.display());
 
-                if let Err(e) = spawn_and_reap(&mut Command::new(&start_script)) {
+                let mut command = Command::new(&start_script);
+                #[cfg(target_os = "linux")]
+                linux_steamvr::apply_selected_render_gpu_environment(&mut command);
+                if let Err(e) = spawn_and_reap(&mut command) {
                     error!("Failed to run VR server start script: {e}");
                 }
             } else if let Ok(steamvr_bin_dir) =
@@ -192,7 +203,10 @@ impl Launcher {
 
                 debug!("Launching SteamVR from path: {}", steamvr_path.display());
 
-                if let Err(e) = spawn_and_reap(&mut Command::new(&steamvr_path)) {
+                let mut command = Command::new(&steamvr_path);
+                #[cfg(target_os = "linux")]
+                linux_steamvr::apply_selected_render_gpu_environment(&mut command);
+                if let Err(e) = spawn_and_reap(&mut command) {
                     error!(
                         "Failed to run SteamVR from automatically detected path {} with error: {e}",
                         steamvr_path.display()
