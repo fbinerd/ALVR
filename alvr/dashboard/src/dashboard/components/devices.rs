@@ -21,6 +21,7 @@ pub struct DevicesTab {
     trusted_devices: Option<Vec<(String, ClientConnectionConfig)>>,
     edit_popup_state: Option<EditPopupState>,
     adb_download_progress: Option<f32>,
+    launch_steamvr_requested: bool,
 }
 
 impl DevicesTab {
@@ -30,6 +31,7 @@ impl DevicesTab {
             trusted_devices: None,
             edit_popup_state: None,
             adb_download_progress: None,
+            launch_steamvr_requested: false,
         }
     }
 
@@ -47,6 +49,10 @@ impl DevicesTab {
 
     pub fn update_adb_download_progress(&mut self, progress: f32) {
         self.adb_download_progress = Some(progress);
+    }
+
+    pub fn take_launch_steamvr_request(&mut self) -> bool {
+        std::mem::take(&mut self.launch_steamvr_requested)
     }
 
     pub fn ui(&mut self, ui: &mut Ui, connected_to_server: bool) -> Vec<ServerRequest> {
@@ -77,7 +83,7 @@ impl DevicesTab {
                         #[cfg(not(target_arch = "wasm32"))]
                         ui.with_layout(Layout::right_to_left(eframe::emath::Align::Center), |ui| {
                             if ui.button("Launch SteamVR").clicked() {
-                                crate::steamvr_launcher::LAUNCHER.lock().launch_steamvr();
+                                self.launch_steamvr_requested = true;
                             }
                         });
                     })
