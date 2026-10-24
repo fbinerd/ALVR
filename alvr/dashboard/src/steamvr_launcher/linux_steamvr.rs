@@ -125,6 +125,74 @@ pub fn linux_hardware_checks() {
     linux_encoder_checks(&device_infos);
 }
 
+// Variables that restrict which GPU Vulkan / OpenGL programs use. Steam
+// passes them on to SteamVR and the games it starts.
+const GPU_OVERRIDE_VARS: &[&str] = &[
+    "VK_DRIVER_FILES",
+    "VK_ICD_FILENAMES",
+    "VK_ADD_DRIVER_FILES",
+    "VK_LOADER_DRIVERS_SELECT",
+    "VK_LOADER_DRIVERS_DISABLE",
+    "VK_LOADER_LAYERS_DISABLE",
+    "__VK_LAYER_NV_optimus",
+    "MESA_VK_DEVICE_SELECT",
+    "DRI_PRIME",
+    "__NV_PRIME_RENDER_OFFLOAD",
+    "__GLX_VENDOR_LIBRARY_NAME",
+    "__EGL_VENDOR_LIBRARY_FILENAMES",
+];
+
+// GPU-restricting variables in the environment of the running Steam client
+// (the first process named "steam"), as (name, value).
+fn steam_gpu_override_env() -> Vec<(String, String)> {
+    let Ok(entries) = fs::read_dir("/proc") else {
+        return vec![];
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let is_steam = fs::read_to_string(path.join("comm"))
+            .map(|comm| comm.trim() == "steam")
+            .unwrap_or(false);
+        if !is_steam {
+            continue;
+        }
+        let Ok(environ) = fs::read(path.join("environ")) else {
+            continue;
+        };
+        return environ
+            .split(|byte| *byte == 0)
+            .filter_map(|pair| {
+                let pair = String::from_utf8_lossy(pair);
+                let (name, value) = pair.split_once('=')?;
+                GPU_OVERRIDE_VARS
+                    .contains(&name)
+                    .then(|| (name.to_string(), value.to_string()))
+            })
+            .collect();
+    }
+    vec![]
+}
+
+// Steam variables that force a GPU other than `adapter` on SteamVR.
+fn conflicting_steam_overrides(adapter: &wgpu::Adapter) -> Vec<String> {
+    let nvidia = adapter.get_info().vendor == 0x10de;
+    steam_gpu_override_env()
+        .into_iter()
+        .filter(|(name, value)| {
+            let value_lower = value.to_lowercase();
+            match name.as_str() {
+                "VK_DRIVER_FILES" | "VK_ICD_FILENAMES" => value_lower.contains("nvidia") != nvidia,
+                "__VK_LAYER_NV_optimus" => value == "NVIDIA_only" && !nvidia,
+                "__NV_PRIME_RENDER_OFFLOAD" => value == "1" && !nvidia,
+                "__GLX_VENDOR_LIBRARY_NAME" => (value_lower == "nvidia") != nvidia,
+                "MESA_VK_DEVICE_SELECT" | "DRI_PRIME" => nvidia,
+                _ => false,
+            }
+        })
+        .map(|(name, value)| format!("{name}={value}"))
+        .collect()
+}
+
 // Launch options that make SteamVR / a game render on `adapter`.
 fn render_gpu_launch_options(adapter: &wgpu::Adapter) -> String {
     let info = adapter.get_info();
@@ -230,7 +298,28 @@ fn linux_gpu_checks(
     let game_opts = "And this similar line to the launch options of ALL games that you're trying to launch from steam:";
 
     let mut vrmonitor_path_written = false;
+    let steam_overrides = steam_gpu_override_env();
+    if !steam_overrides.is_empty() {
+        info!(
+            "Steam's GPU-restricting environment (inherited by SteamVR and games): {}",
+            steam_overrides
+                .iter()
+                .map(|(name, value)| format!("{name}={value}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+    }
     if let Some(adapter) = selected_adapter {
+        let conflicts = conflicting_steam_overrides(adapter);
+        if !conflicts.is_empty() {
+            warn!(
+                "Render GPU is {}, but Steam was started with {}: SteamVR and games inherit \
+                this and will not render on the chosen GPU. Start Steam without these variables \
+                (for example not through a PRIME-offload wrapper), or choose the GPU they select.",
+                adapter.get_info().name,
+                conflicts.join(" ")
+            );
+        }
         let options = render_gpu_launch_options(adapter);
         info!(
             "Render GPU setting: {} ({:04x}:{:04x})",
