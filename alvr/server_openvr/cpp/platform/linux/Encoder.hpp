@@ -121,6 +121,163 @@ class Encoder {
     // texture or the encoder goes.
     std::map<u64, vk::Semaphore> timelines;
 
+    // Resolved in createImages, used by initEncoding.
+    EncoderTarget target;
+
+    // DRM render node (/dev/dri/renderD*) of a Vulkan device, or "" if the
+    // device has none (e.g. llvmpipe) or VK_EXT_physical_device_drm is absent.
+    static std::string renderNodeOf(vk::PhysicalDevice physDev) {
+        VkPhysicalDeviceDrmPropertiesEXT drmProps = {};
+        drmProps.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRM_PROPERTIES_EXT;
+        VkPhysicalDeviceProperties2 deviceProps = {};
+        deviceProps.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+        deviceProps.pNext = &drmProps;
+        vkGetPhysicalDeviceProperties2(physDev, &deviceProps);
+        if (!drmProps.hasRender && !drmProps.hasPrimary) {
+            return "";
+        }
+        dev_t primaryDev = makedev(drmProps.primaryMajor, drmProps.primaryMinor);
+        dev_t renderDev = makedev(drmProps.renderMajor, drmProps.renderMinor);
+        for (int i = 128; i < 136; ++i) {
+            auto path = "/dev/dri/renderD" + std::to_string(i);
+            struct stat s = {};
+            if (stat(path.c_str(), &s) != 0) {
+                continue;
+            }
+            if (s.st_rdev == renderDev || s.st_rdev == primaryDev) {
+                return path;
+            }
+        }
+        return "";
+    }
+
+    static Vendor vendorOfId(u32 vendorId) {
+        switch (vendorId) {
+        case 0x10de:
+            return Vendor::Nvidia;
+        case 0x1002:
+            return Vendor::Amd;
+        default:
+            return Vendor::Intel;
+        }
+    }
+
+    // PCI vendor of a DRM render node, from sysfs (0 if unknown).
+    static u32 vendorIdOfNode(std::string const& path) {
+        auto slash = path.rfind('/');
+        std::string node = slash == std::string::npos ? path : path.substr(slash + 1);
+        std::ifstream file("/sys/class/drm/" + node + "/device/vendor");
+        u32 vendorId = 0;
+        file >> std::hex >> vendorId;
+        return vendorId;
+    }
+
+    // PCI vendor a GPU selector names ("Intel(R) Graphics", "NVIDIA GeForce
+    // RTX 3060", "AMD Radeon ..."), or 0.
+    static u32 vendorIdOfSelector(std::string selector) {
+        std::transform(selector.begin(), selector.end(), selector.begin(), ::tolower);
+        if (selector.find("intel") != std::string::npos) {
+            return 0x8086;
+        }
+        if (selector.find("nvidia") != std::string::npos
+            || selector.find("geforce") != std::string::npos) {
+            return 0x10de;
+        }
+        if (selector.find("amd") != std::string::npos
+            || selector.find("radeon") != std::string::npos) {
+            return 0x1002;
+        }
+        return 0;
+    }
+
+    // First DRM render node whose PCI vendor is vendorId, preferring one
+    // other than `avoid`, or "".
+    static std::string renderNodeOfVendor(u32 vendorId, std::string const& avoid) {
+        std::string fallback;
+        for (int i = 128; i < 136; ++i) {
+            auto path = "/dev/dri/renderD" + std::to_string(i);
+            if (access(path.c_str(), F_OK) != 0 || vendorIdOfNode(path) != vendorId) {
+                continue;
+            }
+            if (path != avoid) {
+                return path;
+            }
+            fallback = path;
+        }
+        return fallback;
+    }
+
+    // Encoder GPU and technology from the "Encoder GPU" / "Encoder
+    // technology" settings (video.encoder_config.linux_gpu). With nothing
+    // set this is ALVR's default: the render GPU's node, NVENC on NVIDIA,
+    // VAAPI otherwise.
+    void resolveTarget() {
+        auto const* settings = Settings_Instance();
+        EncoderTarget resolved;
+
+        std::string renderNode = renderNodeOf(vkCtx.physDev);
+        resolved.devicePath = renderNode.empty() ? "/dev/dri/renderD128" : renderNode;
+        resolved.vendor = vkCtx.meta.vendor;
+
+        std::string selector = settings->m_encoderGpu;
+        if (!selector.empty()) {
+            if (selector.rfind("/dev/", 0) == 0) {
+                resolved.devicePath = selector;
+                u32 vendorId = vendorIdOfNode(selector);
+                if (vendorId != 0) {
+                    resolved.vendor = vendorOfId(vendorId);
+                }
+            } else {
+                auto devs = vkCtx.instance.enumeratePhysicalDevices();
+                auto index = VkContext::findPhysicalDevice(devs, selector);
+                std::string node = index ? renderNodeOf(devs[*index]) : "";
+                if (!node.empty()) {
+                    resolved.devicePath = node;
+                    resolved.vendor = vendorOfId(devs[*index].getProperties().vendorID);
+                } else if (u32 vendorId = vendorIdOfSelector(selector); vendorId != 0
+                           && !(node = renderNodeOfVendor(vendorId, renderNode)).empty()) {
+                    // SteamVR's environment may hide that GPU from Vulkan
+                    // (e.g. VK_DRIVER_FILES limited to NVIDIA's ICD). VAAPI only
+                    // needs its DRM render node, found here by PCI vendor.
+                    resolved.devicePath = node;
+                    resolved.vendor = vendorOfId(vendorId);
+                    Info(
+                        "Encoder GPU \"%s\" is not visible to Vulkan here; using DRM node %s "
+                        "by vendor",
+                        selector.c_str(),
+                        node.c_str()
+                    );
+                } else {
+                    Warn(
+                        "Encoder GPU \"%s\" matches no GPU with a DRM render node; using the "
+                        "render GPU",
+                        selector.c_str()
+                    );
+                }
+            }
+            resolved.crossDevice = resolved.devicePath != renderNode;
+        }
+
+        auto backend = static_cast<EncoderBackend>(settings->m_encoderBackend);
+        if (settings->m_forceSwEncoding) {
+            backend = EncoderBackend::Software;
+        }
+        if (backend == EncoderBackend::Automatic) {
+            backend
+                = resolved.vendor == Vendor::Nvidia ? EncoderBackend::Nvenc : EncoderBackend::Vaapi;
+        }
+        resolved.backend = backend;
+
+        Info(
+            "Encoder: %s on %s%s (render GPU node %s)",
+            encoderBackendName(resolved.backend),
+            resolved.devicePath.c_str(),
+            resolved.crossDevice ? ", a different GPU (linear dma-buf hand-over)" : "",
+            renderNode.empty() ? "unknown" : renderNode.c_str()
+        );
+        target = resolved;
+    }
+
 public:
     // TODO: How are we supposed to match the physical device with direct mode?
     Encoder()
@@ -163,45 +320,18 @@ public:
             warpCapableChain = settings->m_enableFoveatedEncoding;
         }
 
+        resolveTarget();
+        rendererCI.outputHandle = target.backend == EncoderBackend::Nvenc
+            ? render::HandleType::OpaqueFd
+            : render::HandleType::DmaBuf;
+        rendererCI.linearOutput = target.crossDevice;
+
         outExtent = rendererCI.outputExtent;
         renderer.emplace(vkCtx, rendererCI, pipeCIs);
     }
 
     void initEncoding() {
-        auto const& settings = Settings_Instance();
-
-        VkPhysicalDeviceDrmPropertiesEXT drmProps = {};
-        drmProps.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRM_PROPERTIES_EXT;
-
-        VkPhysicalDeviceProperties2 deviceProps = {};
-        deviceProps.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
-        deviceProps.pNext = &drmProps;
-        vkGetPhysicalDeviceProperties2(vkCtx.physDev, &deviceProps);
-
-        std::string devicePath;
-        for (int i = 128; i < 136; ++i) {
-            auto path = "/dev/dri/renderD" + std::to_string(i);
-            int fd = open(path.c_str(), O_RDONLY);
-            if (fd == -1) {
-                continue;
-            }
-            struct stat s = {};
-            int ret = fstat(fd, &s);
-            close(fd);
-            if (ret != 0) {
-                continue;
-            }
-            dev_t primaryDev = makedev(drmProps.primaryMajor, drmProps.primaryMinor);
-            dev_t renderDev = makedev(drmProps.renderMajor, drmProps.renderMinor);
-            if (primaryDev == s.st_rdev || renderDev == s.st_rdev) {
-                devicePath = path;
-                break;
-            }
-        }
-        if (devicePath.empty()) {
-            devicePath = "/dev/dri/renderD128";
-        }
-        Info("Using device path %s", devicePath.c_str());
+        Info("Using device path %s", target.devicePath.c_str());
 
         // av_log_set_level(AV_LOG_DEBUG);
 
@@ -213,8 +343,7 @@ public:
             vkCtx, out.image.image, out.imageCI, out.size, out.image.memory, out.drm
         );
 
-        encoder
-            = EncodePipeline::Create(vkCtx, devicePath, *frame, outExtent.width, outExtent.height);
+        encoder = EncodePipeline::Create(vkCtx, target, *frame, outExtent.width, outExtent.height);
         if (!encoder) {
             throw std::runtime_error("no usable encoder for the current settings");
         }
