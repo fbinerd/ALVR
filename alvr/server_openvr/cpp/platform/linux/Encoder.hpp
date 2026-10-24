@@ -12,6 +12,7 @@
 #include "Renderer.hpp"
 #include "motion/NativeMotion.hpp"
 #include "depth/ProductionDepthSource.hpp"
+#include "motion/StereoDepth.hpp"
 #include <optional>
 #include "motion/NativeMotionSwitch.hpp"
 
@@ -117,6 +118,77 @@ private:
     std::unique_ptr<motion::NativeMotion> nativeMotion;
     DepthSource depthSource;
     std::unique_ptr<depth::ProductionDepthSource> gameDepth;
+    // Stereo depth for the positional correction, computed from each real
+    // picture's two eyes. Experimental: on while ~/.config/alvr/diag_stereo_depth
+    // exists (checked about once a second).
+    std::unique_ptr<motion::StereoDepth> stereoDepth;
+    motion::StereoParams stereoParams;
+    bool stereoViews = false, stereoSwitch = false, stereoFailed = false;
+    std::chrono::steady_clock::time_point stereoChecked {};
+    uint64_t stereoFrames = 0;
+    double stereoMsSum = 0, stereoMsMax = 0;
+
+    bool stereoPending = false;
+
+    // Re-reads the switch about once a second; true when stereo depth should run.
+    bool stereoWanted() {
+        auto now = std::chrono::steady_clock::now();
+        if (now - stereoChecked > std::chrono::seconds(1)) {
+            stereoChecked = now;
+            bool on = std::ifstream(std::string(std::getenv("HOME") ? std::getenv("HOME") : "")
+                                    + "/.config/alvr/diag_stereo_depth")
+                          .good();
+            if (on != stereoSwitch)
+                Info("Stereo depth for positional correction %s", on ? "on" : "off");
+            stereoSwitch = on;
+        }
+        return stereoSwitch && stereoViews && !stereoFailed && nativeMotion;
+    }
+
+    // After the real picture was sent: estimate its stereo depth (the output
+    // still holds it until the next render) and attach it to the captured
+    // picture, before prepare() computes the flow.
+    void attachStereoDepth(render::Output const& output) {
+        if (!stereoPending)
+            return;
+        stereoPending = false;
+        if (auto depth = stereoDepthFor(output))
+            nativeMotion->attachDepth(*depth);
+    }
+
+    std::optional<motion::NativeMotion::Depth> stereoDepthFor(render::Output const& output) {
+        if (!stereoWanted())
+            return std::nullopt;
+        try {
+            if (!stereoDepth)
+                // A 768 luma cap (even flow grid) keeps near objects within
+                // the flow's reach: offline, near box 90% valid at 0.37%
+                // error (640: 73%, 0.44%); reduced output costs ~2.7 ms at
+                // 2048x2144 per eye on an idle RTX 3060 (640: ~2.5 ms).
+                stereoDepth = std::make_unique<motion::StereoDepth>(
+                    vkCtx, outExtent, static_cast<vk::Format>(output.imageCI.format), 768, true,
+                    // Coarse estimate for near content (a hand at 0.2-0.4 m):
+                    // 768 alone returned wrong distances there.
+                    320
+                );
+            motion::StereoDepthTiming timing;
+            stereoDepth->estimate(output.image.image, output.image.view, output.image.layout,
+                {}, {}, vk::ImageLayout::eGeneral, stereoParams, &timing);
+            stereoMsSum += timing.totalWallMs;
+            stereoMsMax = std::max(stereoMsMax, timing.totalWallMs);
+            if (++stereoFrames % 360 == 0) {
+                Info("Stereo depth: %llu pictures, mean %.2f ms, max %.2f ms (last 360)",
+                    static_cast<unsigned long long>(stereoFrames), stereoMsSum / 360, stereoMsMax);
+                stereoMsSum = stereoMsMax = 0;
+            }
+            return motion::NativeMotion::Depth { stereoDepth->internalDepthImage(),
+                vk::ImageLayout::eGeneral, stereoDepth->depthExtent() };
+        } catch (std::exception const& e) {
+            Warn("Stereo depth unavailable: %s; positional correction off", e.what());
+            stereoFailed = true;
+            return std::nullopt;
+        }
+    }
     bool gapFillEagerFlow = false;
 
     std::unique_ptr<EncodePipeline> encoder;
@@ -524,6 +596,11 @@ public:
     // (same FOV and eye layout). Its image must stay valid and unwritten
     // until the next present() call returns. Set it from the present() thread.
     void setDepthSource(DepthSource source) { depthSource = std::move(source); }
+    // Eye FOV tangents and separation for the stereo depth (see stereoDepthFor).
+    void setStereoViews(motion::StereoParams const& params) {
+        stereoParams = params;
+        stereoViews = true;
+    }
 
     // Present-worker only, under the encoder lock. No synthesis policy changes.
     void prepareGameDepth(depth::ComposedDepthPicture const& picture) {
@@ -579,6 +656,9 @@ public:
             if (nativeMotion) {
                 output = renderer.get().getOutput();
                 auto depth = depthSource ? depthSource(targetTimestampNs) : std::nullopt;
+                // Stereo depth is estimated after the picture is sent (off
+                // the latency path) and attached then; see attachStereoDepth.
+                stereoPending = !depth && stereoWanted();
                 nativeMotion->capture(
                     output.image.image, output.image.layout, targetTimestampNs, presentClockNs, historyRotation,
                     depth ? &*depth : nullptr
@@ -589,10 +669,13 @@ public:
 
         // Interpolation holds the real picture: it is captured now and sent
         // later with sendNewestReal(), after the synthesized one.
-        if (!send)
+        if (!send) {
+            attachStereoDepth(output);
             return;
+        }
 
         encodeAndSend(targetTimestampNs);
+        attachStereoDepth(output);
 
         // The real picture is on its way: compute the next prediction's flow
         // now, so the predicted picture only waits for the warp.

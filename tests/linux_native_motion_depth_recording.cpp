@@ -5,6 +5,7 @@
 #undef main
 #include "native_motion_recording_metrics.hpp"
 #include "platform/linux/depth/DepthPacket.h"
+#include "platform/linux/motion/StereoDepth.hpp"
 #include <deque>
 #include <numeric>
 
@@ -160,25 +161,62 @@ int main(int argc,char** argv) {
     std::ofstream csv(output/"metrics.csv"),summary(output/"summary.csv");
     csv<<"variant,index,frame,display_ns,mae,psnr,edge_band_mae,edge_pixels,shadow_fp,shadow_eligible,prepare_wall_ms,flow_wall_ms,warp_wall_ms,optical_gpu_ms,warp_gpu_ms\n";
     summary<<"variant,targets,mae,psnr,edge_band_mae,edge_pixels,shadow_fp,shadow_eligible,shadow_percent\n";
-    for(unsigned variant=0;variant<3;variant++){
-        std::string name=variant==0?"no_depth":variant==1?"exact_depth":"exact_depth_translation";
+    // DEPTH_STEREO=1 adds a fourth variant: depth estimated from the two
+    // colour eyes (StereoDepth) instead of the recorded depth, with translation.
+    // Needs real stereo views (eyes apart by the IPD) and depth at colour extent.
+    bool stereo=std::getenv("DEPTH_STEREO")!=nullptr;
+    std::unique_ptr<alvr::motion::StereoDepth> estimator;
+    alvr::motion::StereoParams stereoParams;
+    if(stereo){
+        if(ds.width()!=size.width()||ds.height!=size.height)throw std::runtime_error("Stereo variant needs depth at the colour extent");
+        auto const& p=frames.front().packet;double ipd=0;
+        for(unsigned i=0;i<3;i++){double d=p.eyes[1].pose.position[i]-p.eyes[0].pose.position[i];ipd+=d*d;}
+        stereoParams.ipd=float(std::sqrt(ipd));
+        if(stereoParams.ipd<.01f)throw std::runtime_error("Stereo variant needs real stereo views (identical eye poses)");
+        for(unsigned eye=0;eye<2;eye++){
+            auto& t=eye?stereoParams.rightTans:stereoParams.leftTans;
+            t={float(std::tan(p.eyes[eye].fov[0])),float(std::tan(p.eyes[eye].fov[1])),float(std::tan(p.eyes[eye].fov[2])),float(std::tan(p.eyes[eye].fov[3]))};
+        }
+        estimator=std::make_unique<alvr::motion::StereoDepth>(ctx,vk::Extent2D{size.width(),size.height},vk::Format::eR8G8B8A8Unorm,
+            std::getenv("STEREO_LUMA_MAX")?uint32_t(std::stoul(std::getenv("STEREO_LUMA_MAX"))):0u,
+            std::getenv("STEREO_REDUCED")!=nullptr,
+            std::getenv("STEREO_COARSE")?uint32_t(std::stoul(std::getenv("STEREO_COARSE"))):0u);
+    }
+    for(unsigned variant=0;variant<(stereo?4u:3u);variant++){
+        // DEPTH_VARIANTS=2,3 runs only those variants (quick A/B iterations;
+        // the no-depth baseline does not change with depth-path edits).
+        if(auto only=std::getenv("DEPTH_VARIANTS");only&&(","+std::string(only)+",").find(","+std::to_string(variant)+",")==std::string::npos)continue;
+        std::string name=variant==0?"no_depth":variant==1?"exact_depth":variant==2?"exact_depth_translation":"stereo_depth_translation";
         auto directory=output/name;std::filesystem::create_directories(directory);
         Motion motion(ctx,{size.width(),size.height},vk::Format::eR8G8B8A8Unorm);motion.setGapFill(true);motion.setStableResidual(true);
+#ifdef ALVR_NATIVE_MOTION_TESTING
+        // DEPTH_DIAGNOSTIC=1 paints the depth decision (red covered, green filled).
+        if(variant&&std::getenv("DEPTH_DIAGNOSTIC"))motion.setDiagnosticFlags(2);
+        // DEPTH_OCCLUSION=1 enables the experimental occlusion handling.
+        motion.setDepthOcclusion(std::getenv("DEPTH_OCCLUSION")!=nullptr);
+        // DEPTH_FLAGS=n sets extra warp flags on depth variants (experiments).
+        if(variant&&std::getenv("DEPTH_FLAGS"))motion.setDiagnosticFlags(uint32_t(std::stoul(std::getenv("DEPTH_FLAGS"))));
+#endif
         size_t latest=0;unsigned targets=0;double prepareMs=0,worst=-1,worstEdge=-1;Totals total;
         for(size_t i=0;i<frames.size();i++){
             auto const& f=frames[i];uint64_t clock=f.packet.display_time_ns;
             if(i%2==0){
-                motion.waitIdle();gpu.transfer(&f.colour);if(variant)depth.transfer(&f.depth);
-                auto transform=between(frames[latest].packet,f.packet,variant==2);
+                motion.waitIdle();gpu.transfer(&f.colour);
+                if(variant==3){estimator->estimate(gpu.image,gpu.view,gpu.layout,{},{},vk::ImageLayout::eGeneral,stereoParams);}
+                else if(variant)depth.transfer(&f.depth);
+                auto transform=between(frames[latest].packet,f.packet,variant>=2);
                 Motion::Depth input{depth.image,depth.layout,{ds.width(),ds.height}};
-                motion.capture(gpu.image,gpu.layout,clock,clock,&transform,variant?&input:nullptr);
+                Motion::Depth stereoInput{variant==3?estimator->internalDepthImage():vk::Image{},vk::ImageLayout::eGeneral,variant==3?estimator->depthExtent():vk::Extent2D{}};
+                motion.capture(gpu.image,gpu.layout,clock,clock,&transform,variant==3?&stereoInput:variant?&input:nullptr);
                 auto start=std::chrono::steady_clock::now();motion.prepare();prepareMs=elapsed(start);latest=i;
             }else if(i>=7){
-                auto transform=between(frames[latest].packet,f.packet,variant==2);
+                auto transform=between(frames[latest].packet,f.packet,variant>=2);
                 if(!motion.predict(gpu.image,gpu.view,gpu.layout,clock,{},clock,&transform))throw std::runtime_error("Production gap-fill rejected target");
                 auto image=gpu.transfer(nullptr);auto timing=motion.lastPredictionTiming();auto mask=masks(f,frames[latest],size,ds);auto s=score(image,f,mask);total.add(s);targets++;
                 csv<<std::setprecision(12)<<name<<','<<i<<','<<f.packet.frame_id<<','<<clock<<','<<s.mae()<<','<<s.psnr()<<','<<s.bandMae()<<','<<s.bandPixels<<','<<s.shadowPixels<<','<<s.shadowEligible<<','<<prepareMs<<','<<timing.flowMs<<','<<timing.warpMs<<','<<timing.opticalGpuMs<<','<<timing.warpGpuMs<<'\n';
                 auto save=[&](std::string prefix){writePpm(directory/(prefix+"_prediction.ppm"),image,size);writePpm(directory/(prefix+"_truth.ppm"),f.colour,size);Pixels diff=image;for(size_t j=0;j<diff.size();j++)diff[j]=j%4==3?255:uint8_t(std::min(255,4*std::abs(int(image[j])-int(f.colour[j]))));writePpm(directory/(prefix+"_diff_x4.ppm"),diff,size);std::ofstream(directory/(prefix+"_frame.txt"))<<f.packet.frame_id<<'\n';};
+                // DEPTH_DUMP_INDEX=n saves that target for every variant (A/B by eye).
+                if(std::getenv("DEPTH_DUMP_INDEX")&&int(i)==std::atoi(std::getenv("DEPTH_DUMP_INDEX")))save("dump");
                 if(s.mae()>worst){worst=s.mae();save("worst_overall");}if(s.bandMae()>worstEdge){worstEdge=s.bandMae();save("worst_edge");}
             }
         }

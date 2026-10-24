@@ -4,7 +4,7 @@ use std::{env, path::PathBuf};
 // binary is stored in the checkout; Windows/macOS do not build this path.
 fn compile_native_motion_shaders(out_dir: &std::path::Path) {
     compile_shader_header(out_dir, "NativeMotionShaders.hpp", &[("luma", "motion_luma.comp"), ("warp", "motion_warp.comp")]);
-    compile_shader_header(out_dir, "StereoDepthShaders.hpp", &[("stereo_luma", "stereo_luma.comp"), ("stereo_depth", "stereo_depth.comp"), ("stereo_fill", "stereo_fill.comp")]);
+    compile_shader_header(out_dir, "StereoDepthShaders.hpp", &[("stereo_luma", "stereo_luma.comp"), ("stereo_depth", "stereo_depth.comp"), ("stereo_fill", "stereo_fill.comp"), ("stereo_merge", "stereo_merge.comp")]);
 }
 
 fn compile_shader_header(out_dir: &std::path::Path, header_name: &str, shaders: &[(&str, &str)]) {

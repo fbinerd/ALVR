@@ -26,7 +26,7 @@ for name in ('luma', 'warp'):
 (output / 'NativeMotionShaders.hpp').write_text(header + '}\n')
 PY
 # The depth check can estimate depth from the stereo pair.
-for shader in stereo_luma stereo_depth stereo_fill; do
+for shader in stereo_luma stereo_depth stereo_fill stereo_merge; do
     "$shader_compiler" -V --target-env vulkan1.2 \
         -o "$motion_output/$shader.spv" "$native_source/shader/$shader.comp"
 done
@@ -34,7 +34,7 @@ python3 - "$motion_output" <<'PY'
 import pathlib, struct, sys
 output = pathlib.Path(sys.argv[1])
 header = '#pragma once\n#include <cstdint>\nnamespace alvr::motion::shader {\n'
-for name in ('stereo_luma', 'stereo_depth', 'stereo_fill'):
+for name in ('stereo_luma', 'stereo_depth', 'stereo_fill', 'stereo_merge'):
     words = struct.unpack('<' + 'I' * ((output / f'{name}.spv').stat().st_size // 4), (output / f'{name}.spv').read_bytes())
     header += f'inline constexpr uint32_t {name}[]={{' + ','.join(f'0x{w:08x}' for w in words) + '};\n'
 (output / 'StereoDepthShaders.hpp').write_text(header + '}\n')
@@ -72,7 +72,8 @@ git -C "$checkout" status --short --untracked-files=no > "$motion_output/source-
 printf 'Built checks in %s; no tests executed.\n' "$motion_output"
 # Independent canonical-depth recording target; existing targets are unchanged.
 "$compiler" -std=c++20 -O2 -Wall -Wextra -Wno-missing-field-initializers -Wno-unused-parameter \
-    "${includes[@]}" "$checkout/tests/linux_native_motion_depth_recording.cpp" \
+    "${includes[@]}" "$checkout/tests/linux_native_motion_depth_recording.cpp" -DALVR_NATIVE_MOTION_TESTING \
     "$native_source/motion/NativeMotion.cpp" "$native_source/motion/NativeOpticalFlow.cpp" \
+    "$native_source/motion/StereoDepth.cpp" \
     -Wl,-l:libvulkan.so.1 -pthread -o "$motion_output/depth_recording_test"
 (cd "$motion_output" && sha256sum depth_recording_test >> checksums.sha256)

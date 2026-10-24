@@ -115,6 +115,10 @@ void fitTemporalTile(uvec2 base,bool right,bool fullTile) {
     barrier();
 }
 bool hasDepth() { return (p.flags&1u)!=0u; }
+// Depth-based occlusion handling (flow affinity, edge candidates), flags bit
+// 3. Off by default: it helped analytic scenes but not real Open Brush
+// recordings, where only the positional correction improved the result.
+bool depthOcclusion() { return hasDepth() && (p.flags&8u)!=0u; }
 vec4 colorAt(bool recent,bool right,vec2 q);
 // Content at q in the newest picture was at q+v in the older one (backward
 // flow v), judged on a small cross of samples.
@@ -140,9 +144,15 @@ float depthAt(bool recent,bool right,vec2 q) {
     float d=recent?texelFetch(latestDepth,i,0).r:texelFetch(previousDepth,i,0).r;
     return d>0.0 && !isinf(d) && !isnan(d)?d:1e4;
 }
-// 1 on the same surface, falling off with relative depth difference.
+// Depth edges are judged in inverse depth (1/m): on any plane, slanted
+// floors included, inverse depth is affine in the picture, and the parallax
+// a head or object motion causes scales with inverse-depth differences.
+// Far/far boundaries (5 m against 10 m, ground against sky) barely move
+// apart and do not count.
+const float InverseDepthEdge=0.15;
+// 1 on the same surface, falling off with inverse-depth difference.
 float depthAffinity(float a,float b) {
-    float r=log(a/b)/0.08;
+    float r=abs(1.0/a-1.0/b)/InverseDepthEdge;
     return 1.0/(1.0+r*r);
 }
 bool positionalHistory() {
@@ -156,6 +166,12 @@ float newestDepth(vec2 q,bool right) {
     float d=texelFetch(latestDepth,clamp(ivec2((q+0.5)*size/vec2(2*p.eyeWidth,p.height)),ivec2(0),ivec2(size)-1),0).r;
     return d>0.0 && !isinf(d) && !isnan(d)?d:1e4;
 }
+// Positional-correction weight by content distance: stereo (and near
+// game) depth is unreliable on very near content, and its parallax is large,
+// so a depth error there became a visible deformation of a hand held still
+// (Quest, 2026-10-23). Below 0.4 m the content keeps rotation-only behaviour;
+// the correction fades in up to 0.8 m.
+float positionalWeight(float metres) { return smoothstep(0.4,0.8,metres); }
 vec3 rotateVector(vec4 quat,vec3 v) {
     return v+2.0*cross(quat.xyz,cross(quat.xyz,v)+quat.w*v);
 }
@@ -167,8 +183,9 @@ vec2 olderPixel(vec2 at,bool right) {
     vec4 t=right?p.rightTans:p.leftTans;
     vec2 size=vec2(p.eyeWidth,p.height);
     vec2 uv=(at+0.5)/size;
-    vec3 point=vec3(mix(t.x,t.y,uv.x),mix(t.z,t.w,uv.y),-1)*newestDepth(at,right);
-    vec3 v=rotateVector(p.previousQuaternion,point)+p.previousTranslation.xyz;
+    float z=newestDepth(at,right);
+    vec3 point=vec3(mix(t.x,t.y,uv.x),mix(t.z,t.w,uv.y),-1)*z;
+    vec3 v=rotateVector(p.previousQuaternion,point)+p.previousTranslation.xyz*positionalWeight(z);
     if(v.z>=-1e-5) return vec2(-10000);
     vec2 ray=v.xy/-v.z;
     return vec2((ray.x-t.x)/(t.y-t.x),(ray.y-t.z)/(t.w-t.z))*size-0.5;
@@ -190,9 +207,10 @@ vec2 positionalPixel(vec2 at,bool right) {
         vec2 suv=(sq+0.5)/size;
         float z=depthAt(true,right,sq);
         vec3 source=vec3(mix(t.x,t.y,suv.x),mix(t.z,t.w,suv.y),-1)*z;
-        vec3 destination=rotateVector(inverse,source-p.targetTranslation.xyz);
+        vec3 moved=p.targetTranslation.xyz*positionalWeight(z);
+        vec3 destination=rotateVector(inverse,source-moved);
         float zd=max(-destination.z,1e-3);
-        vec3 back=rotateVector(p.targetQuaternion,ray*zd)+p.targetTranslation.xyz;
+        vec3 back=rotateVector(p.targetQuaternion,ray*zd)+moved;
         if (back.z>=-1e-5) return vec2(-10000);
         vec2 r=back.xy/-back.z;
         q=vec2((r.x-t.x)/(t.y-t.x),(r.y-t.z)/(t.w-t.z))*size-0.5;
@@ -219,7 +237,7 @@ vec2 flowAt(bool reverse,bool right,vec2 q) {
     vec2 f01=vec2(vectorAt(reverse,right,ivec2(a.x,b.y)));
     vec2 f11=vec2(vectorAt(reverse,right,b));
     vec2 t=mix(mix(f00,f10,f.x),mix(f01,f11,f.x),f.y);
-    if (hasDepth()) {
+    if (depthOcclusion()) {
         // The flow grid is coarse: a near object's motion would otherwise
         // bleed into the background around it (drag) and vice versa. Weigh
         // each grid vector by how close its depth is to this pixel's depth.
@@ -336,19 +354,39 @@ void main() {
     // Depth edge near this pixel: the occlusion resolution below handles it,
     // so the static shortcuts (which would leave an arriving object behind)
     // do not apply.
+    // Opposite directions in consecutive pairs (second differences).
     const vec2 directions[8]=vec2[8](vec2(1,0),vec2(-1,0),vec2(0,1),vec2(0,-1),
-        vec2(.7071,.7071),vec2(-.7071,.7071),vec2(.7071,-.7071),vec2(-.7071,-.7071));
+        vec2(.7071,.7071),vec2(-.7071,-.7071),vec2(.7071,-.7071),vec2(-.7071,.7071));
     const float radii[3]=float[3](3.0,8.0,20.0);
     bool depthEdge=false;
-    float farthest=0.0;
-    if (hasDepth() && (p.rotationMode&8u)==0u) {
-        float nearest=depthAt(true,right,target);
-        farthest=nearest;
-        for (int r=0;r<3;r++) for (int d=0;d<8;d++) {
-            float z=depthAt(true,right,target+radii[r]*directions[d]);
-            nearest=min(nearest,z); farthest=max(farthest,z);
+    float farthestInverse=0.0;
+    if (depthOcclusion() && (p.rotationMode&8u)==0u) {
+        // A discontinuity breaks the affine inverse depth: test the second
+        // difference across the pixel on four axes at three radii. A plane
+        // gives zero whatever its slant.
+        float w0=1.0/depthAt(true,right,target);
+        farthestInverse=w0;
+        float nearestInverse=w0;
+        for (int r=0;r<3;r++) for (int d=0;d<8;d+=2) {
+            float wp=1.0/depthAt(true,right,target+radii[r]*directions[d]);
+            float wm=1.0/depthAt(true,right,target+radii[r]*directions[d+1]);
+            farthestInverse=min(farthestInverse,min(wp,wm));
+            nearestInverse=max(nearestInverse,max(wp,wm));
+            depthEdge=depthEdge || abs(wp+wm-2.0*w0)>InverseDepthEdge;
         }
-        depthEdge=farthest>nearest*1.15;
+        // An edge that nothing moves across needs no occlusion handling, and
+        // the exact static path (mode 7 keeps unchanged pixels) is better
+        // there than resampling. Require visible motion nearby: flow, or the
+        // parallax the head translation opens across this edge.
+        if (depthEdge) {
+            vec4 t=right?p.rightTans:p.leftTans;
+            float pixelsPerTangent=float(p.eyeWidth)/abs(t.y-t.x);
+            float parallax=pixelsPerTangent*length(p.targetTranslation.xy)*(nearestInverse-farthestInverse);
+            bool moving=parallax>0.75 || length(flowAt(true,right,target))>0.75;
+            for (int d=0;d<8 && !moving;d++)
+                moving=length(flowAt(true,right,target+radii[2]*directions[d]))>0.75;
+            depthEdge=moving;
+        }
     }
     if(stable && !depthEdge) {
         // Newly exposed pixels have no history. Retain the rotation-only
@@ -423,9 +461,16 @@ void main() {
         // The nearest such content covers the pixel. When none does, the
         // pixel was just uncovered: take the nearest visible background.
         float distance=1.0-p.time;
+        // The ordinary inverse solution stays unless depth shows it wrong:
+        // on real pictures replacing a sound solution only adds resampling
+        // error, and a background fill where nothing was uncovered smears.
+        bool baseline=valid && motionMatches(right,q,flowAt(true,right,q));
+        // Without a solution the pixel shows its rotation-only content.
+        vec2 baselineAt=valid?q:target;
+        float baselineInverse=1.0/depthAt(true,right,baselineAt);
         {
-            float coverDepth=1e9; vec2 cover=vec2(0); bool covered=false;
-            float fillScore=1e9; vec2 fill=target;
+            float coverDepth=1e9; vec2 cover=vec2(0), coverMotion=vec2(0); bool covered=false;
+            float fillScore=1e9; vec2 fill=target; vec2 fillMotion=vec2(0);
             for (int k=0;k<25;k++) {
                 vec2 c=k==0?target:target+radii[(k-1)/8]*directions[(k-1)%8];
                 if (!inside(c)) continue;
@@ -440,19 +485,52 @@ void main() {
                     // at qc+v in the older picture.
                     bool moves=motionMatches(right,qc,v);
                     if (moves && depthAffinity(zq,zc)>0.5 && zq<coverDepth) {
-                        coverDepth=zq; cover=qc; covered=true;
+                        coverDepth=zq; cover=qc; coverMotion=v; covered=true;
                     }
                 }
                 // Background candidates near the pixel fill an uncovered area.
-                float score=length(c-target)+(zc>=farthest*0.87?0.0:1e5);
-                if (score<fillScore) { fillScore=score; fill=c; }
+                float score=length(c-target)+(1.0/zc-farthestInverse<=0.5*InverseDepthEdge?0.0:1e5);
+                if (score<fillScore) { fillScore=score; fill=c; fillMotion=v; }
             }
-            q=covered?cover:fill;
-            valid=inside(q);
-            depthResolved=valid;
-            if (depthResolved) color=colorAt(true,right,q);
-            // Diagnostic: red covered, green filled from background.
-            if ((p.flags&2u)!=0u) color=covered?vec4(1,0,0,1):vec4(0,1,0,1);
+            // A cover replaces a sound baseline only when clearly nearer
+            // (a near object arriving over the background).
+            // ...and only an object with its own motion arrives: under a head
+            // rotation everything moves together and the baseline is right.
+            bool nearer=covered && 1.0/coverDepth>baselineInverse+0.5*InverseDepthEdge
+                && length(coverMotion-flowAt(true,right,baselineAt))>1.0;
+            // Uncovered: nothing consistent lands here and the newest picture
+            // shows the near side of the edge here (the object that left).
+            // The background now revealed is hidden in the newest picture but
+            // may be visible in the older one: follow the background motion
+            // there and use it when the older depth confirms background.
+            // Otherwise keep the ordinary result: stretching the nearby
+            // background measured worse than it on real pictures.
+            // Measured on real recordings, both fills (stretching the nearby
+            // background, and the older picture along background motion)
+            // were worse than the ordinary result; kept off (flags bit 2
+            // re-enables the older-picture fill for experiments).
+            bool uncovered=false;
+            if ((p.flags&4u)!=0u && !baseline && !covered
+                && 1.0/depthAt(true,right,target)-farthestInverse>InverseDepthEdge) {
+                vec2 older=target-distance*fillMotion+fillMotion;
+                uncovered=inside(older)
+                    && 1.0/depthAt(false,right,older)-farthestInverse<=0.5*InverseDepthEdge;
+                if (uncovered) {
+                    color=colorAt(false,right,older);
+                    depthResolved=true;
+                }
+            }
+            if (nearer) {
+                q=cover;
+                valid=inside(q);
+                depthResolved=valid;
+                if (depthResolved) color=colorAt(true,right,q);
+            }
+            // Diagnostic: red covered, green filled, blue baseline kept.
+            if ((p.flags&2u)!=0u) {
+                color=nearer?vec4(1,0,0,1):uncovered?vec4(0,1,0,1):vec4(0,0,1,1);
+                depthResolved=true;
+            }
         }
     }
     if ((p.rotationMode&8u)!=0u) {

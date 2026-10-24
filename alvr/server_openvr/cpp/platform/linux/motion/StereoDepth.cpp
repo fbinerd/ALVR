@@ -2,6 +2,7 @@
 #include "StereoDepthShaders.hpp"
 #include "NativeOpticalFlow.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdlib>
 #include <string>
@@ -25,11 +26,36 @@ namespace {
         vk::ImageUsageFlags usage {};
     };
 
+    // Horizontal alignment of the right eye onto the left eye's tangent grid,
+    // in normalized eye coordinates: aligned = alignScale * right + alignOffset.
+    // With asymmetric eye FOVs (Quest) a point at infinity sits ~17% of the
+    // eye width apart in the two pictures; aligned, it sits at the same x, so
+    // the optical flow's limited search range is left for real disparity.
+    struct Alignment {
+        float scale = 1.f;
+        float offset = 0.f;
+    };
+
+    Alignment alignmentFor(StereoParams const& params) {
+        float leftSpan = params.leftTans.right - params.leftTans.left;
+        // Off by default: neutral on real recordings, but with a repeating
+        // texture (a checkerboard) the aligned pair matched one period off.
+        if (!std::getenv("STEREO_ALIGN") || !(std::abs(leftSpan) > 1e-6f)) return {};
+        return {
+            (params.rightTans.right - params.rightTans.left) / leftSpan,
+            (params.rightTans.left - params.leftTans.left) / leftSpan,
+        };
+    }
+
+    constexpr uint32_t MinLumaHeight = 512;
+
     struct LumaPush {
         uint32_t eyeWidth = 0;
         uint32_t height = 0;
         uint32_t lumaWidth = 0;
         uint32_t lumaHeight = 0;
+        float alignScale = 1.f;
+        float alignOffset = 0.f;
     };
 
     struct DepthPush {
@@ -43,6 +69,8 @@ namespace {
         uint32_t padding = 0;
         float leftTans[4] {};  // tan_left, tan_right, tan_up, tan_down
         float rightTans[4] {}; // tan_left, tan_right, tan_up, tan_down
+        float alignScale = 1.f;
+        float alignOffset = 0.f;
     };
 
     struct FillPush {
@@ -57,6 +85,9 @@ struct StereoDepth::State {
     VkContext& ctx;
     vk::Extent2D fullExtent {};
     vk::Extent2D eyeExtent {};
+    // Output depth extent (both eyes): the colour extent, or the luma grid
+    // when reduced (the positional correction does not need full detail).
+    vk::Extent2D depthExtent {};
     vk::Extent2D lumaExtent {};
     vk::Extent2D flowExtent {};
     vk::Format colorFormat {};
@@ -94,12 +125,19 @@ struct StereoDepth::State {
     vk::PipelineLayout fillLayout {};
     vk::ShaderModule fillShader {};
     vk::Pipeline fillPipeline {};
+    vk::DescriptorSetLayout mergeDescriptors {};
+    vk::PipelineLayout mergeLayout {};
+    vk::ShaderModule mergeShader {};
+    vk::Pipeline mergePipeline {};
+    std::unique_ptr<StereoDepth> coarse;
 
     State(
         VkContext& c,
         vk::Extent2D extent,
         vk::Format format,
-        uint32_t maxLumaDimension
+        uint32_t maxLumaDimension,
+        bool reducedDepth,
+        uint32_t coarseLumaDimension
     )
         : ctx(c)
         , fullExtent(extent)
@@ -118,12 +156,27 @@ struct StereoDepth::State {
                 lumaExtent.height = uint32_t(uint64_t(lumaExtent.height) * maxLumaDimension / largest) & ~3u;
             }
         }
+        // The flow's horizontal reach shrinks with the luma height: at 400-480
+        // rows it stopped near 50-60 px, short of the ~110 px that the Quest's
+        // asymmetric eye FOVs already put between the eyes at infinity, and
+        // no pixel matched. Short luma is stretched to MinLumaHeight rows
+        // (the depth pass handles a different scale per axis).
+        if (lumaExtent.height < MinLumaHeight)
+            lumaExtent.height = std::min(MinLumaHeight, std::max(lumaExtent.width, eyeExtent.height & ~7u));
+        // An even flow grid (luma a multiple of 8): with an odd grid width
+        // (183 cells at 732 luma columns) near objects came back with
+        // disparities several times too small.
+        lumaExtent.width &= ~7u;
+        lumaExtent.height &= ~7u;
         if (lumaExtent.width < 64 || lumaExtent.height < 64) {
             throw std::runtime_error("StereoDepth: Luma dimensions too small for optical flow");
         }
 
         flowExtent = vk::Extent2D { lumaExtent.width / 4, lumaExtent.height / 4 };
+        depthExtent = reducedDepth ? vk::Extent2D { 2 * lumaExtent.width, lumaExtent.height } : fullExtent;
         initialize();
+        if (coarseLumaDimension)
+            coarse = std::make_unique<StereoDepth>(ctx, extent, format, coarseLumaDimension, true, 0);
     }
 
     ~State() {
@@ -141,6 +194,10 @@ struct StereoDepth::State {
         destroyImage(internalDepth);
 
         ctx.dev.destroy(fillPipeline);
+        ctx.dev.destroy(mergePipeline);
+        ctx.dev.destroy(mergeLayout);
+        ctx.dev.destroy(mergeDescriptors);
+        ctx.dev.destroy(mergeShader);
         ctx.dev.destroy(fillShader);
         ctx.dev.destroy(fillLayout);
         ctx.dev.destroy(fillDescriptors);
@@ -283,8 +340,8 @@ struct StereoDepth::State {
         makeImage(rightCost, flowExtent, vk::Format::eR16G16Sint, sampled | transferDst);
 
         // Allocate raw & internal depth
-        makeImage(rawDepth, fullExtent, vk::Format::eR32Sfloat, storage | sampled | transferSrc);
-        makeImage(internalDepth, fullExtent, vk::Format::eR32Sfloat, storage | sampled | transferSrc | transferDst);
+        makeImage(rawDepth, depthExtent, vk::Format::eR32Sfloat, storage | sampled | transferSrc);
+        makeImage(internalDepth, depthExtent, vk::Format::eR32Sfloat, storage | sampled | transferSrc | transferDst);
 
         // Command pool, buffer, fence
         pool = ctx.dev.createCommandPool(vk::CommandPoolCreateInfo {
@@ -382,7 +439,8 @@ struct StereoDepth::State {
             sizeof(shader::stereo_depth),
             { vk::DescriptorType::eCombinedImageSampler,
               vk::DescriptorType::eCombinedImageSampler,
-              vk::DescriptorType::eStorageImage },
+              vk::DescriptorType::eStorageImage,
+              vk::DescriptorType::eCombinedImageSampler },
             sizeof(DepthPush),
             depthDescriptors,
             depthLayout,
@@ -395,12 +453,27 @@ struct StereoDepth::State {
             shader::stereo_fill,
             sizeof(shader::stereo_fill),
             { vk::DescriptorType::eStorageImage,
-              vk::DescriptorType::eStorageImage },
+              vk::DescriptorType::eStorageImage,
+              vk::DescriptorType::eCombinedImageSampler },
             sizeof(FillPush),
             fillDescriptors,
             fillLayout,
             fillShader,
             fillPipeline
+        );
+
+        // 4. stereo_merge (coarse estimate over near content)
+        makePipeline(
+            shader::stereo_merge,
+            sizeof(shader::stereo_merge),
+            { vk::DescriptorType::eStorageImage,
+              vk::DescriptorType::eCombinedImageSampler,
+              vk::DescriptorType::eCombinedImageSampler },
+            48,
+            mergeDescriptors,
+            mergeLayout,
+            mergeShader,
+            mergePipeline
         );
     }
 
@@ -472,14 +545,17 @@ StereoDepth::StereoDepth(
     VkContext& ctx,
     vk::Extent2D fullExtent,
     vk::Format colorFormat,
-    uint32_t maxLumaDimension
+    uint32_t maxLumaDimension,
+    bool reducedDepth,
+    uint32_t coarseLumaDimension
 )
-    : state(std::make_unique<State>(ctx, fullExtent, colorFormat, maxLumaDimension)) {}
+    : state(std::make_unique<State>(ctx, fullExtent, colorFormat, maxLumaDimension, reducedDepth, coarseLumaDimension)) {}
 
 StereoDepth::~StereoDepth() = default;
 
 vk::Extent2D StereoDepth::fullExtent() const { return state->fullExtent; }
 vk::Extent2D StereoDepth::eyeExtent() const { return state->eyeExtent; }
+vk::Extent2D StereoDepth::depthExtent() const { return state->depthExtent; }
 vk::Extent2D StereoDepth::lumaExtent() const { return state->lumaExtent; }
 
 vk::Image StereoDepth::internalDepthImage() const { return state->internalDepth.handle; }
@@ -543,6 +619,8 @@ bool StereoDepth::estimate(
         .height = s.eyeExtent.height,
         .lumaWidth = s.lumaExtent.width,
         .lumaHeight = s.lumaExtent.height,
+        .alignScale = alignmentFor(params).scale,
+        .alignOffset = alignmentFor(params).offset,
     };
 
     std::vector<vk::DescriptorImageInfo> lumaImages = {
@@ -610,6 +688,59 @@ bool StereoDepth::estimate(
     s.rightCost.layout = vk::ImageLayout::eShaderReadOnlyOptimal;
     auto tFlow1 = std::chrono::steady_clock::now();
 
+    // STEREO_FLOW_STATS=1 (diagnostic): read both flow grids back and print
+    // the share of zero vectors and the median |x|, |y| in luma pixels.
+    if (std::getenv("STEREO_FLOW_STATS")) {
+        for (bool rightToLeft : { false, true }) {
+            auto& flow = rightToLeft ? s.rightToLeftFlow : s.leftToRightFlow;
+            uint32_t w = s.flowExtent.width, h = s.flowExtent.height;
+            vk::DeviceSize bytes = vk::DeviceSize(w) * h * 4;
+            vk::Buffer buffer = s.ctx.dev.createBuffer({ .size = bytes, .usage = vk::BufferUsageFlagBits::eTransferDst });
+            auto req = s.ctx.dev.getBufferMemoryRequirements(buffer);
+            auto props = s.ctx.physDev.getMemoryProperties();
+            uint32_t type = UINT32_MAX;
+            auto host = vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent;
+            for (uint32_t i = 0; i < props.memoryTypeCount; ++i)
+                if ((req.memoryTypeBits & (1u << i)) && (props.memoryTypes[i].propertyFlags & host) == host) {
+                    type = i;
+                    break;
+                }
+            vk::DeviceMemory memory = s.ctx.dev.allocateMemory({ .allocationSize = req.size, .memoryTypeIndex = type });
+            s.ctx.dev.bindBufferMemory(buffer, memory, 0);
+            s.command.reset();
+            s.command.begin(vk::CommandBufferBeginInfo { .flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit });
+            s.barrier(flow.handle, vk::ImageLayout::eShaderReadOnlyOptimal, vk::ImageLayout::eTransferSrcOptimal,
+                vk::AccessFlagBits::eMemoryWrite, vk::AccessFlagBits::eTransferRead);
+            s.command.copyImageToBuffer(flow.handle, vk::ImageLayout::eTransferSrcOptimal, buffer,
+                vk::BufferImageCopy { .imageSubresource = { vk::ImageAspectFlagBits::eColor, 0, 0, 1 },
+                    .imageExtent = { w, h, 1 } });
+            s.barrier(flow.handle, vk::ImageLayout::eTransferSrcOptimal, vk::ImageLayout::eShaderReadOnlyOptimal,
+                vk::AccessFlagBits::eTransferRead, vk::AccessFlagBits::eShaderRead);
+            s.command.end();
+            s.ctx.dev.resetFences(s.fence);
+            vk::SubmitInfo submit { .commandBufferCount = 1, .pCommandBuffers = &s.command };
+            s.ctx.useQueue([&](auto& queue) { queue.submit(submit, s.fence); });
+            if (s.ctx.dev.waitForFences(s.fence, true, TimeoutNs) != vk::Result::eSuccess)
+                throw std::runtime_error("StereoDepth: flow readback timed out");
+            auto* v = static_cast<int16_t const*>(s.ctx.dev.mapMemory(memory, 0, bytes));
+            std::vector<float> xs, ys;
+            size_t zeros = 0;
+            for (size_t i = 0; i < size_t(w) * h; ++i) {
+                if (v[2 * i] == 0 && v[2 * i + 1] == 0) ++zeros;
+                xs.push_back(std::abs(v[2 * i]) / 32.f);
+                ys.push_back(std::abs(v[2 * i + 1]) / 32.f);
+            }
+            std::nth_element(xs.begin(), xs.begin() + xs.size() / 2, xs.end());
+            std::nth_element(ys.begin(), ys.begin() + ys.size() / 2, ys.end());
+            std::cerr << "StereoDepth flow " << (rightToLeft ? "R->L" : "L->R") << " grid " << w << "x" << h
+                      << ": zero " << 100.0 * zeros / (size_t(w) * h) << "%, median |x| " << xs[xs.size() / 2]
+                      << ", median |y| " << ys[ys.size() / 2] << " luma px" << std::endl;
+            s.ctx.dev.unmapMemory(memory);
+            s.ctx.dev.destroy(buffer);
+            s.ctx.dev.free(memory);
+        }
+    }
+
     // --- PHASE 3 & 4: Disparity-to-Depth & Hole Filling ---
     auto tDepth0 = std::chrono::steady_clock::now();
     s.command.reset();
@@ -632,8 +763,8 @@ bool StereoDepth::estimate(
     s.rawDepth.layout = vk::ImageLayout::eGeneral;
 
     DepthPush depthPush {
-        .eyeWidth = s.eyeExtent.width,
-        .height = s.eyeExtent.height,
+        .eyeWidth = s.depthExtent.width / 2,
+        .height = s.depthExtent.height,
         .lumaWidth = s.lumaExtent.width,
         .lumaHeight = s.lumaExtent.height,
         .ipd = params.ipd,
@@ -642,19 +773,23 @@ bool StereoDepth::estimate(
         .padding = 0,
         .leftTans = { params.leftTans.left, params.leftTans.right, params.leftTans.up, params.leftTans.down },
         .rightTans = { params.rightTans.left, params.rightTans.right, params.rightTans.up, params.rightTans.down },
+        .alignScale = alignmentFor(params).scale,
+        .alignOffset = alignmentFor(params).offset,
     };
 
     std::vector<vk::DescriptorImageInfo> depthImages = {
         { s.nearestSampler, s.leftToRightFlow.view, vk::ImageLayout::eShaderReadOnlyOptimal },
         { s.nearestSampler, s.rightToLeftFlow.view, vk::ImageLayout::eShaderReadOnlyOptimal },
         { {}, s.rawDepth.view, vk::ImageLayout::eGeneral },
+        { s.linearSampler, inputColorView, vk::ImageLayout::eShaderReadOnlyOptimal },
     };
     std::vector<vk::DescriptorType> depthTypes = {
         vk::DescriptorType::eCombinedImageSampler,
         vk::DescriptorType::eCombinedImageSampler,
         vk::DescriptorType::eStorageImage,
+        vk::DescriptorType::eCombinedImageSampler,
     };
-    s.dispatch(s.depthPipeline, s.depthLayout, depthImages, depthTypes, &depthPush, sizeof(depthPush), s.fullExtent);
+    s.dispatch(s.depthPipeline, s.depthLayout, depthImages, depthTypes, &depthPush, sizeof(depthPush), s.depthExtent);
 
     // Barrier: rawDepth write -> read
     s.barrier(
@@ -675,8 +810,8 @@ bool StereoDepth::estimate(
     );
 
     FillPush fillPush {
-        .eyeWidth = s.eyeExtent.width,
-        .height = s.eyeExtent.height,
+        .eyeWidth = s.depthExtent.width / 2,
+        .height = s.depthExtent.height,
         .radius = params.fillRadius,
         .minValidNeighbors = params.fillMinNeighbors,
     };
@@ -684,12 +819,47 @@ bool StereoDepth::estimate(
     std::vector<vk::DescriptorImageInfo> fillImages = {
         { {}, s.rawDepth.view, vk::ImageLayout::eGeneral },
         { {}, targetDepthView, vk::ImageLayout::eGeneral },
+        { s.linearSampler, inputColorView, vk::ImageLayout::eShaderReadOnlyOptimal },
     };
     std::vector<vk::DescriptorType> fillTypes = {
         vk::DescriptorType::eStorageImage,
         vk::DescriptorType::eStorageImage,
+        vk::DescriptorType::eCombinedImageSampler,
     };
-    s.dispatch(s.fillPipeline, s.fillLayout, fillImages, fillTypes, &fillPush, sizeof(fillPush), s.fullExtent);
+    s.dispatch(s.fillPipeline, s.fillLayout, fillImages, fillTypes, &fillPush, sizeof(fillPush), s.depthExtent);
+
+    if (s.coarse) {
+        // Finish the fine estimate, run the coarse one, then merge.
+        s.command.end();
+        s.ctx.dev.resetFences(s.fence);
+        vk::SubmitInfo fineSubmit { .commandBufferCount = 1, .pCommandBuffers = &s.command };
+        s.ctx.useQueue([&](auto& queue) { queue.submit(fineSubmit, s.fence); });
+        if (s.ctx.dev.waitForFences(s.fence, true, TimeoutNs) != vk::Result::eSuccess)
+            throw std::runtime_error("StereoDepth: Depth/fill pass timed out");
+        s.coarse->estimate(inputColor, inputColorView, inputColorLayout, {}, {}, vk::ImageLayout::eGeneral, params);
+        s.command.reset();
+        s.command.begin(vk::CommandBufferBeginInfo { .flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit });
+        s.barrier(targetDepth, vk::ImageLayout::eGeneral, vk::ImageLayout::eGeneral,
+            vk::AccessFlagBits::eShaderWrite, vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eShaderWrite);
+        struct {
+            uint32_t width, height;
+            float nearLimit, ipd;
+            float leftTans[4], rightTans[4];
+        } mergePush { s.depthExtent.width, s.depthExtent.height, 0.8f, params.ipd,
+            { params.leftTans.left, params.leftTans.right, params.leftTans.up, params.leftTans.down },
+            { params.rightTans.left, params.rightTans.right, params.rightTans.up, params.rightTans.down } };
+        std::vector<vk::DescriptorImageInfo> mergeImages = {
+            { {}, targetDepthView, vk::ImageLayout::eGeneral },
+            { s.nearestSampler, s.coarse->internalDepthView(), vk::ImageLayout::eGeneral },
+            { s.linearSampler, inputColorView, vk::ImageLayout::eShaderReadOnlyOptimal },
+        };
+        std::vector<vk::DescriptorType> mergeTypes = {
+            vk::DescriptorType::eStorageImage,
+            vk::DescriptorType::eCombinedImageSampler,
+            vk::DescriptorType::eCombinedImageSampler,
+        };
+        s.dispatch(s.mergePipeline, s.mergeLayout, mergeImages, mergeTypes, &mergePush, sizeof(mergePush), s.depthExtent);
+    }
 
     // Transition output to target layout
     if (targetDepthLayout != vk::ImageLayout::eGeneral) {

@@ -32,6 +32,12 @@ vec2 rotatePixel(vec2 at,bool right,vec4 quat) {
         *vec2(p.eyeWidth,p.height)-0.5;
 }
 
+// Positional-correction weight by content distance: stereo (and near
+// game) depth is unreliable on very near content, and its parallax is large,
+// so a depth error there became a visible deformation of a hand held still
+// (Quest, 2026-10-23). Below 0.4 m the content keeps rotation-only behaviour;
+// the correction fades in up to 0.8 m.
+float positionalWeight(float metres) { return smoothstep(0.4,0.8,metres); }
 vec3 rotateVector(vec4 quat,vec3 v) {
     return v+2.0*cross(quat.xyz,cross(quat.xyz,v)+quat.w*v);
 }
@@ -43,8 +49,9 @@ vec2 olderPixel(vec2 at,bool right) {
     vec4 t=right?p.rightTans:p.leftTans;
     vec2 size=vec2(p.eyeWidth,p.height);
     vec2 uv=(at+0.5)/size;
-    vec3 point=vec3(mix(t.x,t.y,uv.x),mix(t.z,t.w,uv.y),-1)*newestDepth(at,right);
-    vec3 v=rotateVector(p.previousQuaternion,point)+p.previousTranslation.xyz;
+    float z=newestDepth(at,right);
+    vec3 point=vec3(mix(t.x,t.y,uv.x),mix(t.z,t.w,uv.y),-1)*z;
+    vec3 v=rotateVector(p.previousQuaternion,point)+p.previousTranslation.xyz*positionalWeight(z);
     if(v.z>=-1e-5) return vec2(-10000);
     vec2 ray=v.xy/-v.z;
     return vec2((ray.x-t.x)/(t.y-t.x),(ray.y-t.z)/(t.w-t.z))*size-0.5;

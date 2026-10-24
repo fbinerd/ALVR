@@ -4,6 +4,9 @@ layout(local_size_x = 8, local_size_y = 8) in;
 layout(binding = 0) uniform isampler2D leftToRightFlow;
 layout(binding = 1) uniform isampler2D rightToLeftFlow;
 layout(binding = 2, r32f) uniform writeonly image2D rawDepth;
+// The stereo picture itself, side by side: guides the coarse disparity grid
+// so depth edges follow colour edges instead of 8-pixel flow blocks.
+layout(binding = 3) uniform sampler2D colorImage;
 
 layout(push_constant) uniform DepthParams {
     uint eyeWidth;
@@ -16,35 +19,70 @@ layout(push_constant) uniform DepthParams {
     uint padding;
     vec4 leftTans;  // tan_left, tan_right, tan_up, tan_down
     vec4 rightTans; // tan_left, tan_right, tan_up, tan_down
+    // Right eye onto the left eye's tangent grid (normalized x):
+    // aligned = alignScale * right + alignOffset; identity when off.
+    float alignScale;
+    float alignOffset;
 } p;
 
+// Both flow grids live in aligned coordinates: the left eye's own x, and for
+// the right eye the aligned x (see stereo_luma.comp). Coordinates below are
+// eye pixels at this pass's extent; "aligned" ones are in the left eye's grid.
+float toAligned(float rightX) {
+    float s = (rightX + 0.5) / float(p.eyeWidth);
+    return (p.alignScale * s + p.alignOffset) * float(p.eyeWidth) - 0.5;
+}
+
+float fromAligned(float alignedX) {
+    float s = (alignedX + 0.5) / float(p.eyeWidth);
+    return (s - p.alignOffset) / p.alignScale * float(p.eyeWidth) - 0.5;
+}
+
+float leftTan(float x) {
+    return mix(p.leftTans.x, p.leftTans.y, (x + 0.5) / float(p.eyeWidth));
+}
+
+float rightTan(float x) {
+    return mix(p.rightTans.x, p.rightTans.y, (x + 0.5) / float(p.eyeWidth));
+}
+
+// q in aligned coordinates for the right eye; the colour is read where that
+// aligned point really is in the right picture.
+vec3 guideAt(bool isRightEye, vec2 q) {
+    if (isRightEye) q.x = fromAligned(q.x);
+    q = clamp(q, vec2(0.0), vec2(p.eyeWidth - 1, p.height - 1));
+    q.x += isRightEye ? float(p.eyeWidth) : 0.0;
+    return texture(colorImage, (q + 0.5) / vec2(2 * p.eyeWidth, p.height)).rgb;
+}
+
+// Flow at an aligned point, in eye pixels at this pass's extent.
 vec2 sampleFlowGrid(bool isRightEye, vec2 pixelCoord) {
     vec2 scale = vec2(p.lumaWidth, p.lumaHeight) / vec2(p.eyeWidth, p.height);
     vec2 grid = vec2(p.lumaWidth / 4, p.lumaHeight / 4);
     vec2 v = clamp((pixelCoord + 0.5) * scale / 4.0 - 0.5, vec2(0.0), grid - vec2(1.0));
     ivec2 a = ivec2(v);
-    ivec2 b = min(a + 1, ivec2(grid) - 1);
     vec2 f = fract(v);
 
-    ivec2 f00_raw, f10_raw, f01_raw, f11_raw;
-    if (!isRightEye) {
-        f00_raw = texelFetch(leftToRightFlow, a, 0).xy;
-        f10_raw = texelFetch(leftToRightFlow, ivec2(b.x, a.y), 0).xy;
-        f01_raw = texelFetch(leftToRightFlow, ivec2(a.x, b.y), 0).xy;
-        f11_raw = texelFetch(leftToRightFlow, b, 0).xy;
-    } else {
-        f00_raw = texelFetch(rightToLeftFlow, a, 0).xy;
-        f10_raw = texelFetch(rightToLeftFlow, ivec2(b.x, a.y), 0).xy;
-        f01_raw = texelFetch(rightToLeftFlow, ivec2(a.x, b.y), 0).xy;
-        f11_raw = texelFetch(rightToLeftFlow, b, 0).xy;
-    }
-
-    vec2 f00 = vec2(f00_raw);
-    vec2 f10 = vec2(f10_raw);
-    vec2 f01 = vec2(f01_raw);
-    vec2 f11 = vec2(f11_raw);
-
-    vec2 t = mix(mix(f00, f10, f.x), mix(f01, f11, f.x), f.y);
+    // Colour-guided 4x4 cells: next to an object edge the nearest cells can
+    // all carry the other surface's disparity, so also look one cell further
+    // and weigh each cell by distance and by how much its centre looks like
+    // this pixel.
+    vec3 guide = guideAt(isRightEye, pixelCoord);
+    vec2 sum = vec2(0.0);
+    float total = 0.0;
+    for (int j = -1; j <= 2; ++j)
+        for (int i = -1; i <= 2; ++i) {
+            ivec2 cell = clamp(a + ivec2(i, j), ivec2(0), ivec2(grid) - 1);
+            vec2 centre = (vec2(cell) + 0.5) * 4.0 / scale - 0.5;
+            vec2 offset = vec2(i, j) - f;
+            float spatial = exp(-dot(offset, offset) * 0.7);
+            vec3 d = guideAt(isRightEye, centre) - guide;
+            float w = spatial / (1.0 + 200.0 * dot(d, d));
+            ivec2 raw = isRightEye ? texelFetch(rightToLeftFlow, cell, 0).xy : texelFetch(leftToRightFlow, cell, 0).xy;
+            sum += w * vec2(raw);
+            total += w;
+        }
+    vec2 t = sum / max(total, 1e-6);
     return t / 32.0 / scale;
 }
 
@@ -55,77 +93,41 @@ void main() {
     bool isRight = (globalCoord.x >= int(p.eyeWidth));
     vec2 q = vec2(isRight ? (globalCoord.x - int(p.eyeWidth)) : globalCoord.x, globalCoord.y);
 
-    if (!isRight) {
-        // Left eye pixel: forward flow maps Left -> Right
-        vec2 vL2R = sampleFlowGrid(false, q);
+    // This pixel and its match, both in aligned coordinates.
+    vec2 here = isRight ? vec2(toAligned(q.x), q.y) : q;
+    vec2 flow = sampleFlowGrid(isRight, here);
 
-        // Epipolar / vertical rejection
-        if (abs(vL2R.y) > p.maxVerticalError) {
-            imageStore(rawDepth, globalCoord, vec4(0.0));
-            return;
-        }
-
-        vec2 targetR = q + vL2R;
-        if (targetR.x < 0.0 || targetR.x >= float(p.eyeWidth) ||
-            targetR.y < 0.0 || targetR.y >= float(p.height)) {
-            imageStore(rawDepth, globalCoord, vec4(0.0));
-            return;
-        }
-
-        // Left-right consistency check
-        vec2 vR2L = sampleFlowGrid(true, targetR);
-        if (length(vL2R + vR2L) > p.maxConsistencyError) {
-            imageStore(rawDepth, globalCoord, vec4(0.0));
-            return;
-        }
-
-        // Disparity to depth conversion with asymmetric FOV handling
-        float sL = (q.x + 0.5) / float(p.eyeWidth);
-        float sR = (targetR.x + 0.5) / float(p.eyeWidth);
-        float tanL = mix(p.leftTans.x, p.leftTans.y, sL);
-        float tanR = mix(p.rightTans.x, p.rightTans.y, sR);
-        float deltaTan = tanL - tanR;
-
-        float depth = 0.0;
-        if (deltaTan > 1e-6) {
-            depth = p.ipd / deltaTan;
-        }
-        imageStore(rawDepth, globalCoord, vec4(depth));
-    } else {
-        // Right eye pixel: backward flow maps Right -> Left
-        vec2 vR2L = sampleFlowGrid(true, q);
-
-        // Epipolar / vertical rejection
-        if (abs(vR2L.y) > p.maxVerticalError) {
-            imageStore(rawDepth, globalCoord, vec4(0.0));
-            return;
-        }
-
-        vec2 targetL = q + vR2L;
-        if (targetL.x < 0.0 || targetL.x >= float(p.eyeWidth) ||
-            targetL.y < 0.0 || targetL.y >= float(p.height)) {
-            imageStore(rawDepth, globalCoord, vec4(0.0));
-            return;
-        }
-
-        // Left-right consistency check
-        vec2 vL2R = sampleFlowGrid(false, targetL);
-        if (length(vR2L + vL2R) > p.maxConsistencyError) {
-            imageStore(rawDepth, globalCoord, vec4(0.0));
-            return;
-        }
-
-        // Disparity to depth conversion with asymmetric FOV handling
-        float sR = (q.x + 0.5) / float(p.eyeWidth);
-        float sL = (targetL.x + 0.5) / float(p.eyeWidth);
-        float tanR = mix(p.rightTans.x, p.rightTans.y, sR);
-        float tanL = mix(p.leftTans.x, p.leftTans.y, sL);
-        float deltaTan = tanL - tanR;
-
-        float depth = 0.0;
-        if (deltaTan > 1e-6) {
-            depth = p.ipd / deltaTan;
-        }
-        imageStore(rawDepth, globalCoord, vec4(depth));
+    // Epipolar / vertical rejection
+    if (abs(flow.y) > p.maxVerticalError) {
+        imageStore(rawDepth, globalCoord, vec4(0.0));
+        return;
     }
+
+    vec2 match = here + flow;
+    // The match must lie in the other picture: the left eye's own x, or for
+    // a left pixel the right picture's real x.
+    float matchX = isRight ? match.x : fromAligned(match.x);
+    if (matchX < 0.0 || matchX >= float(p.eyeWidth) || match.y < 0.0 || match.y >= float(p.height)) {
+        imageStore(rawDepth, globalCoord, vec4(0.0));
+        return;
+    }
+
+    // Left-right consistency check (both flows in aligned coordinates)
+    vec2 back = sampleFlowGrid(!isRight, match);
+    if (length(flow + back) > p.maxConsistencyError) {
+        imageStore(rawDepth, globalCoord, vec4(0.0));
+        return;
+    }
+
+    // Disparity to depth with asymmetric FOVs: each eye's own tangent at its
+    // real pixel.
+    float tanL = isRight ? leftTan(match.x) : leftTan(q.x);
+    float tanR = isRight ? rightTan(q.x) : rightTan(matchX);
+    float deltaTan = tanL - tanR;
+
+    float depth = 0.0;
+    if (deltaTan > 1e-6) {
+        depth = p.ipd / deltaTan;
+    }
+    imageStore(rawDepth, globalCoord, vec4(depth));
 }

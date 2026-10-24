@@ -103,17 +103,21 @@ SceneHit castRay(float camX, float rx, float ry) {
 
     // 1. Near box at Z = -0.5 m (depth = 0.5 m)
     {
-        float d = 0.5f;
+        // STEREO_NEAR_M moves the box (a hand at 0.2-0.4 m), keeping its
+        // apparent size: half extents scale with the distance.
+        static const float nearM = std::getenv("STEREO_NEAR_M") ? std::stof(std::getenv("STEREO_NEAR_M")) : 0.5f;
+        float d = nearM;
         float x = camX + d * rx;
         float y = d * ry;
-        if (std::abs(x) <= 0.22f && std::abs(y) <= 0.18f) {
+        float k = d / 0.5f;
+        if (std::abs(x) <= 0.22f * k && std::abs(y) <= 0.18f * k) {
             if (d < closestDepth) {
                 closestDepth = d;
                 hit.depth = d;
                 hit.region = REGION_NEAR_BOX;
                 // High-contrast multi-frequency checker on box face
-                float u = (x + 0.22f) / 0.44f;
-                float v = (y + 0.18f) / 0.36f;
+                float u = (x / k + 0.22f) / 0.44f;
+                float v = (y / k + 0.18f) / 0.36f;
                 int cu = int(u * 28.0f);
                 int cv = int(v * 24.0f);
                 bool c = ((cu ^ cv) & 1);
@@ -627,7 +631,10 @@ TestResults runResolutionTest(
         vk::Format::eR8G8B8A8Unorm,
         // STEREO_LUMA_MAX caps the estimator luma (0 = full resolution).
         std::getenv("STEREO_LUMA_MAX") ? uint32_t(std::stoul(std::getenv("STEREO_LUMA_MAX")))
-                                       : alvr::motion::StereoDepth::DefaultLumaDimension
+                                       : alvr::motion::StereoDepth::DefaultLumaDimension,
+        false,
+        // STEREO_COARSE=n adds the coarse near-content estimate (driver: 320).
+        std::getenv("STEREO_COARSE") ? uint32_t(std::stoul(std::getenv("STEREO_COARSE"))) : 0u
     );
 
     // Warm-up run
@@ -866,6 +873,68 @@ int main(int argc, char** argv) {
                   << ", " << params.leftTans.up << ", " << params.leftTans.down << "]\n";
         std::cout << "Right Eye Tans: [" << params.rightTans.left << ", " << params.rightTans.right
                   << ", " << params.rightTans.up << ", " << params.rightTans.down << "]\n";
+
+        // STEREO_BENCH=1: timing only, in the driver's configuration (luma cap
+        // 640, see Encoder.hpp), with full and reduced (luma grid) output, at
+        // the stream sizes used live. Textured random stereo pair with a
+        // constant disparity; 5 warm-up runs, then 50 timed runs each.
+        if (std::getenv("STEREO_BENCH")) {
+            std::cout << "\nsize/eye     output   wall mean  p95    max   | flow GPU mean | depth GPU mean\n";
+            for (auto [w, h] : { std::pair<uint32_t, uint32_t> { 1832, 1920 }, { 2048, 2144 } }) {
+                uint32_t full = w * 2;
+                std::vector<uint8_t> rgba(size_t(full) * h * 4);
+                uint32_t seed = 12345;
+                auto rnd = [&] { seed = seed * 1664525u + 1013904223u; return uint8_t(seed >> 24); };
+                uint32_t cellsX = (w + 64) / 8 + 1, cellsY = h / 8 + 1;
+                std::vector<uint8_t> tex(size_t(cellsX) * cellsY);
+                for (auto& v : tex) v = rnd();
+                for (uint32_t y = 0; y < h; ++y)
+                    for (uint32_t x = 0; x < full; ++x) {
+                        uint32_t eye = x / w, ex = x % w;
+                        // Blocky texture (8 px cells) so the flow has structure;
+                        // the right eye sees it 24 px to the left.
+                        uint32_t sx = (ex + (eye ? 24 : 0)) / 8, sy = y / 8;
+                        uint8_t v = tex[size_t(sy) * cellsX + sx];
+                        uint8_t* p = &rgba[(size_t(y) * full + x) * 4];
+                        p[0] = v; p[1] = uint8_t(255 - v); p[2] = uint8_t(v / 2 + 64); p[3] = 255;
+                    }
+                GpuFixture fixture(ctx, full, h);
+                fixture.uploadColor(rgba.data());
+                for (bool reduced : { false, true }) {
+                    alvr::motion::StereoDepth estimator(
+                        ctx, vk::Extent2D { full, h }, vk::Format::eR8G8B8A8Unorm,
+                        std::getenv("STEREO_LUMA_MAX") ? uint32_t(std::stoul(std::getenv("STEREO_LUMA_MAX"))) : 640u, reduced
+                    );
+                    std::vector<double> wall, flow, depth;
+                    for (int run = 0; run < 55; ++run) {
+                        alvr::motion::StereoDepthTiming t {};
+                        estimator.estimate(
+                            fixture.colorImage, fixture.colorView, vk::ImageLayout::eShaderReadOnlyOptimal,
+                            reduced ? vk::Image {} : fixture.depthImage,
+                            reduced ? vk::ImageView {} : fixture.depthView,
+                            vk::ImageLayout::eGeneral, params, &t
+                        );
+                        if (run < 5) continue;
+                        wall.push_back(t.totalWallMs);
+                        flow.push_back(t.opticalGpuMs);
+                        depth.push_back(t.depthGpuMs);
+                    }
+                    auto mean = [](std::vector<double> const& v) {
+                        double s = 0;
+                        for (double x : v) s += x;
+                        return s / v.size();
+                    };
+                    std::vector<double> sorted = wall;
+                    std::sort(sorted.begin(), sorted.end());
+                    std::cout << std::fixed << std::setprecision(2) << w << "x" << h << "  "
+                              << (reduced ? "reduced" : "full   ") << "  " << std::setw(6) << mean(wall)
+                              << "  " << std::setw(5) << sorted[size_t(sorted.size() * 0.95)] << "  "
+                              << std::setw(5) << sorted.back() << " | " << std::setw(6) << mean(flow)
+                              << "        | " << std::setw(6) << mean(depth) << "\n";
+                }
+            }
+            return 0;
+        }
 
         // Run 1: 1024x640 per eye
         auto res1024 = runResolutionTest(ctx, 1024, 640, params, outDir, "stereo_1024x640");

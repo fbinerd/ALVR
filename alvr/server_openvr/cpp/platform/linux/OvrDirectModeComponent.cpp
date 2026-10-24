@@ -606,6 +606,17 @@ void OvrDirectModeComponent::EncodeWorkerLoop() {
                     FfiQuat destination {float(stampOrientation.x),float(stampOrientation.y),float(stampOrientation.z),float(stampOrientation.w)};
                     validHistoryRotation=BuildMotionRotation(motionPoseValid?lastMotionOrientation:stampOrientation,destination,views,historyRotation,
                         motionPoseValid?lastMotionPosition.data():job.renderPosition.data(),job.renderPosition.data());
+                    if (validHistoryRotation) {
+                        // Stereo depth geometry: the composed picture's tangents
+                        // and the eye separation from the view poses.
+                        alvr::motion::StereoParams stereo;
+                        auto const* l=historyRotation.leftTans; auto const* r=historyRotation.rightTans;
+                        stereo.leftTans={l[0],l[1],l[2],l[3]}; stereo.rightTans={r[0],r[1],r[2],r[3]};
+                        float ipd=0;
+                        for (int i=0;i<3;i++) { float d=views[1].pose.position[i]-views[0].pose.position[i]; ipd+=d*d; }
+                        stereo.ipd=std::sqrt(ipd);
+                        if (stereo.ipd>0.01f) enc.setStereoViews(stereo);
+                    }
                   } }
             }
             if (separateRotation) {

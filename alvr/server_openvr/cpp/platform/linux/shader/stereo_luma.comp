@@ -10,6 +10,10 @@ layout(push_constant) uniform LumaParams {
     uint height;
     uint lumaWidth;
     uint lumaHeight;
+    // Right eye onto the left eye's tangent grid (normalized x):
+    // aligned = alignScale * right + alignOffset; identity when off.
+    float alignScale;
+    float alignOffset;
 } p;
 
 float rgbToLuma(vec3 rgb) {
@@ -41,7 +45,12 @@ void main() {
     vec2 uv = (vec2(coord) + 0.5) / vec2(p.lumaWidth, p.lumaHeight);
 
     float lumaL = rgbToLuma(sampleEye(0.0, uv));
-    float lumaR = rgbToLuma(sampleEye(1.0, uv));
+    // The right luma is laid out on the aligned grid: sample the right eye
+    // where this aligned column comes from. Outside the right picture the
+    // edge column is repeated: a black band disturbed the flow next to it
+    // (those pixels have no match anyway and fail the bounds check).
+    vec2 uvR = vec2(clamp((uv.x - p.alignOffset) / p.alignScale, 0.0, 1.0), uv.y);
+    float lumaR = rgbToLuma(sampleEye(1.0, uvR));
 
     imageStore(leftLuma, coord, vec4(lumaL));
     imageStore(rightLuma, coord, vec4(lumaR));

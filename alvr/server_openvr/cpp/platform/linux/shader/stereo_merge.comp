@@ -1,0 +1,74 @@
+#version 450
+// Merges a coarse stereo estimate into the fine one. The fine luma grid
+// cannot reach the disparity of very near content (a hand at 0.2-0.4 m) and
+// returns wrong, too-far distances there; the coarse grid reaches it but is
+// unreliable from about 0.5 m on. Where either estimate sees near content,
+// each candidate depth is checked against the picture itself: the colour of
+// this pixel must match the other eye's colour at the position that depth
+// predicts. The better match wins; when neither matches the pixel becomes
+// invalid (no positional correction, which is safe).
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(binding = 0, r32f) uniform image2D depthImage;
+layout(binding = 1) uniform sampler2D coarseDepth;
+layout(binding = 2) uniform sampler2D colorImage;
+layout(push_constant) uniform MergeParams {
+    uint width;
+    uint height;
+    float nearLimit;
+    float ipd;
+    vec4 leftTans;  // left, right, up, down
+    vec4 rightTans;
+} p;
+
+// Colour mismatch between this pixel and its match in the other eye for a
+// candidate depth (mean absolute RGB over a small cross), or 1 when the match
+// leaves the picture.
+float matchCost(bool right, vec2 uv, float depth) {
+    vec4 own = right ? p.rightTans : p.leftTans;
+    vec4 other = right ? p.leftTans : p.rightTans;
+    float tanOwn = mix(own.x, own.y, uv.x);
+    // Left eye sees a point ipd/depth further right in tangent than the right eye.
+    float tanOther = right ? tanOwn + p.ipd / depth : tanOwn - p.ipd / depth;
+    float u = (tanOther - other.x) / (other.y - other.x);
+    if (u < 0.0 || u > 1.0) return 1.0;
+    vec2 pixel = vec2(1.0) / vec2(textureSize(colorImage, 0));
+    const vec2 taps[5] = vec2[5](vec2(0), vec2(2, 0), vec2(-2, 0), vec2(0, 2), vec2(0, -2));
+    float cost = 0.0;
+    for (int i = 0; i < 5; ++i) {
+        vec2 d = taps[i] * pixel;
+        vec2 a = vec2((uv.x + (right ? 1.0 : 0.0)) * 0.5, uv.y) + d;
+        vec2 b = vec2((u + (right ? 0.0 : 1.0)) * 0.5, uv.y) + d;
+        vec3 diff = texture(colorImage, a).rgb - texture(colorImage, b).rgb;
+        cost += (abs(diff.r) + abs(diff.g) + abs(diff.b)) / 3.0;
+    }
+    return cost / 5.0;
+}
+
+void main() {
+    ivec2 xy = ivec2(gl_GlobalInvocationID.xy);
+    if (xy.x >= int(p.width) || xy.y >= int(p.height)) return;
+    bool right = xy.x >= int(p.width / 2);
+    ivec2 size = textureSize(coarseDepth, 0);
+    int eyeWidth = size.x / 2;
+    ivec2 c = ivec2((vec2(xy) + 0.5) / vec2(p.width, p.height) * vec2(size));
+    ivec2 low = ivec2(right ? eyeWidth : 0, 0);
+    ivec2 high = ivec2(right ? size.x - 1 : eyeWidth - 1, size.y - 1);
+    c = clamp(c, low, high);
+    float coarse = texelFetch(coarseDepth, c, 0).r;
+    float nearest = 1e9;
+    for (int dy = -1; dy <= 1; ++dy)
+        for (int dx = -1; dx <= 1; ++dx) {
+            float d = texelFetch(coarseDepth, clamp(c + ivec2(dx, dy), low, high), 0).r;
+            if (d > 0.0) nearest = min(nearest, d);
+        }
+    float fine = imageLoad(depthImage, xy).r;
+    if (nearest >= p.nearLimit && !(fine > 0.0 && fine < p.nearLimit)) return;
+    // Near content around: let the picture decide between the candidates.
+    int eyeX = xy.x - (right ? int(p.width / 2) : 0);
+    vec2 uv = (vec2(eyeX, xy.y) + 0.5) / vec2(p.width / 2, p.height);
+    float fineCost = fine > 0.0 ? matchCost(right, uv, fine) : 1.0;
+    float coarseCost = coarse > 0.0 ? matchCost(right, uv, coarse) : 1.0;
+    float best = min(fineCost, coarseCost);
+    float chosen = fineCost <= coarseCost ? fine : coarse;
+    imageStore(depthImage, xy, vec4(best <= 0.06 ? chosen : 0.0));
+}
