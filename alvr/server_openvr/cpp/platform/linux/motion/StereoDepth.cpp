@@ -578,6 +578,11 @@ bool StereoDepth::estimate(
     vk::ImageView targetDepthView = outputDepthView ? outputDepthView : s.internalDepth.view;
     vk::ImageLayout targetDepthLayout = outputDepth ? outputDepthLayout : vk::ImageLayout::eGeneral;
 
+    // Keep sampled descriptors consistent with the actual input layout.
+    // GENERAL is already readable and deliberately left unchanged below.
+    auto sampledInputLayout = inputColorLayout == vk::ImageLayout::eGeneral
+        ? vk::ImageLayout::eGeneral : vk::ImageLayout::eShaderReadOnlyOptimal;
+
     // --- PHASE 1: Luma extraction ---
     auto tLuma0 = std::chrono::steady_clock::now();
     s.command.reset();
@@ -624,7 +629,7 @@ bool StereoDepth::estimate(
     };
 
     std::vector<vk::DescriptorImageInfo> lumaImages = {
-        { s.linearSampler, inputColorView, vk::ImageLayout::eShaderReadOnlyOptimal },
+        { s.linearSampler, inputColorView, sampledInputLayout },
         { {}, s.leftLuma.view, vk::ImageLayout::eGeneral },
         { {}, s.rightLuma.view, vk::ImageLayout::eGeneral },
     };
@@ -781,7 +786,7 @@ bool StereoDepth::estimate(
         { s.nearestSampler, s.leftToRightFlow.view, vk::ImageLayout::eShaderReadOnlyOptimal },
         { s.nearestSampler, s.rightToLeftFlow.view, vk::ImageLayout::eShaderReadOnlyOptimal },
         { {}, s.rawDepth.view, vk::ImageLayout::eGeneral },
-        { s.linearSampler, inputColorView, vk::ImageLayout::eShaderReadOnlyOptimal },
+        { s.linearSampler, inputColorView, sampledInputLayout },
     };
     std::vector<vk::DescriptorType> depthTypes = {
         vk::DescriptorType::eCombinedImageSampler,
@@ -819,7 +824,7 @@ bool StereoDepth::estimate(
     std::vector<vk::DescriptorImageInfo> fillImages = {
         { {}, s.rawDepth.view, vk::ImageLayout::eGeneral },
         { {}, targetDepthView, vk::ImageLayout::eGeneral },
-        { s.linearSampler, inputColorView, vk::ImageLayout::eShaderReadOnlyOptimal },
+        { s.linearSampler, inputColorView, sampledInputLayout },
     };
     std::vector<vk::DescriptorType> fillTypes = {
         vk::DescriptorType::eStorageImage,
@@ -836,7 +841,7 @@ bool StereoDepth::estimate(
         s.ctx.useQueue([&](auto& queue) { queue.submit(fineSubmit, s.fence); });
         if (s.ctx.dev.waitForFences(s.fence, true, TimeoutNs) != vk::Result::eSuccess)
             throw std::runtime_error("StereoDepth: Depth/fill pass timed out");
-        s.coarse->estimate(inputColor, inputColorView, inputColorLayout, {}, {}, vk::ImageLayout::eGeneral, params);
+        s.coarse->estimate(inputColor, inputColorView, sampledInputLayout, {}, {}, vk::ImageLayout::eGeneral, params);
         s.command.reset();
         s.command.begin(vk::CommandBufferBeginInfo { .flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit });
         s.barrier(targetDepth, vk::ImageLayout::eGeneral, vk::ImageLayout::eGeneral,
@@ -851,7 +856,7 @@ bool StereoDepth::estimate(
         std::vector<vk::DescriptorImageInfo> mergeImages = {
             { {}, targetDepthView, vk::ImageLayout::eGeneral },
             { s.nearestSampler, s.coarse->internalDepthView(), vk::ImageLayout::eGeneral },
-            { s.linearSampler, inputColorView, vk::ImageLayout::eShaderReadOnlyOptimal },
+            { s.linearSampler, inputColorView, sampledInputLayout },
         };
         std::vector<vk::DescriptorType> mergeTypes = {
             vk::DescriptorType::eStorageImage,
@@ -859,6 +864,12 @@ bool StereoDepth::estimate(
             vk::DescriptorType::eCombinedImageSampler,
         };
         s.dispatch(s.mergePipeline, s.mergeLayout, mergeImages, mergeTypes, &mergePush, sizeof(mergePush), s.depthExtent);
+    }
+
+    if (inputColorLayout != sampledInputLayout) {
+        s.barrier(inputColor, sampledInputLayout, inputColorLayout,
+            vk::AccessFlagBits::eShaderRead,
+            vk::AccessFlagBits::eMemoryRead | vk::AccessFlagBits::eMemoryWrite);
     }
 
     // Transition output to target layout

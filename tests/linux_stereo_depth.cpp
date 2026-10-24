@@ -477,6 +477,25 @@ struct GpuFixture {
         ctx.dev.waitForFences(fence, true, 1'000'000'000);
     }
 
+    void transitionColor(vk::ImageLayout before, vk::ImageLayout after) {
+        command.reset();
+        command.begin(vk::CommandBufferBeginInfo{});
+        vk::ImageMemoryBarrier b {
+            .srcAccessMask = vk::AccessFlagBits::eMemoryRead | vk::AccessFlagBits::eMemoryWrite,
+            .dstAccessMask = vk::AccessFlagBits::eShaderRead,
+            .oldLayout = before, .newLayout = after,
+            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .image = colorImage,
+            .subresourceRange = {vk::ImageAspectFlagBits::eColor,0,1,0,1},
+        };
+        command.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands, vk::PipelineStageFlagBits::eAllCommands, {}, {}, {}, b);
+        command.end();ctx.dev.resetFences(fence);
+        ctx.useQueue([&](auto& q){q.submit(vk::SubmitInfo{.commandBufferCount=1,.pCommandBuffers=&command},fence);});
+        if(ctx.dev.waitForFences(fence,true,1'000'000'000)!=vk::Result::eSuccess)
+            throw std::runtime_error("Fixture colour transition timeout");
+    }
+
     void downloadDepth(float* depth) {
         command.reset();
         command.begin(vk::CommandBufferBeginInfo {});
@@ -624,6 +643,10 @@ TestResults runResolutionTest(
     std::cout << "Initializing StereoDepth GPU pipeline...\n";
     GpuFixture fixture(ctx, fullWidth, height);
     fixture.uploadColor(color.data());
+    auto inputLayout = std::getenv("STEREO_INPUT_GENERAL")
+        ? vk::ImageLayout::eGeneral : vk::ImageLayout::eShaderReadOnlyOptimal;
+    if(inputLayout!=vk::ImageLayout::eShaderReadOnlyOptimal)
+        fixture.transitionColor(vk::ImageLayout::eShaderReadOnlyOptimal,inputLayout);
 
     alvr::motion::StereoDepth estimator(
         ctx,
@@ -642,7 +665,7 @@ TestResults runResolutionTest(
     estimator.estimate(
         fixture.colorImage,
         fixture.colorView,
-        vk::ImageLayout::eShaderReadOnlyOptimal,
+        inputLayout,
         fixture.depthImage,
         fixture.depthView,
         vk::ImageLayout::eGeneral,
@@ -656,7 +679,7 @@ TestResults runResolutionTest(
     estimator.estimate(
         fixture.colorImage,
         fixture.colorView,
-        vk::ImageLayout::eShaderReadOnlyOptimal,
+        inputLayout,
         fixture.depthImage,
         fixture.depthView,
         vk::ImageLayout::eGeneral,
@@ -875,10 +898,11 @@ int main(int argc, char** argv) {
                   << ", " << params.rightTans.up << ", " << params.rightTans.down << "]\n";
 
         // STEREO_BENCH=1: timing only, in the driver's configuration (luma cap
-        // 640, see Encoder.hpp), with full and reduced (luma grid) output, at
+        // 768, see Encoder.hpp), with full and reduced (luma grid) output, at
         // the stream sizes used live. Textured random stereo pair with a
         // constant disparity; 5 warm-up runs, then 50 timed runs each.
         if (std::getenv("STEREO_BENCH")) {
+            std::cout << "Coarse luma cap: " << (std::getenv("STEREO_COARSE") ? std::getenv("STEREO_COARSE") : "0") << "\n";
             std::cout << "\nsize/eye     output   wall mean  p95    max   | flow GPU mean | depth GPU mean\n";
             for (auto [w, h] : { std::pair<uint32_t, uint32_t> { 1832, 1920 }, { 2048, 2144 } }) {
                 uint32_t full = w * 2;
@@ -903,7 +927,8 @@ int main(int argc, char** argv) {
                 for (bool reduced : { false, true }) {
                     alvr::motion::StereoDepth estimator(
                         ctx, vk::Extent2D { full, h }, vk::Format::eR8G8B8A8Unorm,
-                        std::getenv("STEREO_LUMA_MAX") ? uint32_t(std::stoul(std::getenv("STEREO_LUMA_MAX"))) : 640u, reduced
+                        std::getenv("STEREO_LUMA_MAX") ? uint32_t(std::stoul(std::getenv("STEREO_LUMA_MAX"))) : 768u, reduced,
+                        std::getenv("STEREO_COARSE") ? uint32_t(std::stoul(std::getenv("STEREO_COARSE"))) : 0u
                     );
                     std::vector<double> wall, flow, depth;
                     for (int run = 0; run < 55; ++run) {
