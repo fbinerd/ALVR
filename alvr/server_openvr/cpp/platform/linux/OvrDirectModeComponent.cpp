@@ -10,6 +10,7 @@
 
 #include "OvrDirectModeComponent.h"
 #include "SteamVrSync.h"
+#include "TextureTimelineWait.h"
 
 #include "alvr_server/Logger.h"
 #include "alvr_server/include/openvr_math.h"
@@ -47,9 +48,18 @@ constexpr int64_t GpuWaitPollCapFrames = 2;
 // worker, so it costs pipeline depth, not compositor-thread budget.
 constexpr int GuardSleepMs = 4;
 
-// Cap on the wait for a texture's timeline semaphore, in frame intervals.
-// On timeout the frame is read anyway, as it would have been without it.
-constexpr int64_t TimelineWaitCapFrames = 2;
+// How long the worker waits, in display intervals, for SteamVR to finish
+// writing a frame's textures (8 intervals = about 111 ms at 72 Hz). The
+// budget is shared by all eyes and layers of the frame, not given to each
+// texture. If it runs out, or a semaphore cannot be imported, the frame is
+// skipped and the client keeps showing the previous one: an unfinished
+// texture is never read, because that sends a mix of two frames.
+// The budget is long on purpose. On a GPU that cannot keep up (an
+// application frame taking 60-80 ms), a 2-interval budget rejected whole runs
+// of frames that would have finished in time and froze the picture for up
+// to about a second; 8 intervals waited them out with no skips. A frame that
+// is already finished does not wait at all; only late frames wait longer.
+constexpr int64_t TimelineWaitCapFrames = 8;
 
 // The negotiated refresh rate expressed as a frame period.
 static std::chrono::nanoseconds frameInterval() {
@@ -292,24 +302,52 @@ void OvrDirectModeComponent::EncodeWorkerLoop() {
                       frameInterval() * TimelineWaitCapFrames
                 )
                       .count();
-            for (auto const& wait : job.waits) {
-                if (wait.semaphore == 0) {
-                    continue;
-                }
-                uint64_t const semaphore = wait.semaphore;
-                if (!enc.waitTimeline(
+            // A texture SteamVR has not confirmed may still be being written.
+            // Keep the client's last picture rather than read mixed frames,
+            // even after repeated failures. A broken producer can leave the
+            // picture frozen, but cannot force an unsafe read. Missing timeline
+            // handles still use the separate implicit-fence/guard path above.
+            bool const confirmed = alvr::waitForTextureTimelines(
+                job.waits,
+                std::chrono::nanoseconds(timelineCapNs),
+                [&](auto const& wait, uint64_t timeoutNs) {
+                    uint64_t const semaphore = wait.semaphore;
+                    auto const result = enc.waitTimeline(
                         semaphore,
                         [semaphore] { return steamvrsync::Sync::Get().DupFd(semaphore); },
                         wait.value,
-                        timelineCapNs
-                    )) {
-                    Warn(
-                        "SteamVR texture semaphore %llx not reached or not importable; "
-                        "reading the frame anyway\n",
-                        (unsigned long long)semaphore
+                        timeoutNs
                     );
+                    if (result == alvr::Encoder::TimelineWait::Reached) {
+                        return true;
+                    }
+                    Warn(
+                        "SteamVR texture semaphore %llx %s\n",
+                        (unsigned long long)semaphore,
+                        result == alvr::Encoder::TimelineWait::NotImportable
+                            ? "could not be imported"
+                            : "not reached within the wait cap"
+                    );
+                    return false;
                 }
+            );
+            if (!confirmed) {
+                ++m_unconfirmedSkips;
+                Warn(
+                    "Skipping an unconfirmed SteamVR frame (%llu in a row); the client "
+                    "keeps the last one\n",
+                    (unsigned long long)m_unconfirmedSkips
+                );
+                MarkRead(job.frame);
+                continue;
             }
+            if (m_unconfirmedSkips != 0) {
+                Info(
+                    "SteamVR texture timeline recovered after %llu skipped frames\n",
+                    (unsigned long long)m_unconfirmedSkips
+                );
+            }
+            m_unconfirmedSkips = 0;
 
             // Rotationally reproject the frame from the pose it was rendered
             // with to the newest tracking pose, then stamp it with that pose's

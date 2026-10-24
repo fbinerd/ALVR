@@ -421,8 +421,9 @@ public:
 
     // Waits until SteamVR's timeline semaphore for a texture reaches value,
     // the end of the write submitted into it before Present. The semaphore is
-    // imported on first use from dupFd() (Vulkan takes the fd). Returns false
-    // when it could not be imported or did not reach value within timeoutNs.
+    // imported on first use from dupFd() (Vulkan takes the fd; a failed
+    // import is retried on the next call). Says whether value was reached,
+    // not reached within timeoutNs, or the semaphore could not be imported.
     //
     // A CPU wait with a cap, where Steam Link waits on the GPU: if a SteamVR
     // change ever left the value unsignalled, this costs a capped stall per
@@ -431,12 +432,15 @@ public:
     // the import only works on the GPU SteamVR renders on, like the texture
     // imports. Tested on NVIDIA; RADV and ANV implement opaque-fd timeline
     // import.
-    bool waitTimeline(u64 handle, std::function<int()> const& dupFd, u64 value, u64 timeoutNs) {
+    enum class TimelineWait { Reached, TimedOut, NotImportable };
+
+    TimelineWait
+    waitTimeline(u64 handle, std::function<int()> const& dupFd, u64 value, u64 timeoutNs) {
         auto it = timelines.find(handle);
         if (it == timelines.end()) {
             int fd = dupFd();
             if (fd < 0) {
-                return false;
+                return TimelineWait::NotImportable;
             }
             vk::SemaphoreTypeCreateInfo typeInfo {
                 .semaphoreType = vk::SemaphoreType::eTimeline,
@@ -452,7 +456,7 @@ public:
                 != vk::Result::eSuccess) {
                 close(fd);
                 vkCtx.dev.destroy(sem);
-                return false;
+                return TimelineWait::NotImportable;
             }
             it = timelines.emplace(handle, sem).first;
         }
@@ -461,7 +465,9 @@ public:
             .pSemaphores = &it->second,
             .pValues = &value,
         };
-        return vkCtx.dev.waitSemaphores(waitInfo, timeoutNs) == vk::Result::eSuccess;
+        return vkCtx.dev.waitSemaphores(waitInfo, timeoutNs) == vk::Result::eSuccess
+            ? TimelineWait::Reached
+            : TimelineWait::TimedOut;
     }
 
     // Frees what was imported for textures and semaphores SteamVR destroyed.

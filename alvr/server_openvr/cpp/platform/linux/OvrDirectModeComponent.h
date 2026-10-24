@@ -191,6 +191,9 @@ private:
     // disarms for the session so a wedged writer degrades the stream once
     // instead of taxing every frame.
     uint32_t m_gpuWaitConsecTimeouts = 0;
+    // Consecutive frames skipped because SteamVR had not confirmed their
+    // textures (worker thread only).
+    uint64_t m_unconfirmedSkips = 0;
     bool m_gpuWaitPollDisarmed = false;
 
     // Written by the event loop thread in SetViewParams, read by the worker.
