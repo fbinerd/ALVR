@@ -49,6 +49,7 @@ pub struct DevicesTab {
     adb_download_progress: Option<f32>,
     airlink_host_enabled: Option<bool>,
     airlink_headset: Option<AirLinkHeadset>,
+    launch_steamvr_requested: bool,
 }
 
 impl DevicesTab {
@@ -60,6 +61,7 @@ impl DevicesTab {
             adb_download_progress: None,
             airlink_host_enabled: None,
             airlink_headset: None,
+            launch_steamvr_requested: false,
         }
     }
 
@@ -94,6 +96,10 @@ impl DevicesTab {
         });
     }
 
+    pub fn take_launch_steamvr_request(&mut self) -> bool {
+        std::mem::take(&mut self.launch_steamvr_requested)
+    }
+
     pub fn ui(&mut self, ui: &mut Ui, connected_to_server: bool) -> Vec<ServerRequest> {
         let mut requests = vec![];
 
@@ -122,7 +128,7 @@ impl DevicesTab {
                         #[cfg(not(target_arch = "wasm32"))]
                         ui.with_layout(Layout::right_to_left(eframe::emath::Align::Center), |ui| {
                             if ui.button("Launch SteamVR").clicked() {
-                                crate::steamvr_launcher::LAUNCHER.lock().launch_steamvr();
+                                self.launch_steamvr_requested = true;
                             }
                         });
                     })
