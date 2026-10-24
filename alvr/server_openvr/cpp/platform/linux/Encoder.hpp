@@ -11,6 +11,7 @@
 #include "EncodePipeline.h"
 #include "Renderer.hpp"
 #include "motion/NativeMotion.hpp"
+#include "depth/ProductionDepthSource.hpp"
 #include <optional>
 #include "motion/NativeMotionSwitch.hpp"
 
@@ -115,6 +116,7 @@ private:
     Optional<render::Renderer> renderer;
     std::unique_ptr<motion::NativeMotion> nativeMotion;
     DepthSource depthSource;
+    std::unique_ptr<depth::ProductionDepthSource> gameDepth;
     bool gapFillEagerFlow = false;
 
     std::unique_ptr<EncodePipeline> encoder;
@@ -523,6 +525,20 @@ public:
     // until the next present() call returns. Set it from the present() thread.
     void setDepthSource(DepthSource source) { depthSource = std::move(source); }
 
+    // Present-worker only, under the encoder lock. No synthesis policy changes.
+    void prepareGameDepth(depth::ComposedDepthPicture const& picture) {
+        if (!gameDepth) gameDepth = std::make_unique<depth::ProductionDepthSource>();
+        try {
+            vkCtx.useQueue([&](auto queue) {
+                gameDepth->prepare(*this, {vkCtx.instance, vkCtx.physDev, vkCtx.dev, queue, vkCtx.meta.queueFamily}, picture,
+                    [](std::string const& text) { Info("%s", text.c_str()); });
+            });
+        } catch (std::exception const& error) {
+            Warn("Game depth unavailable: %s", error.what());
+            gameDepth.reset();
+        }
+    }
+
     // layers[0] is the scene, later layers are blended over it. afterRead
     // runs once the GPU has finished reading SteamVR's textures, before the
     // encode, so the driver can release a held PostPresent early.
@@ -698,6 +714,7 @@ public:
         encoder.reset();
         frame.reset();
         nativeMotion.reset();
+        gameDepth.reset(); // Detach and drain before the borrowed Vulkan device dies.
 
         if (renderer.hasValue()) {
             renderer.get().destroy(vkCtx);

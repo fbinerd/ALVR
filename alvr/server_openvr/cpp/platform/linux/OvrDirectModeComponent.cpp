@@ -623,6 +623,29 @@ void OvrDirectModeComponent::EncodeWorkerLoop() {
                 enc.sendNewestReal(heldStamp);
                 heldPending = false;
             }
+            // Depth-only bridge: reject warped/foveated/overlay pictures until
+            // a depth reprojection/layout mapping exists. Snapshot the exact
+            // local eye parameters used for this composed frame.
+            alvr::depth::ComposedDepthPicture depthPicture;
+            depthPicture.timestamp = stampTimestampNs;
+            depthPicture.head = {{job.renderPosition[0], job.renderPosition[1], job.renderPosition[2]},
+                {float(job.renderOrientation.x), float(job.renderOrientation.y), float(job.renderOrientation.z), float(job.renderOrientation.w)}};
+            depthPicture.unwarpedSingleLayer = job.layers.size() == 1 && !warpParams.enabled
+                && stampTimestampNs == job.targetTimestampNs && !Settings_Instance()->m_enableFoveatedEncoding;
+            {
+                depthPicture.viewsValid = job.depthViewsValid;
+                for (unsigned eye = 0; eye < 2; ++eye) {
+                    auto const& v = job.depthViews[eye];
+                    depthPicture.localEyes[eye] = {{v.pose.position[0], v.pose.position[1], v.pose.position[2]},
+                        {v.pose.orientation.x, v.pose.orientation.y, v.pose.orientation.z, v.pose.orientation.w}};
+                    depthPicture.fov[eye] = {v.fov.left, v.fov.right, v.fov.up, v.fov.down};
+                    if (!job.layers.empty()) {
+                        auto const& b = job.layers[0].eyes[eye];
+                        depthPicture.sourceUv[eye] = {b.uMin, b.vMin, b.uMax, b.vMax};
+                    }
+                }
+            }
+            enc.prepareGameDepth(depthPicture);
             enc.present(
                 stampTimestampNs,
                 warpParams,
@@ -1144,6 +1167,12 @@ void OvrDirectModeComponent::Present(vr::SharedTextureHandle_t syncTexture) {
     job.targetTimestampNs = m_targetTimestampNs;
     job.renderOrientation = m_framePoseRotation;
     job.renderPosition = m_framePosePosition;
+    {
+        std::unique_lock<std::mutex> lock(m_viewParamsMutex);
+        job.depthViews[0] = m_viewParams[0];
+        job.depthViews[1] = m_viewParams[1];
+        job.depthViewsValid = m_viewParamsValid;
+    }
     job.generation = m_encGeneration;
     job.enqueueTime = std::chrono::steady_clock::now();
 

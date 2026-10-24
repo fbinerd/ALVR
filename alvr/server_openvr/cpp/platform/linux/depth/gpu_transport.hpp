@@ -38,6 +38,8 @@ struct Query {
     uint64_t targetTimestampNs{},displayMonotonicNs{},toleranceNs{},producerId{};
     bool clockMapped=false,fullStereoLayout=false,requireTrackingAligned=true;
     uint32_t poseSpace=MHL_SPACE_TRACKING;
+    bool verifySourceUv=false;
+    std::array<std::array<float,4>,2> sourceUv{}; // uMin,vMin,uMax,vMax
     std::array<MhlDepthPose,2> poses{};
     std::array<std::array<float,4>,2> fov{};
 };

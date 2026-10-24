@@ -286,6 +286,12 @@ struct Receiver::Impl {
         if(p.eyes[0].depth.width!=p.eyes[1].depth.width||p.eyes[0].depth.height!=p.eyes[1].depth.height)return Geometry;
         for(unsigned eye=0;eye<2;eye++){
             auto const& e=p.eyes[eye];double dot=0,sourceNorm=0,expectedNorm=0;
+            if(q.verifySourceUv){
+                auto const& s=e.colour_source;
+                float actual[4]={float(s.rect.x)/s.width,float(s.rect.y)/s.height,
+                    float(uint64_t(s.rect.x)+s.rect.width)/s.width,float(uint64_t(s.rect.y)+s.rect.height)/s.height};
+                for(unsigned i=0;i<4;i++)if(!std::isfinite(q.sourceUv[eye][i])||std::abs(actual[i]-q.sourceUv[eye][i])>1e-5)return Geometry;
+            }
             for(unsigned i=0;i<4;i++){
                 if(!std::isfinite(q.fov[eye][i])||std::abs(e.fov[i]-q.fov[eye][i])>1e-5)return Geometry;
                 if(!std::isfinite(q.poses[eye].orientation[i]))return Pose;

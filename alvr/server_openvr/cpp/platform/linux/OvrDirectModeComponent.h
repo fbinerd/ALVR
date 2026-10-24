@@ -157,6 +157,9 @@ private:
         // Head position the layer was rendered with. ALVR's rewarp is
         // rotation only, so the composed picture keeps this position.
         std::array<float, 3> renderPosition {};
+        // Local eye geometry snapshot for the optional game-depth query.
+        FfiViewParams depthViews[2] {};
+        bool depthViewsValid = false;
         // Encoder-state generation this job was built against. The worker
         // discards the job if the generation moved (rebuild, shutdown, set
         // switch) between enqueue and processing.

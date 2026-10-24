@@ -35,7 +35,7 @@ std::vector<uint8_t> stereo(Frame const& f){
 }
 void pollDelay(){std::this_thread::sleep_for(std::chrono::milliseconds(1));}
 int produce(fs::path root,std::string socket,std::string gpu,std::string mode){
-    OwnedDevice device(gpu);Producer producer(device.get(),socket);auto frames=files(root);size_t count=mode=="negative"?4:mode=="binding"?1:frames.size();
+    OwnedDevice device(gpu);Producer producer(device.get(),socket);auto frames=files(root);size_t count=mode=="negative"?5:mode=="binding"?1:frames.size();
     for(size_t i=0;i<count;i++){
         auto f=read(frames[i]);if(mode=="binding"){f.p.flags|=MHL_TRACKING_ALIGNED;f.p.pose_space=MHL_SPACE_TRACKING;f.p.source_tag=MHL_SOURCE_SYNTHETIC;}auto end=Clock::now()+std::chrono::seconds(15);
         while(!producer.send(f.p,f.bytes.data(),f.bytes.size())){require(Clock::now()<end,"producer timeout/backpressure");pollDelay();}
@@ -81,8 +81,8 @@ int main(int argc,char** argv){
         std::cout<<"BYTE_EXACT frames="<<paths.size()<<" allocation_bytes="<<total<<" previous_image_lifetime=PASS\n";
         // Negative matching cases use a separate receiver/socket connection.
         std::string ns=(output/"negative.sock").string();Receiver negative(device.get(),ns,flag,logger);negative.acquire(q);auto bad=child(fs::absolute(argv[0]).string(),input,ns,argv[3],"negative");
-        for(unsigned i=0;i<4;i++){
-            auto f=read(paths[i]);auto wrong=query(f);if(i==0)wrong.displayMonotonicNs++;if(i==1)wrong.fov[0][0]+=.01f;if(i==2)wrong.poses[0].position[0]+=.01f;if(i==3)wrong.clockMapped=false;
+        for(unsigned i=0;i<5;i++){
+            auto f=read(paths[i]);auto wrong=query(f);if(i==0)wrong.displayMonotonicNs++;if(i==1)wrong.fov[0][0]+=.01f;if(i==2)wrong.poses[0].position[0]+=.01f;if(i==3)wrong.clockMapped=false;if(i==4){wrong.verifySourceUv=true;wrong.sourceUv[0]={1,0,0,1};wrong.sourceUv[1]={0,0,1,1};}
             end=Clock::now()+std::chrono::seconds(15);while(negative.counters().rejected<=i){require(!negative.acquire(wrong),"invalid query accepted");require(Clock::now()<end,"negative case timeout");pollDelay();}
         }
         reap(bad);auto c=negative.counters();require(c.timestamp&&c.geometry&&c.pose&&c.clock&&!c.accepted,"strict match counters failed");

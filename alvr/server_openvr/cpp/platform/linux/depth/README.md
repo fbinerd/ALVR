@@ -55,3 +55,23 @@ lifetime, rejects wrong clocks/time/FOV/pose and exercises exact hook binding.
 Positive callback uses an explicitly synthetic aligned packet; it is not a
 live-space calibration. Real replay packets retain their original unaligned
 recording-space semantics in the raw receiver test.
+
+## Production binding (2026-10-24)
+
+Supersedes the preceding no-call-site checkpoint. ProductionDepthSource.hpp
+owns registration and calibrated queries; diag_depth_receiver remains off by
+default and refreshes in <=1 second. It reads a private same-UID calibration
+record at ~/.config/alvr/depth_calibration. Missing/expired clock/space
+measurement rejects depth. No live calibrator or live delivery is claimed.
+
+Merge hooks: Encoder.hpp adds only the depth header/member, prepareGameDepth
+method borrowing its VkContext/queue, and destructor reset after nativeMotion
+quiesces and before device teardown. OvrDirectModeComponent.h adds a local-eye
+snapshot to FrameJob; .cpp snapshots it on enqueue and supplies one immutable
+ComposedDepthPicture before enc.present. No synthesis algorithm/policy changes.
+Only a single unwarped, non-foveated layer is eligible; exact timestamp, FOV,
+pose and source UV mapping must match. A rewarped picture needs depth
+reprojection first, which is not implemented. Production query/registration
+and unmodified NativeMotion::capture are proved by build_linux_depth_capture.sh
+using a test-only optical estimator stub on Intel. Never link that stub into
+the driver. The research README has bridge assumptions and reproduction steps.
