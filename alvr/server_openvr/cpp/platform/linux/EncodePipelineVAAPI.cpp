@@ -5,6 +5,8 @@
 #include "alvr_server/bindings.h"
 #include "ffmpeg_helper.h"
 #include <chrono>
+#include <string_view>
+#include <vector>
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -12,6 +14,7 @@ extern "C" {
 #include <libavfilter/buffersink.h>
 #include <libavfilter/buffersrc.h>
 #include <libavutil/hwcontext.h>
+#include <libavutil/hwcontext_vaapi.h>
 #include <libavutil/opt.h>
 }
 
@@ -227,6 +230,45 @@ alvr::EncodePipelineVAAPI::EncodePipelineVAAPI(
     }
 
     av_opt_set_int(encoder_ctx->priv_data, "filler_data", settings->m_fillerData, 0);
+
+    // Intel: the fixed-function encoder (VDEnc, VAEntrypointEncSliceLP) does
+    // not compete with SteamVR's rendering for the GPU's execution units,
+    // unlike the default shader-assisted one: on a UHD 770 it took encoding
+    // from ~22 ms to ~4 ms a frame. Used only where the driver offers it for
+    // this profile; ALVR_VAAPI_LOW_POWER=0 keeps the default.
+    if (vendor == Vendor::Intel) {
+        char const* lowPower = getenv("ALVR_VAAPI_LOW_POWER");
+        VAProfile vaProfile = VAProfileNone;
+        switch (codec_id) {
+        case ALVR_CODEC_H264:
+            vaProfile = encoder_ctx->profile == AV_PROFILE_H264_HIGH ? VAProfileH264High
+                : encoder_ctx->profile == AV_PROFILE_H264_MAIN       ? VAProfileH264Main
+                                                               : VAProfileH264ConstrainedBaseline;
+            break;
+        case ALVR_CODEC_HEVC:
+            vaProfile = encoder_ctx->profile == AV_PROFILE_HEVC_MAIN_10 ? VAProfileHEVCMain10
+                                                                        : VAProfileHEVCMain;
+            break;
+        case ALVR_CODEC_AV1:
+            vaProfile = VAProfileAV1Profile0;
+            break;
+        }
+        bool hasLowPower = false;
+        auto vaCtx = (AVVAAPIDeviceContext*)((AVHWDeviceContext*)hw_ctx->data)->hwctx;
+        std::vector<VAEntrypoint> entrypoints(vaMaxNumEntrypoints(vaCtx->display));
+        int count = 0;
+        if (vaProfile != VAProfileNone
+            && vaQueryConfigEntrypoints(vaCtx->display, vaProfile, entrypoints.data(), &count)
+                == VA_STATUS_SUCCESS) {
+            for (int i = 0; i < count; ++i) {
+                hasLowPower |= entrypoints[i] == VAEntrypointEncSliceLP;
+            }
+        }
+        if (hasLowPower && (!lowPower || std::string_view(lowPower) != "0")) {
+            av_opt_set_int(encoder_ctx->priv_data, "low_power", 1, 0);
+            Info("VAAPI: Intel low-power (VDEnc) encoding");
+        }
+    }
 
     encoder_ctx->width = width;
     encoder_ctx->height = height;
