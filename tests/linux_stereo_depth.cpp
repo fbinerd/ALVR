@@ -631,7 +631,10 @@ TestResults runResolutionTest(
         vk::Format::eR8G8B8A8Unorm,
         // STEREO_LUMA_MAX caps the estimator luma (0 = full resolution).
         std::getenv("STEREO_LUMA_MAX") ? uint32_t(std::stoul(std::getenv("STEREO_LUMA_MAX")))
-                                       : alvr::motion::StereoDepth::DefaultLumaDimension
+                                       : alvr::motion::StereoDepth::DefaultLumaDimension,
+        false,
+        // STEREO_COARSE=n adds the coarse near-content estimate (driver: 320).
+        std::getenv("STEREO_COARSE") ? uint32_t(std::stoul(std::getenv("STEREO_COARSE"))) : 0u
     );
 
     // Warm-up run

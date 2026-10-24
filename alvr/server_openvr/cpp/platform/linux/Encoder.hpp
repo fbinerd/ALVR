@@ -164,7 +164,10 @@ private:
                 // error (640: 73%, 0.44%); reduced output costs ~2.7 ms at
                 // 2048x2144 per eye on an idle RTX 3060 (640: ~2.5 ms).
                 stereoDepth = std::make_unique<motion::StereoDepth>(
-                    vkCtx, outExtent, static_cast<vk::Format>(output.imageCI.format), 768, true
+                    vkCtx, outExtent, static_cast<vk::Format>(output.imageCI.format), 768, true,
+                    // Coarse estimate for near content (a hand at 0.2-0.4 m):
+                    // 768 alone returned wrong distances there.
+                    320
                 );
             motion::StereoDepthTiming timing;
             stereoDepth->estimate(output.image.image, output.image.view, output.image.layout,

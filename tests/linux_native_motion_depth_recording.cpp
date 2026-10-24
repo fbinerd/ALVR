@@ -179,7 +179,8 @@ int main(int argc,char** argv) {
         }
         estimator=std::make_unique<alvr::motion::StereoDepth>(ctx,vk::Extent2D{size.width(),size.height},vk::Format::eR8G8B8A8Unorm,
             std::getenv("STEREO_LUMA_MAX")?uint32_t(std::stoul(std::getenv("STEREO_LUMA_MAX"))):0u,
-            std::getenv("STEREO_REDUCED")!=nullptr);
+            std::getenv("STEREO_REDUCED")!=nullptr,
+            std::getenv("STEREO_COARSE")?uint32_t(std::stoul(std::getenv("STEREO_COARSE"))):0u);
     }
     for(unsigned variant=0;variant<(stereo?4u:3u);variant++){
         // DEPTH_VARIANTS=2,3 runs only those variants (quick A/B iterations;

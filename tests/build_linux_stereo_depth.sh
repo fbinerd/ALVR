@@ -5,14 +5,14 @@ checkout="$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)"
 out="${1:?Usage: tests/build_linux_stereo_depth.sh OUTPUT_DIRECTORY}"
 mkdir -p "$out"; out="$(cd "$out" && pwd)"
 native="$checkout/alvr/server_openvr/cpp/platform/linux"
-for shader in stereo_luma stereo_depth stereo_fill; do
+for shader in stereo_luma stereo_depth stereo_fill stereo_merge; do
     "${GLSLANG_VALIDATOR:-glslangValidator}" -V --target-env vulkan1.2 -o "$out/$shader.spv" "$native/shader/$shader.comp"
 done
 python3 - "$out" <<'PY'
 import pathlib, struct, sys
 out = pathlib.Path(sys.argv[1])
 header = '#pragma once\n#include <cstdint>\nnamespace alvr::motion::shader {\n'
-for name in ('stereo_luma', 'stereo_depth', 'stereo_fill'):
+for name in ('stereo_luma', 'stereo_depth', 'stereo_fill', 'stereo_merge'):
     data = (out / f'{name}.spv').read_bytes()
     words = struct.unpack('<' + 'I' * (len(data) // 4), data)
     header += f'inline constexpr uint32_t {name}[]={{' + ','.join(f'0x{w:08x}' for w in words) + '};\n'

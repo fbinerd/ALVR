@@ -50,7 +50,14 @@ public:
         // Output depth at the luma grid instead of the colour extent: much
         // cheaper, enough for the positional correction. An outputDepth
         // image passed to estimate() must then have depthExtent().
-        bool reducedDepth = false
+        bool reducedDepth = false,
+        // Non-zero: also run a coarse estimate at this luma cap. Where either
+        // estimate sees content nearer than 0.8 m, the candidate whose depth
+        // best matches the two eyes' colours wins (the fine grid cannot reach
+        // the disparity of a hand at 0.2-0.4 m; the coarse one fails from
+        // about 0.5 m); no match leaves the pixel invalid. Output stays at
+        // the fine estimator's extent.
+        uint32_t coarseLumaDimension = 0
     );
     ~StereoDepth();
     StereoDepth(const StereoDepth&) = delete;

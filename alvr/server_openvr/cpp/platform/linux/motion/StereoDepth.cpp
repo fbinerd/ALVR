@@ -125,13 +125,19 @@ struct StereoDepth::State {
     vk::PipelineLayout fillLayout {};
     vk::ShaderModule fillShader {};
     vk::Pipeline fillPipeline {};
+    vk::DescriptorSetLayout mergeDescriptors {};
+    vk::PipelineLayout mergeLayout {};
+    vk::ShaderModule mergeShader {};
+    vk::Pipeline mergePipeline {};
+    std::unique_ptr<StereoDepth> coarse;
 
     State(
         VkContext& c,
         vk::Extent2D extent,
         vk::Format format,
         uint32_t maxLumaDimension,
-        bool reducedDepth
+        bool reducedDepth,
+        uint32_t coarseLumaDimension
     )
         : ctx(c)
         , fullExtent(extent)
@@ -169,6 +175,8 @@ struct StereoDepth::State {
         flowExtent = vk::Extent2D { lumaExtent.width / 4, lumaExtent.height / 4 };
         depthExtent = reducedDepth ? vk::Extent2D { 2 * lumaExtent.width, lumaExtent.height } : fullExtent;
         initialize();
+        if (coarseLumaDimension)
+            coarse = std::make_unique<StereoDepth>(ctx, extent, format, coarseLumaDimension, true, 0);
     }
 
     ~State() {
@@ -186,6 +194,10 @@ struct StereoDepth::State {
         destroyImage(internalDepth);
 
         ctx.dev.destroy(fillPipeline);
+        ctx.dev.destroy(mergePipeline);
+        ctx.dev.destroy(mergeLayout);
+        ctx.dev.destroy(mergeDescriptors);
+        ctx.dev.destroy(mergeShader);
         ctx.dev.destroy(fillShader);
         ctx.dev.destroy(fillLayout);
         ctx.dev.destroy(fillDescriptors);
@@ -449,6 +461,20 @@ struct StereoDepth::State {
             fillShader,
             fillPipeline
         );
+
+        // 4. stereo_merge (coarse estimate over near content)
+        makePipeline(
+            shader::stereo_merge,
+            sizeof(shader::stereo_merge),
+            { vk::DescriptorType::eStorageImage,
+              vk::DescriptorType::eCombinedImageSampler,
+              vk::DescriptorType::eCombinedImageSampler },
+            48,
+            mergeDescriptors,
+            mergeLayout,
+            mergeShader,
+            mergePipeline
+        );
     }
 
     void barrier(
@@ -520,9 +546,10 @@ StereoDepth::StereoDepth(
     vk::Extent2D fullExtent,
     vk::Format colorFormat,
     uint32_t maxLumaDimension,
-    bool reducedDepth
+    bool reducedDepth,
+    uint32_t coarseLumaDimension
 )
-    : state(std::make_unique<State>(ctx, fullExtent, colorFormat, maxLumaDimension, reducedDepth)) {}
+    : state(std::make_unique<State>(ctx, fullExtent, colorFormat, maxLumaDimension, reducedDepth, coarseLumaDimension)) {}
 
 StereoDepth::~StereoDepth() = default;
 
@@ -800,6 +827,39 @@ bool StereoDepth::estimate(
         vk::DescriptorType::eCombinedImageSampler,
     };
     s.dispatch(s.fillPipeline, s.fillLayout, fillImages, fillTypes, &fillPush, sizeof(fillPush), s.depthExtent);
+
+    if (s.coarse) {
+        // Finish the fine estimate, run the coarse one, then merge.
+        s.command.end();
+        s.ctx.dev.resetFences(s.fence);
+        vk::SubmitInfo fineSubmit { .commandBufferCount = 1, .pCommandBuffers = &s.command };
+        s.ctx.useQueue([&](auto& queue) { queue.submit(fineSubmit, s.fence); });
+        if (s.ctx.dev.waitForFences(s.fence, true, TimeoutNs) != vk::Result::eSuccess)
+            throw std::runtime_error("StereoDepth: Depth/fill pass timed out");
+        s.coarse->estimate(inputColor, inputColorView, inputColorLayout, {}, {}, vk::ImageLayout::eGeneral, params);
+        s.command.reset();
+        s.command.begin(vk::CommandBufferBeginInfo { .flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit });
+        s.barrier(targetDepth, vk::ImageLayout::eGeneral, vk::ImageLayout::eGeneral,
+            vk::AccessFlagBits::eShaderWrite, vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eShaderWrite);
+        struct {
+            uint32_t width, height;
+            float nearLimit, ipd;
+            float leftTans[4], rightTans[4];
+        } mergePush { s.depthExtent.width, s.depthExtent.height, 0.8f, params.ipd,
+            { params.leftTans.left, params.leftTans.right, params.leftTans.up, params.leftTans.down },
+            { params.rightTans.left, params.rightTans.right, params.rightTans.up, params.rightTans.down } };
+        std::vector<vk::DescriptorImageInfo> mergeImages = {
+            { {}, targetDepthView, vk::ImageLayout::eGeneral },
+            { s.nearestSampler, s.coarse->internalDepthView(), vk::ImageLayout::eGeneral },
+            { s.linearSampler, inputColorView, vk::ImageLayout::eShaderReadOnlyOptimal },
+        };
+        std::vector<vk::DescriptorType> mergeTypes = {
+            vk::DescriptorType::eStorageImage,
+            vk::DescriptorType::eCombinedImageSampler,
+            vk::DescriptorType::eCombinedImageSampler,
+        };
+        s.dispatch(s.mergePipeline, s.mergeLayout, mergeImages, mergeTypes, &mergePush, sizeof(mergePush), s.depthExtent);
+    }
 
     // Transition output to target layout
     if (targetDepthLayout != vk::ImageLayout::eGeneral) {
