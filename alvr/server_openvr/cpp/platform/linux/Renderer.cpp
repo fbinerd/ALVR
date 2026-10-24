@@ -1,6 +1,7 @@
 #include "Renderer.hpp"
 
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <optional>
 #include <stdexcept>
@@ -788,25 +789,35 @@ void Renderer::render(VkContext& vkCtx, std::vector<Layer> const& layers) {
 // a PAM (RGB_ALPHA) file plus a text file with the format and bounds. The
 // bytes are SteamVR's own: no blend, no sRGB conversion. Runs while the
 // caller still holds the textures (before render returns), at most once a
-// second and 20 times per run. Directory: $ALVR_OVERLAY_DUMP_DIR, else
-// /tmp/alvr-overlay-alpha.
+// second. Uniform layers (one colour everywhere, such as the dimming quad
+// shown while the dashboard fades) are saved at most 3 times and do not
+// count; layers with content are saved up to 30 times. The counters are
+// process-wide, so a recreated renderer does not overwrite earlier files,
+// and each file is written under a temporary name and renamed when complete.
+// Directory: $ALVR_OVERLAY_DUMP_DIR, else /tmp/alvr-overlay-alpha.
+static int gOverlayDumpSeq = 0;
+static int gOverlayContentDumps = 0;
+static int gOverlayUniformDumps = 0;
+static u64 gLastOverlayDumpNs = 0;
+
 void Renderer::dumpOverlayLayers(
     VkContext& vkCtx,
     std::vector<Layer> const& layers,
     std::vector<std::vector<Image*>> const& sources
 ) {
-    constexpr int MaxDumps = 20;
+    constexpr int MaxContentDumps = 30;
+    constexpr int MaxUniformDumps = 3;
     constexpr u64 MinIntervalNs = 1'000'000'000ull;
-    if (overlayDumpCount >= MaxDumps) {
+    if (gOverlayContentDumps >= MaxContentDumps) {
         return;
     }
     timespec ts {};
     clock_gettime(CLOCK_MONOTONIC, &ts);
     u64 nowNs = u64(ts.tv_sec) * 1'000'000'000ull + u64(ts.tv_nsec);
-    if (lastOverlayDumpNs != 0 && nowNs - lastOverlayDumpNs < MinIntervalNs) {
+    if (gLastOverlayDumpNs != 0 && nowNs - gLastOverlayDumpNs < MinIntervalNs) {
         return;
     }
-    lastOverlayDumpNs = nowNs;
+    gLastOverlayDumpNs = nowNs;
 
     char const* envDir = getenv("ALVR_OVERLAY_DUMP_DIR");
     std::string dir = envDir && *envDir ? envDir : "/tmp/alvr-overlay-alpha";
@@ -887,9 +898,32 @@ void Renderer::dumpOverlayLayers(
         auto* bytes = static_cast<u8 const*>(vkCtx.dev.mapMemory(memory, 0, size));
         bool bgra = layer.format == vk::Format::eB8G8R8A8Unorm
             || layer.format == vk::Format::eB8G8R8A8Srgb;
-        std::string base = dir + "/overlay_" + std::to_string(overlayDumpCount) + "_layer"
-            + std::to_string(layerIdx);
-        if (FILE* f = fopen((base + ".pam").c_str(), "wb")) {
+
+        bool uniform = true;
+        for (vk::DeviceSize i = 4; i < size; i += 4) {
+            if (memcmp(bytes + i, bytes, 4) != 0) {
+                uniform = false;
+                break;
+            }
+        }
+        if (uniform && gOverlayUniformDumps >= MaxUniformDumps) {
+            vkCtx.dev.unmapMemory(memory);
+            vkCtx.dev.destroy(buffer);
+            vkCtx.dev.free(memory);
+            continue;
+        }
+        if (uniform) {
+            ++gOverlayUniformDumps;
+        } else {
+            ++gOverlayContentDumps;
+        }
+
+        char seq[16];
+        snprintf(seq, sizeof(seq), "%03d", gOverlayDumpSeq++);
+        std::string base = dir + "/overlay_" + seq + "_layer" + std::to_string(layerIdx)
+            + (uniform ? "_uniform" : "_content");
+        std::string tmpPam = base + ".pam.tmp";
+        if (FILE* f = fopen(tmpPam.c_str(), "wb")) {
             fprintf(
                 f,
                 "P7\nWIDTH %u\nHEIGHT %u\nDEPTH 4\nMAXVAL 255\nTUPLTYPE RGB_ALPHA\nENDHDR\n",
@@ -908,6 +942,7 @@ void Renderer::dumpOverlayLayers(
                 fwrite(row.data(), 1, row.size(), f);
             }
             fclose(f);
+            rename(tmpPam.c_str(), (base + ".pam").c_str());
         }
         if (FILE* f = fopen((base + ".txt").c_str(), "w")) {
             fprintf(
@@ -940,7 +975,6 @@ void Renderer::dumpOverlayLayers(
         vkCtx.dev.free(memory);
         Info("Overlay alpha probe: wrote %s.pam", base.c_str());
     }
-    ++overlayDumpCount;
 }
 
 // Imports one of SteamVR's textures the first time its handle is seen, the

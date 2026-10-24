@@ -176,15 +176,13 @@ class Renderer {
     void drawLayerEye(VkContext& vkCtx, Image& source, int eye, LayerEye const& rect, bool opaque);
 
     // Diagnostic (overlay alpha probe): saves the raw bytes of the left eye
-    // of every layer above 0 as a PAM file, at most once a second and 20
-    // files per run. See dumpOverlayLayers in Renderer.cpp.
+    // of every layer above 0 as a PAM file, at most once a second. See
+    // dumpOverlayLayers in Renderer.cpp.
     void dumpOverlayLayers(
         VkContext& vkCtx,
         std::vector<Layer> const& layers,
         std::vector<std::vector<Image*>> const& sources
     );
-    u64 lastOverlayDumpNs = 0;
-    int overlayDumpCount = 0;
 
     // vk::Semaphore renderFinishedSem;
 
