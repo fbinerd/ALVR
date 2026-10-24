@@ -895,7 +895,8 @@ int main(int argc, char** argv) {
                 fixture.uploadColor(rgba.data());
                 for (bool reduced : { false, true }) {
                     alvr::motion::StereoDepth estimator(
-                        ctx, vk::Extent2D { full, h }, vk::Format::eR8G8B8A8Unorm, 640, reduced
+                        ctx, vk::Extent2D { full, h }, vk::Format::eR8G8B8A8Unorm,
+                        std::getenv("STEREO_LUMA_MAX") ? uint32_t(std::stoul(std::getenv("STEREO_LUMA_MAX"))) : 640u, reduced
                     );
                     std::vector<double> wall, flow, depth;
                     for (int run = 0; run < 55; ++run) {

@@ -141,10 +141,12 @@ private:
             return std::nullopt;
         try {
             if (!stereoDepth)
-                // A 640 luma cap keeps near objects within the flow's reach
-                // and costs about 3.5 ms at 1832x1920 per eye (offline).
+                // A 768 luma cap (even flow grid) keeps near objects within
+                // the flow's reach: offline, near box 90% valid at 0.37%
+                // error (640: 73%, 0.44%); reduced output costs ~2.7 ms at
+                // 2048x2144 per eye on an idle RTX 3060 (640: ~2.5 ms).
                 stereoDepth = std::make_unique<motion::StereoDepth>(
-                    vkCtx, outExtent, static_cast<vk::Format>(output.imageCI.format), 640, true
+                    vkCtx, outExtent, static_cast<vk::Format>(output.imageCI.format), 768, true
                 );
             motion::StereoDepthTiming timing;
             stereoDepth->estimate(output.image.image, output.image.view, output.image.layout,
