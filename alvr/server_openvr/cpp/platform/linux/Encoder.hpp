@@ -379,6 +379,9 @@ public:
 
     void createImages(render::RendererCreateInfo rendererCI) {
         nativeMotion.reset();
+        stereoPending = false;
+        stereoDepth.reset();
+        gameDepth.reset();
         if (renderer.hasValue()) {
             renderer.get().destroy(vkCtx);
             renderer.reset();
@@ -521,6 +524,9 @@ public:
         encoder.reset();
         frame.reset();
         nativeMotion.reset();
+        stereoPending = false;
+        stereoDepth.reset();
+        gameDepth.reset();
         if (renderer.hasValue()) {
             renderer.get().destroy(vkCtx);
             renderer.reset();
@@ -797,6 +803,8 @@ public:
         encoder.reset();
         frame.reset();
         nativeMotion.reset();
+        stereoPending = false;
+        stereoDepth.reset(); // Its destructor calls Vulkan; the device must still exist.
         gameDepth.reset(); // Detach and drain before the borrowed Vulkan device dies.
 
         if (renderer.hasValue()) {
