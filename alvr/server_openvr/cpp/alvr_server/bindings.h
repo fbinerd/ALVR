@@ -140,6 +140,12 @@ struct Settings {
     unsigned int m_entropyCoding;
     bool m_forceSwEncoding;
     unsigned int m_swThreadCount;
+    // Linux GPU / encoder selection (video.encoder_config.linux_gpu). Empty
+    // strings mean automatic; m_encoderBackend: 0 automatic, 1 VAAPI,
+    // 2 NVENC, 3 Vulkan Video, 4 software.
+    char m_renderGpu[256];
+    char m_encoderGpu[256];
+    unsigned int m_encoderBackend;
 
     unsigned int m_nvencTuningPreset;
     unsigned int m_nvencMultiPass;
