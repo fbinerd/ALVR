@@ -320,9 +320,15 @@ public:
             ? render::HandleType::OpaqueFd
             : render::HandleType::DmaBuf;
         rendererCI.linearOutput = target.crossDevice;
+        rendererCI.hostOutputCopy = target.crossDevice;
 
         outExtent = rendererCI.outputExtent;
         renderer.emplace(vkCtx, rendererCI, pipeCIs);
+        if (target.crossDevice) {
+            auto host = renderer.get().hostOutput();
+            target.hostPixels = host.pixels;
+            target.hostRowPitch = host.rowPitch;
+        }
     }
 
     void initEncoding() {

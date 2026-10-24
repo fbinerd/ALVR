@@ -71,6 +71,18 @@ struct RendererCreateInfo {
     // The encoder runs on another GPU: export the output with the LINEAR
     // DRM modifier, the only layout two different GPUs reliably agree on.
     bool linearOutput = false;
+    // The encoder runs on another GPU that cannot read this GPU's memory:
+    // after each frame, copy the output image into host memory (a GPU
+    // transfer), from which the encoder uploads it (see hostOutput()).
+    bool hostOutputCopy = false;
+};
+
+// The output image copied to host memory, tightly packed rows.
+struct HostOutput {
+    void const* pixels = nullptr;
+    u32 rowPitch = 0;
+    u32 width = 0;
+    u32 height = 0;
 };
 
 // One eye of a submitted layer: SteamVR's texture by its shared handle, the
@@ -184,6 +196,12 @@ class Renderer {
     vk::PipelineLayout layerPipeLayout;
     vk::Pipeline layerPipe;
 
+    // hostOutputCopy: persistent host-visible buffer the output is copied to.
+    vk::Buffer hostBuf;
+    vk::DeviceMemory hostMem;
+    HostOutput host;
+    bool hostCopy = false;
+
     Image& importTexture(VkContext& vkCtx, Layer const& layer, LayerEye const& eye);
     void drawLayerEye(VkContext& vkCtx, Image& source, int eye, LayerEye const& rect, bool opaque);
 
@@ -219,6 +237,9 @@ public:
     FoveationCenterShifts foveationCenterShifts {};
 
     Output getOutput() { return output; }
+
+    // Valid when created with hostOutputCopy; refreshed by every render().
+    HostOutput hostOutput() const { return host; }
 
     void destroy(VkContext const& ctx);
 };

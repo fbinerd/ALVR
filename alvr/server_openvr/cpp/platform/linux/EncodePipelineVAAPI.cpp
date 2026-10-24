@@ -142,8 +142,12 @@ alvr::EncodePipelineVAAPI::EncodePipelineVAAPI(
     alvr::Vendor vendor,
     VkFrame& input_frame,
     uint32_t width,
-    uint32_t height
+    uint32_t height,
+    void const* hostPixels,
+    unsigned hostRowPitch
 ) {
+    host_pixels = hostPixels;
+    host_row_pitch = hostRowPitch;
     /* VAAPI Encoding pipeline
      * The encoding pipeline has 3 frame types:
      * - input vulkan frames, only used to initialize the mapped frames
@@ -351,7 +355,18 @@ alvr::EncodePipelineVAAPI::EncodePipelineVAAPI(
     // into (its output import was never finished), so it streamed black on
     // Intel. Intel now maps the Vulkan output like AMD; the renderer keeps
     // that image uncompressed. ALVR_VAAPI_IMPORT_SURFACE=1 restores it.
-    if (getenv("ALVR_VAAPI_IMPORT_SURFACE")) {
+    if (host_pixels) {
+        // Cross-GPU: the encoder GPU cannot read the render GPU's memory.
+        // Keep one VA surface of the encoder GPU and upload the renderer's
+        // host copy into it every frame (PushFrame).
+        Info("VAAPI: cross-GPU encoding, frames uploaded from host memory");
+        host_format = frames_ctx->sw_format;
+        mapped_frame = av_frame_alloc();
+        if ((err = av_hwframe_get_buffer(hw_frames_ref, mapped_frame, 0)) < 0) {
+            throw alvr::AvException("Failed to get a VA surface for host upload:", err);
+        }
+        av_buffer_unref(&hw_frames_ref);
+    } else if (getenv("ALVR_VAAPI_IMPORT_SURFACE")) {
         // TODO: Fix output import
         Info("Importing VA surface");
         DrmImage drm;
@@ -455,7 +470,21 @@ void alvr::EncodePipelineVAAPI::PushFrame(uint64_t targetTimestampNs, bool idr) 
                         std::chrono::steady_clock::now().time_since_epoch()
     )
                         .count();
-    int err = av_buffersrc_add_frame_flags(
+    int err;
+    if (host_pixels) {
+        AVFrame* host = av_frame_alloc();
+        host->format = host_format;
+        host->width = mapped_frame->width;
+        host->height = mapped_frame->height;
+        host->data[0] = const_cast<uint8_t*>(static_cast<uint8_t const*>(host_pixels));
+        host->linesize[0] = int(host_row_pitch);
+        err = av_hwframe_transfer_data(mapped_frame, host, 0);
+        av_frame_free(&host);
+        if (err < 0) {
+            throw alvr::AvException("upload of the host frame to VAAPI failed", err);
+        }
+    }
+    err = av_buffersrc_add_frame_flags(
         filter_in, mapped_frame, AV_BUFFERSRC_FLAG_PUSH | AV_BUFFERSRC_FLAG_KEEP_REF
     );
     if (err != 0) {
