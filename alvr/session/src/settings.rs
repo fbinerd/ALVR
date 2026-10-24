@@ -205,6 +205,55 @@ pub struct SoftwareEncodingConfig {
     pub thread_count: u32,
 }
 
+// Linux: which encoding technology the streamer uses. Automatic keeps the
+// historical choice (NVENC on NVIDIA, VAAPI otherwise). The values are passed
+// to the C++ streamer as integers, so they must stay stable.
+#[repr(u32)]
+#[derive(SettingsSchema, Serialize, Deserialize, Clone, Copy, PartialEq, Debug)]
+pub enum EncoderBackend {
+    #[schema(strings(display_name = "Automatic"))]
+    Automatic = 0,
+    #[schema(strings(display_name = "VAAPI (Intel, AMD)"))]
+    Vaapi = 1,
+    #[schema(strings(display_name = "NVENC (NVIDIA)"))]
+    Nvenc = 2,
+    #[schema(strings(display_name = "Vulkan Video (not implemented yet)"))]
+    VulkanVideo = 3,
+    #[schema(strings(display_name = "Software (not implemented on Linux yet)"))]
+    Software = 4,
+}
+
+#[derive(SettingsSchema, Serialize, Deserialize, Clone, PartialEq)]
+#[schema(collapsible)]
+pub struct LinuxGpuConfig {
+    #[schema(strings(
+        display_name = "Render GPU",
+        help = r#"GPU that SteamVR and the games render on. ALVR's own Vulkan device must be the same GPU, because SteamVR shares its textures only within one GPU.
+Value: a device index or part of the GPU name, as listed in the log ("Vulkan device N: name"). Unset: discrete GPU first, then integrated.
+SteamVR itself is moved through its launch options; the dashboard prints the line to use for the selected GPU.
+The ALVR_VULKAN_DEVICE environment variable, if set, takes precedence."#
+    ))]
+    #[schema(flag = "steamvr-restart")]
+    pub render_gpu: Option<String>,
+
+    #[schema(strings(
+        display_name = "Encoder GPU",
+        help = r#"GPU that encodes the video. Unset: the render GPU.
+Value: a DRM render node (/dev/dri/renderD129), a device index or part of the GPU name.
+A GPU other than the render GPU needs VAAPI: the frame is handed over as a linear dma-buf. This cross-GPU path is not tested yet."#
+    ))]
+    #[schema(flag = "steamvr-restart")]
+    pub encoder_gpu: Option<String>,
+
+    #[schema(strings(
+        display_name = "Encoder technology",
+        help = r#"Automatic: NVENC on NVIDIA, VAAPI on Intel and AMD (chosen from the encoder GPU).
+Vulkan Video and Software are placeholders: selecting them logs an error and no encoder is created."#
+    ))]
+    #[schema(flag = "steamvr-restart")]
+    pub encoder_backend: EncoderBackend,
+}
+
 #[derive(SettingsSchema, Serialize, Deserialize, Clone, PartialEq)]
 #[schema(collapsible)]
 pub struct HDRConfig {
@@ -302,6 +351,10 @@ CABAC produces better compression but it's significantly slower and may lead to 
 
     #[schema(strings(display_name = "Software (CPU) encoding"))]
     pub software: SoftwareEncodingConfig,
+
+    #[cfg_attr(not(target_os = "linux"), schema(flag = "hidden"))]
+    #[schema(strings(display_name = "GPU and encoder selection (Linux)"))]
+    pub linux_gpu: LinuxGpuConfig,
 }
 
 #[derive(SettingsSchema, Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -1840,6 +1893,21 @@ pub fn session_settings_default() -> SettingsDefault {
                     gui_collapsed: true,
                     force_software_encoding: false,
                     thread_count: 0,
+                },
+                // Unset GPUs and Automatic keep ALVR's default behaviour.
+                linux_gpu: LinuxGpuConfigDefault {
+                    gui_collapsed: true,
+                    render_gpu: OptionalDefault {
+                        set: false,
+                        content: "".into(),
+                    },
+                    encoder_gpu: OptionalDefault {
+                        set: false,
+                        content: "".into(),
+                    },
+                    encoder_backend: EncoderBackendDefault {
+                        variant: EncoderBackendDefaultVariant::Automatic,
+                    },
                 },
             },
             mediacodec_extra_options: {

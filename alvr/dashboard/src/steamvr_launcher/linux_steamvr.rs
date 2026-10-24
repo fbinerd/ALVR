@@ -95,11 +95,62 @@ pub fn linux_hardware_checks() {
             (adapter, vendor)
         })
         .collect::<Vec<_>>();
-    linux_gpu_checks(&device_infos);
+
+    // "Render GPU" setting: the GPU SteamVR and the games should render on.
+    // Matched like the streamer does (index or part of the name); the
+    // streamer's own device list may be ordered differently, so a name is
+    // the reliable selector.
+    let render_gpu = crate::data_sources::get_read_only_local_session()
+        .settings()
+        .video
+        .encoder_config
+        .linux_gpu
+        .render_gpu
+        .clone()
+        .filter(|selector| !selector.trim().is_empty());
+    let selected_adapter = render_gpu.as_ref().and_then(|selector| {
+        let wanted = selector.trim().to_lowercase();
+        let found = wgpu_adapters.iter().enumerate().find(|(index, adapter)| {
+            wanted == index.to_string() || adapter.get_info().name.to_lowercase().contains(&wanted)
+        });
+        if found.is_none() {
+            warn!(
+                "Render GPU \"{selector}\" matches no Vulkan adapter; using the automatic choice"
+            );
+        }
+        found.map(|(_, adapter)| adapter)
+    });
+
+    linux_gpu_checks(&device_infos, selected_adapter);
     linux_encoder_checks(&device_infos);
 }
 
-fn linux_gpu_checks(device_infos: &[(&wgpu::Adapter, DeviceInfo)]) {
+// Launch options that make SteamVR / a game render on `adapter`.
+fn render_gpu_launch_options(adapter: &wgpu::Adapter) -> String {
+    let info = adapter.get_info();
+    if info.vendor == 0x10de {
+        // NVIDIA's proprietary driver: PRIME render offload.
+        let base_path = "/usr/share/vulkan/icd.d/nvidia_icd";
+        let vk_override = if Path::new(&format!("{base_path}.json")).exists() {
+            format!("VK_DRIVER_FILES={base_path}.json")
+        } else if Path::new(&format!("{base_path}.x86_64.json")).exists() {
+            format!("VK_DRIVER_FILES={base_path}.x86_64.json")
+        } else {
+            "__VK_LAYER_NV_optimus=NVIDIA_only".to_string()
+        };
+        format!("__GLX_VENDOR_LIBRARY_NAME=nvidia __NV_PRIME_RENDER_OFFLOAD=1 {vk_override}")
+    } else {
+        // Mesa drivers (Intel, AMD, NVK): select the device by PCI ids for
+        // OpenGL (DRI_PRIME) and Vulkan (MESA_VK_DEVICE_SELECT).
+        let ids = format!("{:04x}:{:04x}", info.vendor, info.device);
+        format!("DRI_PRIME={ids} MESA_VK_DEVICE_SELECT={ids}")
+    }
+}
+
+fn linux_gpu_checks(
+    device_infos: &[(&wgpu::Adapter, DeviceInfo)],
+    selected_adapter: Option<&wgpu::Adapter>,
+) {
     let have_intel_igpu = device_infos.iter().any(|gpu| {
         gpu.1
             == DeviceInfo::Intel {
@@ -179,6 +230,18 @@ fn linux_gpu_checks(device_infos: &[(&wgpu::Adapter, DeviceInfo)]) {
     let game_opts = "And this similar line to the launch options of ALL games that you're trying to launch from steam:";
 
     let mut vrmonitor_path_written = false;
+    if let Some(adapter) = selected_adapter {
+        let options = render_gpu_launch_options(adapter);
+        info!(
+            "Render GPU setting: {} ({:04x}:{:04x})",
+            adapter.get_info().name,
+            adapter.get_info().vendor,
+            adapter.get_info().device
+        );
+        warn!("{steamvr_opts}\n{options} {vrmonitor_path_string} %command%");
+        warn!("{game_opts}\n{options} %command%");
+        return;
+    }
     if have_igpu {
         if have_nvidia_dgpu {
             let base_path = "/usr/share/vulkan/icd.d/nvidia_icd";

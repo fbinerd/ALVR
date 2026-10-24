@@ -22,49 +22,84 @@ void alvr::EncodePipeline::SetParams(FfiDynamicEncoderParams params) {
     }
 }
 
+char const* alvr::encoderBackendName(EncoderBackend backend) {
+    switch (backend) {
+    case EncoderBackend::Automatic:
+        return "automatic";
+    case EncoderBackend::Vaapi:
+        return "VAAPI";
+    case EncoderBackend::Nvenc:
+        return "NVENC";
+    case EncoderBackend::VulkanVideo:
+        return "Vulkan Video";
+    case EncoderBackend::Software:
+        return "software";
+    }
+    return "unknown";
+}
+
+// Builds the encoder for a resolved target. Returns nullptr (after logging
+// why) when the technology is not available, which leaves the stream idle
+// until the settings change, as before.
 std::unique_ptr<alvr::EncodePipeline> alvr::EncodePipeline::Create(
     alvr::VkContext& vk_ctx,
-    std::string devicePath,
+    EncoderTarget const& target,
     VkFrame& input_frame,
     /* VkFrameCtx &vk_frame_ctx,  */ uint32_t width,
     uint32_t height
 ) {
-    using alvr::Vendor;
-    if (Settings_Instance()->m_forceSwEncoding == false) {
-        alvr::HWContext hwCtx(vk_ctx);
-        if (vk_ctx.meta.vendor == Vendor::Nvidia) {
-            try {
-                auto nvenc = std::make_unique<alvr::EncodePipelineNvEnc>(
-                    hwCtx, vk_ctx, input_frame, width, height
-                );
-                Info("Using NvEnc encoder");
-                return nvenc;
-            } catch (std::exception& e) {
-                Error(
-                    "Failed to create NvEnc encoder: %s\nPlease make sure you have installed CUDA "
-                    "runtime.",
-                    e.what()
-                );
-            }
-        } else {
-            try {
-                auto vaapi = std::make_unique<alvr::EncodePipelineVAAPI>(
-                    hwCtx, devicePath, vk_ctx.meta.vendor, input_frame, width, height
-                );
-                Info("Using VAAPI encoder");
-                return vaapi;
-            } catch (std::exception& e) {
-                Error(
-                    "Failed to create VAAPI encoder: %s\nPlease make sure you have installed VAAPI "
-                    "runtime.",
-                    e.what()
-                );
-            }
+    switch (target.backend) {
+    case EncoderBackend::Nvenc:
+        // CUDA interop imports the renderer's opaque-fd image, which exists
+        // only on the render GPU.
+        if (target.crossDevice) {
+            Error("NVENC can only encode on the render GPU; choose VAAPI or the same GPU");
+            return nullptr;
         }
+        try {
+            alvr::HWContext hwCtx(vk_ctx);
+            auto nvenc = std::make_unique<alvr::EncodePipelineNvEnc>(
+                hwCtx, vk_ctx, input_frame, width, height
+            );
+            Info("Using NvEnc encoder");
+            return nvenc;
+        } catch (std::exception& e) {
+            Error(
+                "Failed to create NvEnc encoder: %s\nPlease make sure you have installed CUDA "
+                "runtime.",
+                e.what()
+            );
+        }
+        return nullptr;
+    case EncoderBackend::Vaapi:
+        try {
+            alvr::HWContext hwCtx(vk_ctx);
+            auto vaapi = std::make_unique<alvr::EncodePipelineVAAPI>(
+                hwCtx, target.devicePath, target.vendor, input_frame, width, height
+            );
+            Info("Using VAAPI encoder");
+            return vaapi;
+        } catch (std::exception& e) {
+            Error(
+                "Failed to create VAAPI encoder: %s\nPlease make sure you have installed VAAPI "
+                "runtime.",
+                e.what()
+            );
+        }
+        return nullptr;
+    case EncoderBackend::VulkanVideo:
+        // Placeholder: FFmpeg is built with Vulkan, but its *_vulkan encoders
+        // are not enabled and there is no pipeline for them yet.
+        Error("Vulkan Video encoding is not implemented yet");
+        return nullptr;
+    case EncoderBackend::Software:
+        // The x264 pipeline (EncodePipelineSW) is not built on Linux.
+        Error("Software encoding is not implemented on Linux yet");
+        return nullptr;
+    case EncoderBackend::Automatic:
+        break;
     }
-    // auto sw = std::make_unique<alvr::EncodePipelineSW>(render, width, height);
-    // Info("Using SW encoder");
-    // return sw;
+    Error("Encoder technology was not resolved");
     return nullptr;
 }
 
