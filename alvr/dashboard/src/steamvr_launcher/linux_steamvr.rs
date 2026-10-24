@@ -144,7 +144,7 @@ fn apply_render_gpu_environment(command: &mut Command, adapter: &wgpu::Adapter) 
         command.env_remove(name);
     }
     let info = adapter.get_info();
-    if info.vendor == 0x10de {
+    if is_nvidia_proprietary(&info) {
         command.env("__GLX_VENDOR_LIBRARY_NAME", "nvidia");
         command.env("__NV_PRIME_RENDER_OFFLOAD", "1");
         let base = "/usr/share/vulkan/icd.d/nvidia_icd";
@@ -165,18 +165,9 @@ fn apply_render_gpu_environment(command: &mut Command, adapter: &wgpu::Adapter) 
         if Path::new(mesa_egl).is_file() {
             command.env("__EGL_VENDOR_LIBRARY_FILENAMES", mesa_egl);
         }
-        let icd_names: &[&str] = match info.vendor {
-            0x8086 => &["intel_icd.json", "intel_icd.x86_64.json"],
-            0x1002 => &["radeon_icd.json", "radeon_icd.x86_64.json"],
-            _ => &[],
-        };
-        if let Some(path) = icd_names
-            .iter()
-            .map(|name| format!("/usr/share/vulkan/icd.d/{name}"))
-            .find(|path| Path::new(path).is_file())
-        {
-            command.env("VK_DRIVER_FILES", path);
-        }
+        // MESA_VK_DEVICE_SELECT (with "!") already hides the other GPUs.
+        // Limiting VK_DRIVER_FILES to one host ICD as well breaks Proton
+        // games (VRChat: no graphics device on Intel), so leave it alone.
     }
 }
 
@@ -235,7 +226,11 @@ pub fn maybe_unwrap_vrcompositor_launcher() -> Result<()> {
 
 #[derive(PartialEq)]
 enum DeviceInfo {
+    // NVIDIA GPU on NVIDIA's proprietary driver.
     Nvidia,
+    // NVIDIA GPU on Mesa's NVK (nouveau kernel driver): selected like the
+    // other Mesa GPUs, and no NVENC.
+    NvidiaMesa { device_type: wgpu::DeviceType },
     Amd { device_type: wgpu::DeviceType },
     Intel { device_type: wgpu::DeviceType },
     Unknown,
@@ -255,7 +250,10 @@ pub fn linux_hardware_checks() {
         })
         .map(|adapter| {
             let vendor = match adapter.get_info().vendor {
-                0x10de => DeviceInfo::Nvidia,
+                0x10de if is_nvidia_proprietary(&adapter.get_info()) => DeviceInfo::Nvidia,
+                0x10de => DeviceInfo::NvidiaMesa {
+                    device_type: adapter.get_info().device_type,
+                },
                 0x1002 => DeviceInfo::Amd {
                     device_type: adapter.get_info().device_type,
                 },
@@ -296,6 +294,15 @@ pub fn linux_hardware_checks() {
 
     linux_gpu_checks(&device_infos, selected_adapter);
     linux_encoder_checks(&device_infos);
+}
+
+// NVIDIA GPU driven by NVIDIA's proprietary driver, as opposed to Mesa's NVK
+// on the nouveau kernel driver. The two need different launch options.
+fn is_nvidia_proprietary(info: &wgpu::AdapterInfo) -> bool {
+    info.vendor == 0x10de
+        && info.driver != "NVK"
+        && !info.driver_info.contains("Mesa")
+        && !info.name.contains("NVK")
 }
 
 // Variables that restrict which GPU Vulkan / OpenGL programs use. Steam
@@ -348,7 +355,7 @@ fn steam_gpu_override_env() -> Vec<(String, String)> {
 
 // Steam variables that force a GPU other than `adapter` on SteamVR.
 fn conflicting_steam_overrides(adapter: &wgpu::Adapter) -> Vec<String> {
-    let nvidia = adapter.get_info().vendor == 0x10de;
+    let nvidia = is_nvidia_proprietary(&adapter.get_info());
     steam_gpu_override_env()
         .into_iter()
         .filter(|(name, value)| {
@@ -369,7 +376,7 @@ fn conflicting_steam_overrides(adapter: &wgpu::Adapter) -> Vec<String> {
 // Launch options that make SteamVR / a game render on `adapter`.
 fn render_gpu_launch_options(adapter: &wgpu::Adapter) -> String {
     let info = adapter.get_info();
-    if info.vendor == 0x10de {
+    if is_nvidia_proprietary(&info) {
         // NVIDIA's proprietary driver: PRIME render offload.
         let base_path = "/usr/share/vulkan/icd.d/nvidia_icd";
         let vk_override = if Path::new(&format!("{base_path}.json")).exists() {
@@ -382,9 +389,15 @@ fn render_gpu_launch_options(adapter: &wgpu::Adapter) -> String {
         format!("__GLX_VENDOR_LIBRARY_NAME=nvidia __NV_PRIME_RENDER_OFFLOAD=1 {vk_override}")
     } else {
         // Mesa drivers (Intel, AMD, NVK): select the device by PCI ids for
-        // OpenGL (DRI_PRIME) and Vulkan (MESA_VK_DEVICE_SELECT).
+        // OpenGL (DRI_PRIME) and Vulkan (MESA_VK_DEVICE_SELECT). With NVK the
+        // NVIDIA user-space libraries may still be installed: pin GLX to Mesa.
         let ids = format!("{:04x}:{:04x}", info.vendor, info.device);
-        format!("DRI_PRIME={ids} MESA_VK_DEVICE_SELECT={ids}")
+        let glx = if info.vendor == 0x10de {
+            "__GLX_VENDOR_LIBRARY_NAME=mesa "
+        } else {
+            ""
+        };
+        format!("{glx}DRI_PRIME={ids} MESA_VK_DEVICE_SELECT={ids}")
     }
 }
 
@@ -445,6 +458,13 @@ fn linux_gpu_checks(
                 device_type: wgpu::DeviceType::DiscreteGpu,
             }
     });
+    let have_nvk_dgpu = device_infos.iter().any(|gpu| {
+        gpu.1
+            == DeviceInfo::NvidiaMesa {
+                device_type: wgpu::DeviceType::DiscreteGpu,
+            }
+    });
+    debug!("have_nvk_dgpu: {}", have_nvk_dgpu);
     debug!("have_intel_dgpu: {}", have_intel_dgpu);
 
     let steamvr_root_dir = match alvr_server_io::steamvr_root_dir() {
@@ -495,10 +515,12 @@ fn linux_gpu_checks(
         }
         let options = render_gpu_launch_options(adapter);
         info!(
-            "Render GPU setting: {} ({:04x}:{:04x})",
+            "Render GPU setting: {} ({:04x}:{:04x}), driver {} {}",
             adapter.get_info().name,
             adapter.get_info().vendor,
-            adapter.get_info().device
+            adapter.get_info().device,
+            adapter.get_info().driver,
+            adapter.get_info().driver_info
         );
         warn!("{steamvr_opts}\n{options} {vrmonitor_path_string} %command%");
         warn!("{game_opts}\n{options} %command%");
@@ -522,7 +544,7 @@ fn linux_gpu_checks(
             warn!("{game_opts}\n{nv_options} %command%");
 
             vrmonitor_path_written = true;
-        } else if have_intel_dgpu || have_amd_dgpu {
+        } else if have_intel_dgpu || have_amd_dgpu || have_nvk_dgpu {
             warn!("{steamvr_opts}\nDRI_PRIME=1 {vrmonitor_path_string} %command%");
             warn!("{game_opts}\nDRI_PRIME=1 %command%");
             vrmonitor_path_written = true;
@@ -613,6 +635,15 @@ fn linux_encoder_checks(device_infos: &[(&wgpu::Adapter, DeviceInfo)]) {
                         https://github.com/alvr-org/ALVR/wiki/Linux-Troubleshooting#failed-to-create-vaapi-encoder",
                     );
                 }
+            }
+            DeviceInfo::NvidiaMesa { device_type: _ } => {
+                // NVENC needs NVIDIA's proprietary driver (CUDA); nouveau/NVK
+                // has no encoder ALVR can use.
+                warn!(
+                    "{} runs on Mesa's NVK (nouveau), which has no NVENC: set \"Encoder GPU\" to \
+                    another GPU with VAAPI, or use NVIDIA's proprietary driver",
+                    device_info.0.get_info().name
+                );
             }
             _ => alvr_common::show_e(
                 "Couldn't determine gpu for hardware encoding. \
