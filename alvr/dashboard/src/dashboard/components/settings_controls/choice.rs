@@ -154,8 +154,9 @@ impl Control {
                         }
                     },
                 );
-                if response.changed() {
-                    variant_mut.clone_from(&self.variant_labels[index].id);
+                // Entry 0 is "Preset not applied"; variant i is entry i + 1.
+                if response.changed() && index > 0 {
+                    variant_mut.clone_from(&self.variant_labels[index - 1].id);
                     request = get_request(&self.nesting_info, variant_mut);
                 }
             }
