@@ -210,6 +210,10 @@ class Encoder {
         auto const* settings = Settings_Instance();
         EncoderTarget resolved;
 
+        if (!VkContext::renderGpuWarning.empty()) {
+            Warn("%s", VkContext::renderGpuWarning.c_str());
+        }
+
         std::string renderNode = renderNodeOf(vkCtx.physDev);
         resolved.devicePath = renderNode.empty() ? "/dev/dri/renderD128" : renderNode;
         resolved.vendor = vkCtx.meta.vendor;
@@ -236,17 +240,21 @@ class Encoder {
                     // needs its DRM render node, found here by PCI vendor.
                     resolved.devicePath = node;
                     resolved.vendor = vendorOfId(vendorId);
+                    std::string env = VkContext::gpuOverrideEnvironment();
                     Info(
-                        "Encoder GPU \"%s\" is not visible to Vulkan here; using DRM node %s "
-                        "by vendor",
+                        "Encoder GPU \"%s\" is not visible to Vulkan here (GPU-restricting "
+                        "environment: %s); using DRM node %s by vendor",
                         selector.c_str(),
+                        env.empty() ? "none" : env.c_str(),
                         node.c_str()
                     );
                 } else {
+                    std::string env = VkContext::gpuOverrideEnvironment();
                     Warn(
-                        "Encoder GPU \"%s\" matches no GPU with a DRM render node; using the "
-                        "render GPU",
-                        selector.c_str()
+                        "Encoder GPU \"%s\" matches no GPU with a DRM render node, so it cannot "
+                        "be honoured; using the render GPU. GPU-restricting environment: %s",
+                        selector.c_str(),
+                        env.empty() ? "none" : env.c_str()
                     );
                 }
             }
