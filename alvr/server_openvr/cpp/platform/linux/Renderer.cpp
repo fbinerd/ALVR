@@ -4,9 +4,13 @@
 #include <cstring>
 #include <optional>
 #include <stdexcept>
+#include <string>
+#include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 #include <vulkan/vulkan_structs.hpp>
 
+#include "alvr_server/Logger.h"
 #include "alvr_server/bindings.h"
 
 namespace alvr::render::detail {
@@ -773,6 +777,170 @@ void Renderer::render(VkContext& vkCtx, std::vector<Layer> const& layers) {
     vkCtx.useQueue([&](auto& queue) { queue.submit(submitInfo, fence); });
     assert(vkCtx.dev.waitForFences(fence, true, UINT64_MAX) == vk::Result::eSuccess);
     vkCtx.dev.resetFences(fence);
+
+    if (layers.size() > 1) {
+        dumpOverlayLayers(vkCtx, layers, sources);
+    }
+}
+
+// Overlay alpha probe. Copies the left eye of each layer above 0 (SteamVR's
+// dashboard and other overlays) to host memory and writes it, unchanged, as
+// a PAM (RGB_ALPHA) file plus a text file with the format and bounds. The
+// bytes are SteamVR's own: no blend, no sRGB conversion. Runs while the
+// caller still holds the textures (before render returns), at most once a
+// second and 20 times per run. Directory: $ALVR_OVERLAY_DUMP_DIR, else
+// /tmp/alvr-overlay-alpha.
+void Renderer::dumpOverlayLayers(
+    VkContext& vkCtx,
+    std::vector<Layer> const& layers,
+    std::vector<std::vector<Image*>> const& sources
+) {
+    constexpr int MaxDumps = 20;
+    constexpr u64 MinIntervalNs = 1'000'000'000ull;
+    if (overlayDumpCount >= MaxDumps) {
+        return;
+    }
+    timespec ts {};
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    u64 nowNs = u64(ts.tv_sec) * 1'000'000'000ull + u64(ts.tv_nsec);
+    if (lastOverlayDumpNs != 0 && nowNs - lastOverlayDumpNs < MinIntervalNs) {
+        return;
+    }
+    lastOverlayDumpNs = nowNs;
+
+    char const* envDir = getenv("ALVR_OVERLAY_DUMP_DIR");
+    std::string dir = envDir && *envDir ? envDir : "/tmp/alvr-overlay-alpha";
+    mkdir(dir.c_str(), 0755);
+
+    for (usize layerIdx = 1; layerIdx < layers.size(); ++layerIdx) {
+        Layer const& layer = layers[layerIdx];
+        Image& source = *sources[layerIdx][0];
+        u32 width = layer.extent.width;
+        u32 height = layer.extent.height;
+        vk::DeviceSize size = vk::DeviceSize(width) * height * 4;
+
+        vk::Buffer buffer = vkCtx.dev.createBuffer({
+            .size = size,
+            .usage = vk::BufferUsageFlagBits::eTransferDst,
+            .sharingMode = vk::SharingMode::eExclusive,
+        });
+        auto memReqs = vkCtx.dev.getBufferMemoryRequirements(buffer);
+        vk::DeviceMemory memory = vkCtx.dev.allocateMemory({
+            .allocationSize = memReqs.size,
+            .memoryTypeIndex = memoryTypeIndex(
+                vkCtx,
+                vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent,
+                memReqs.memoryTypeBits
+            ),
+        });
+        vkCtx.dev.bindBufferMemory(buffer, memory, 0);
+
+        // The textures are in GENERAL after render; a copy may read GENERAL.
+        cmdBuf.begin(vk::CommandBufferBeginInfo {});
+        vk::MemoryBarrier toTransfer {
+            .srcAccessMask = vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eShaderWrite,
+            .dstAccessMask = vk::AccessFlagBits::eTransferRead,
+        };
+        cmdBuf.pipelineBarrier(
+            vk::PipelineStageFlagBits::eAllCommands,
+            vk::PipelineStageFlagBits::eTransfer,
+            {},
+            toTransfer,
+            {},
+            {}
+        );
+        vk::BufferImageCopy region {
+            .bufferOffset = 0,
+            .bufferRowLength = 0,
+            .bufferImageHeight = 0,
+            .imageSubresource {
+                .aspectMask = vk::ImageAspectFlagBits::eColor,
+                .mipLevel = 0,
+                .baseArrayLayer = 0,
+                .layerCount = 1,
+            },
+            .imageOffset = { 0, 0, 0 },
+            .imageExtent = { width, height, 1 },
+        };
+        cmdBuf.copyImageToBuffer(source.image, vk::ImageLayout::eGeneral, buffer, region);
+        vk::MemoryBarrier toHost {
+            .srcAccessMask = vk::AccessFlagBits::eTransferWrite,
+            .dstAccessMask = vk::AccessFlagBits::eHostRead,
+        };
+        cmdBuf.pipelineBarrier(
+            vk::PipelineStageFlagBits::eTransfer,
+            vk::PipelineStageFlagBits::eHost,
+            {},
+            toHost,
+            {},
+            {}
+        );
+        cmdBuf.end();
+        vk::SubmitInfo submitInfo {
+            .commandBufferCount = 1,
+            .pCommandBuffers = &cmdBuf,
+        };
+        vkCtx.useQueue([&](auto& queue) { queue.submit(submitInfo, fence); });
+        assert(vkCtx.dev.waitForFences(fence, true, UINT64_MAX) == vk::Result::eSuccess);
+        vkCtx.dev.resetFences(fence);
+
+        auto* bytes = static_cast<u8 const*>(vkCtx.dev.mapMemory(memory, 0, size));
+        bool bgra = layer.format == vk::Format::eB8G8R8A8Unorm
+            || layer.format == vk::Format::eB8G8R8A8Srgb;
+        std::string base = dir + "/overlay_" + std::to_string(overlayDumpCount) + "_layer"
+            + std::to_string(layerIdx);
+        if (FILE* f = fopen((base + ".pam").c_str(), "wb")) {
+            fprintf(
+                f,
+                "P7\nWIDTH %u\nHEIGHT %u\nDEPTH 4\nMAXVAL 255\nTUPLTYPE RGB_ALPHA\nENDHDR\n",
+                width,
+                height
+            );
+            std::vector<u8> row(usize(width) * 4);
+            for (u32 y = 0; y < height; ++y) {
+                u8 const* src = bytes + usize(y) * width * 4;
+                for (u32 x = 0; x < width; ++x) {
+                    row[x * 4 + 0] = src[x * 4 + (bgra ? 2 : 0)];
+                    row[x * 4 + 1] = src[x * 4 + 1];
+                    row[x * 4 + 2] = src[x * 4 + (bgra ? 0 : 2)];
+                    row[x * 4 + 3] = src[x * 4 + 3];
+                }
+                fwrite(row.data(), 1, row.size(), f);
+            }
+            fclose(f);
+        }
+        if (FILE* f = fopen((base + ".txt").c_str(), "w")) {
+            fprintf(
+                f,
+                "layer %zu of %zu\nformat %s (%d)\nextent %ux%u\n"
+                "bounds_left %f %f %f %f\nbounds_right %f %f %f %f\n"
+                "handle_left %llu\nhandle_right %llu\nmonotonic_ns %llu\n",
+                layerIdx,
+                layers.size(),
+                vk::to_string(layer.format).c_str(),
+                int(layer.format),
+                width,
+                height,
+                layer.eyes[0].uMin,
+                layer.eyes[0].vMin,
+                layer.eyes[0].uMax,
+                layer.eyes[0].vMax,
+                layer.eyes[1].uMin,
+                layer.eyes[1].vMin,
+                layer.eyes[1].uMax,
+                layer.eyes[1].vMax,
+                (unsigned long long)layer.eyes[0].handle,
+                (unsigned long long)layer.eyes[1].handle,
+                (unsigned long long)nowNs
+            );
+            fclose(f);
+        }
+        vkCtx.dev.unmapMemory(memory);
+        vkCtx.dev.destroy(buffer);
+        vkCtx.dev.free(memory);
+        Info("Overlay alpha probe: wrote %s.pam", base.c_str());
+    }
+    ++overlayDumpCount;
 }
 
 // Imports one of SteamVR's textures the first time its handle is seen, the
