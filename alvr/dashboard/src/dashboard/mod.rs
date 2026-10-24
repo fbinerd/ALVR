@@ -73,6 +73,8 @@ pub struct Dashboard {
     new_version_popup: Option<components::NewVersionPopup>,
     setup_wizard_open: bool,
     session: Option<SessionConfig>,
+    #[cfg(target_os = "linux")]
+    steam_gpu_conflict_popup: Option<(String, String)>,
 }
 
 impl Dashboard {
@@ -80,6 +82,19 @@ impl Dashboard {
         alvr_gui_common::theme::set_theme(&creation_context.egui_ctx);
 
         data_sources.request(ServerRequest::GetSession);
+
+        #[cfg(target_os = "linux")]
+        let steam_gpu_conflict_popup = if crate::data_sources::get_read_only_local_session()
+            .settings()
+            .extra
+            .steamvr_launcher
+            .open_close_steamvr_with_dashboard
+            && !crate::steamvr_launcher::is_steamvr_running()
+        {
+            crate::steamvr_launcher::linux_steamvr::render_gpu_conflict_for_confirmation()
+        } else {
+            None
+        };
 
         Self {
             data_sources,
@@ -109,6 +124,8 @@ impl Dashboard {
             setup_wizard: SetupWizard::new(),
             setup_wizard_open: false,
             session: None,
+            #[cfg(target_os = "linux")]
+            steam_gpu_conflict_popup,
             new_version_popup: None,
         }
     }
@@ -137,6 +154,28 @@ impl Dashboard {
                 condvar.notify_one();
             }
         });
+    }
+
+    #[cfg(target_os = "linux")]
+    fn request_steamvr_launch(&mut self) {
+        if let Some(conflict) =
+            crate::steamvr_launcher::linux_steamvr::render_gpu_conflict_for_confirmation()
+        {
+            self.steam_gpu_conflict_popup = Some(conflict);
+        } else {
+            crate::steamvr_launcher::LAUNCHER.lock().launch_steamvr();
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn request_steamvr_restart(&mut self, requests: &mut Vec<ServerRequest>) {
+        if let Some(conflict) =
+            crate::steamvr_launcher::linux_steamvr::render_gpu_conflict_for_confirmation()
+        {
+            self.steam_gpu_conflict_popup = Some(conflict);
+        } else {
+            self.restart_steamvr(requests);
+        }
     }
 }
 
@@ -262,9 +301,15 @@ impl eframe::App for Dashboard {
 
                             if connected_to_server {
                                 if ui.button("Restart SteamVR").clicked() {
+                                    #[cfg(target_os = "linux")]
+                                    self.request_steamvr_restart(&mut requests);
+                                    #[cfg(not(target_os = "linux"))]
                                     self.restart_steamvr(&mut requests);
                                 }
                             } else if ui.button("Launch SteamVR").clicked() {
+                                #[cfg(target_os = "linux")]
+                                self.request_steamvr_launch();
+                                #[cfg(not(target_os = "linux"))]
                                 crate::steamvr_launcher::LAUNCHER.lock().launch_steamvr();
                             }
 
@@ -332,6 +377,13 @@ impl eframe::App for Dashboard {
                         }
                     })
                 });
+
+            #[cfg(target_os = "linux")]
+            if self.selected_tab == Tab::Devices
+                && self.connections_tab.take_launch_steamvr_request()
+            {
+                self.request_steamvr_launch();
+            }
         }
 
         let shutdown_alvr = || {
@@ -350,6 +402,32 @@ impl eframe::App for Dashboard {
             }
 
             self.new_version_popup = None;
+        }
+
+        #[cfg(target_os = "linux")]
+        if let Some((gpu, variables)) = &self.steam_gpu_conflict_popup {
+            let mut restart = false;
+            let mut cancel = false;
+            egui::Window::new("Steam GPU setting conflicts with ALVR")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+                .show(ui.ctx(), |ui| {
+                    ui.label(format!("ALVR Render GPU: {gpu}"));
+                    ui.label(format!("Steam was started with: {variables}"));
+                    ui.add_space(8.0);
+                    ui.label("Steam passes its startup GPU settings to SteamVR and games. Restarting Steam closes SteamVR and any running Steam games.");
+                    ui.horizontal(|ui| {
+                        restart = ui.button("Restart Steam on ALVR GPU").clicked();
+                        cancel = ui.button("Cancel").clicked();
+                    });
+                });
+            if restart {
+                self.steam_gpu_conflict_popup = None;
+                crate::steamvr_launcher::linux_steamvr::restart_steam_with_render_gpu();
+            } else if cancel {
+                self.steam_gpu_conflict_popup = None;
+            }
         }
 
         for request in requests {
