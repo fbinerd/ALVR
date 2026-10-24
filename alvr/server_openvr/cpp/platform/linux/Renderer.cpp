@@ -747,6 +747,10 @@ void Renderer::render(VkContext& vkCtx, std::vector<Layer> const& layers) {
     // reads, so drivers that compress images (AMD's DCC, Intel's CCS) make
     // them consistent at the handover. Their content is kept: only a
     // texture never used before starts from an undefined layout.
+    // The Vulkan spec requires this transfer for images backed by external
+    // memory. NVIDIA's driver and Intel ANV produced correct pictures without
+    // it; drivers that keep images compressed (AMD's DCC) may not, so it is
+    // done on every vendor.
     auto externalBarrier = [&](Image& image, bool acquire) {
         u32 const external = VK_QUEUE_FAMILY_EXTERNAL;
         barriers.push_back(vk::ImageMemoryBarrier {

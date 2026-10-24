@@ -15,9 +15,8 @@
 //
 // UNDOCUMENTED STEAMVR INTERFACES USED HERE
 // None of the following is in openvr_driver.h. It was read from Steam Link's
-// driver_vrlink.so (SteamVR 2.17.x, October 2026) and checked against the
-// live shared memory; the analysis, with addresses, is in the MetaHorizonLinux
-// repository, analysis/steamlink-vrlink-driver.md, "Per-texture semaphores".
+// driver_vrlink.so (SteamVR 2.17.x, October 2026) by disassembly, and checked
+// against SteamVR's live shared memory while it ran.
 // A SteamVR update may change any of it; every failure below degrades to
 // "no semaphore", and the caller then falls back to the old guard.
 //  1. Every shared resource (image or semaphore) has a 0x48-byte "resource

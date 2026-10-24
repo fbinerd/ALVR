@@ -303,10 +303,12 @@ void OvrDirectModeComponent::EncodeWorkerLoop() {
                 )
                       .count();
             // A texture SteamVR has not confirmed may still be being written.
-            // Keep the client's last picture rather than read mixed frames,
-            // even after repeated failures. A broken producer can leave the
-            // picture frozen, but cannot force an unsafe read. Missing timeline
-            // handles still use the separate implicit-fence/guard path above.
+            // Skip the frame (the client keeps its last picture) rather than
+            // send a mix of two frames, even after repeated failures. If
+            // SteamVR never signals a semaphore, the picture stays frozen, but
+            // an unfinished texture is still never read. Textures without a
+            // timeline semaphore use the implicit-fence and guard-sleep path
+            // above instead.
             bool const confirmed = alvr::waitForTextureTimelines(
                 job.waits,
                 std::chrono::nanoseconds(timelineCapNs),

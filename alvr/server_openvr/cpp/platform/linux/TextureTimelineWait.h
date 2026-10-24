@@ -5,11 +5,20 @@
 
 namespace alvr {
 
-// The callback imports/waits for one advertised timeline. The first failed
-// confirmation rejects the whole job. Never multiply the wait budget by the
-// number of textures, and still accept an already-ready value at the deadline.
-// Missing handles belong to the separate implicit-fence path.
-// A clock callable makes deadline/exhaustion behavior testable without sleeps.
+// Decides whether all textures of one frame are finished, i.e. whether
+// SteamVR has signalled each texture's timeline semaphore to the frame's
+// value. Returns true only if every texture is confirmed.
+//
+// - `waits` lists the frame's textures; an entry with semaphore == 0 has no
+//   timeline and is skipped here (the caller handles it with implicit fences).
+// - `wait(texture, timeoutNs)` imports the semaphore if needed and waits up to
+//   timeoutNs; it returns false on timeout or when the import fails.
+// - `budget` is one deadline for the whole frame, shared by all its eyes and
+//   layers, not a separate budget per texture. A texture checked after the
+//   deadline still gets a zero-time check, so an already-finished one passes.
+// - The first texture that is not confirmed rejects the frame at once.
+// - `now` returns the current time; tests pass a fake clock so deadlines can
+//   be checked without sleeping.
 template <typename Waits, typename Wait, typename Now>
 bool waitForTextureTimelines(
     Waits const& waits, std::chrono::nanoseconds budget, Wait&& wait, Now&& now

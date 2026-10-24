@@ -354,7 +354,8 @@ alvr::EncodePipelineVAAPI::EncodePipelineVAAPI(
     // The import path below encodes a fresh VA surface that nothing renders
     // into (its output import was never finished), so it streamed black on
     // Intel. Intel now maps the Vulkan output like AMD; the renderer keeps
-    // that image uncompressed. ALVR_VAAPI_IMPORT_SURFACE=1 restores it.
+    // that image uncompressed. ALVR_VAAPI_IMPORT_SURFACE=1 selects the old,
+    // unfinished import path below again (for debugging only).
     if (host_pixels) {
         // Cross-GPU: the encoder GPU cannot read the render GPU's memory.
         // Keep one VA surface of the encoder GPU and upload the renderer's
