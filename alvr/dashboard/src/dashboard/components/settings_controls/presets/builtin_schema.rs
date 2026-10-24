@@ -498,3 +498,142 @@ pub fn eye_face_tracking_schema() -> PresetSchemaNode {
         gui: ChoiceControlType::ButtonGroup,
     })
 }
+
+// GPUs the dashboard sees through Vulkan, as (name, kind) for the GPU
+// presets. CPU implementations (llvmpipe) are left out. The streamer matches
+// the stored name against its own Vulkan device list (part of the name).
+#[cfg(target_os = "linux")]
+fn detected_gpus() -> Vec<(String, &'static str)> {
+    let adapters = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+        backends: wgpu::Backends::VULKAN,
+        ..Default::default()
+    })
+    .enumerate_adapters(wgpu::Backends::VULKAN);
+    let mut gpus = Vec::<(String, &'static str)>::new();
+    for adapter in adapters {
+        let info = adapter.get_info();
+        let kind = match info.device_type {
+            wgpu::DeviceType::DiscreteGpu => "discrete",
+            wgpu::DeviceType::IntegratedGpu => "integrated",
+            wgpu::DeviceType::VirtualGpu => "virtual",
+            _ => continue,
+        };
+        if !gpus.iter().any(|(name, _)| *name == info.name) {
+            gpus.push((info.name, kind));
+        }
+    }
+    gpus
+}
+
+// "Automatic" leaves the setting unset (ALVR and the system decide, nothing
+// is forced); every detected GPU forces that GPU by name.
+#[cfg(target_os = "linux")]
+fn gpu_choice_schema(
+    name: &str,
+    setting_path: &str,
+    automatic_label: &str,
+    help: &str,
+) -> PresetSchemaNode {
+    let mut options = vec![HigherOrderChoiceOption {
+        display_name: automatic_label.into(),
+        modifiers: vec![bool_modifier(&format!("{setting_path}.set"), false)],
+        content: None,
+    }];
+    for (gpu_name, kind) in detected_gpus() {
+        options.push(HigherOrderChoiceOption {
+            display_name: format!("{gpu_name} ({kind})"),
+            modifiers: vec![
+                bool_modifier(&format!("{setting_path}.set"), true),
+                string_modifier(&format!("{setting_path}.content"), &gpu_name),
+            ],
+            content: None,
+        });
+    }
+    PresetSchemaNode::HigherOrderChoice(HigherOrderChoiceSchema {
+        name: name.into(),
+        strings: [("help".into(), help.into())].into_iter().collect(),
+        flags: ["steamvr-restart".into()].into_iter().collect(),
+        options,
+        default_option_display_name: automatic_label.into(),
+        gui: ChoiceControlType::Dropdown,
+    })
+}
+
+// The GPU the streamer's automatic choice will take, by the same rule
+// (VkContext::selectPhysicalDevice): the first discrete GPU, else the first
+// integrated one. A prediction: ALVR_VULKAN_DEVICE in SteamVR's environment
+// is not visible here.
+#[cfg(target_os = "linux")]
+fn predicted_automatic_gpu() -> Option<String> {
+    let gpus = detected_gpus();
+    ["discrete", "integrated"].into_iter().find_map(|wanted| {
+        gpus.iter()
+            .find(|(_, kind)| *kind == wanted)
+            .map(|(name, _)| name.clone())
+    })
+}
+
+#[cfg(target_os = "linux")]
+pub fn render_gpu_schema() -> PresetSchemaNode {
+    let automatic_label = match predicted_automatic_gpu() {
+        Some(name) => format!("Automatic (system default: {name})"),
+        None => "Automatic (system default)".to_string(),
+    };
+    gpu_choice_schema(
+        "Render GPU",
+        "session_settings.video.encoder_config.linux_gpu.render_gpu",
+        &automatic_label,
+        "GPU that SteamVR and the games render on; ALVR's Vulkan device follows it. \
+        SteamVR and games pick their GPU from their launch options: with a GPU chosen here, \
+        the dashboard prints those launch options when it starts SteamVR. \
+        Automatic forces nothing; the GPU it shows is the one ALVR's automatic rule takes \
+        (first discrete GPU, else first integrated).",
+    )
+}
+
+#[cfg(target_os = "linux")]
+pub fn encoder_gpu_schema() -> PresetSchemaNode {
+    gpu_choice_schema(
+        "Encoder GPU",
+        "session_settings.video.encoder_config.linux_gpu.encoder_gpu",
+        "Automatic (same as render GPU)",
+        "GPU that encodes the video. Automatic encodes on the render GPU, as ALVR always did. \
+        Another GPU needs VAAPI (the frame crosses GPUs as a linear dma-buf; not tested yet).",
+    )
+}
+
+#[cfg(target_os = "linux")]
+pub fn encoder_technology_schema() -> PresetSchemaNode {
+    PresetSchemaNode::HigherOrderChoice(HigherOrderChoiceSchema {
+        name: "Encoder technology".into(),
+        strings: [(
+            "help".into(),
+            "Automatic: NVENC on NVIDIA, VAAPI on Intel and AMD, decided from the encoder GPU. \
+            Vulkan Video and Software are not implemented yet: choosing them leaves the stream \
+            without an encoder."
+                .into(),
+        )]
+        .into_iter()
+        .collect(),
+        flags: ["steamvr-restart".into()].into_iter().collect(),
+        options: [
+            ("Automatic", "Automatic"),
+            ("VAAPI (Intel, AMD)", "Vaapi"),
+            ("NVENC (NVIDIA)", "Nvenc"),
+            ("Vulkan Video (not implemented yet)", "VulkanVideo"),
+            ("Software (not implemented on Linux yet)", "Software"),
+        ]
+        .into_iter()
+        .map(|(label, variant)| HigherOrderChoiceOption {
+            display_name: label.into(),
+            modifiers: vec![string_modifier(
+                "session_settings.video.encoder_config.linux_gpu.encoder_backend.variant",
+                variant,
+            )],
+            content: None,
+        })
+        .collect(),
+        default_option_display_name: "Automatic".into(),
+        gui: ChoiceControlType::Dropdown,
+    })
+}
