@@ -28,7 +28,11 @@ public:
         alvr::Vendor vendor,
         VkFrame& input_frame,
         uint32_t width,
-        uint32_t height
+        uint32_t height,
+        // Cross-GPU mode: the frame is in host memory (see EncoderTarget)
+        // and is uploaded to a VA surface of the encoder GPU each frame.
+        void const* hostPixels = nullptr,
+        unsigned hostRowPitch = 0
     );
 
     // TODO: Don't pass the timestamp here we're literally just passing it through (or does it help
@@ -40,6 +44,10 @@ private:
     AVBufferRef* hw_ctx = nullptr;
     AVBufferRef* drm_ctx = nullptr;
     AVFrame* mapped_frame = nullptr;
+    // Cross-GPU mode (hostPixels != nullptr).
+    void const* host_pixels = nullptr;
+    unsigned host_row_pitch = 0;
+    int host_format = -1;
     AVFrame* encoder_frame = nullptr;
     AVFilterGraph* filter_graph = nullptr;
     AVFilterContext* filter_in = nullptr;
