@@ -103,17 +103,21 @@ SceneHit castRay(float camX, float rx, float ry) {
 
     // 1. Near box at Z = -0.5 m (depth = 0.5 m)
     {
-        float d = 0.5f;
+        // STEREO_NEAR_M moves the box (a hand at 0.2-0.4 m), keeping its
+        // apparent size: half extents scale with the distance.
+        static const float nearM = std::getenv("STEREO_NEAR_M") ? std::stof(std::getenv("STEREO_NEAR_M")) : 0.5f;
+        float d = nearM;
         float x = camX + d * rx;
         float y = d * ry;
-        if (std::abs(x) <= 0.22f && std::abs(y) <= 0.18f) {
+        float k = d / 0.5f;
+        if (std::abs(x) <= 0.22f * k && std::abs(y) <= 0.18f * k) {
             if (d < closestDepth) {
                 closestDepth = d;
                 hit.depth = d;
                 hit.region = REGION_NEAR_BOX;
                 // High-contrast multi-frequency checker on box face
-                float u = (x + 0.22f) / 0.44f;
-                float v = (y + 0.18f) / 0.36f;
+                float u = (x / k + 0.22f) / 0.44f;
+                float v = (y / k + 0.18f) / 0.36f;
                 int cu = int(u * 28.0f);
                 int cv = int(v * 24.0f);
                 bool c = ((cu ^ cv) & 1);

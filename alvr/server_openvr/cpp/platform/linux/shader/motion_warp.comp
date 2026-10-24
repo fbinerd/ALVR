@@ -166,6 +166,12 @@ float newestDepth(vec2 q,bool right) {
     float d=texelFetch(latestDepth,clamp(ivec2((q+0.5)*size/vec2(2*p.eyeWidth,p.height)),ivec2(0),ivec2(size)-1),0).r;
     return d>0.0 && !isinf(d) && !isnan(d)?d:1e4;
 }
+// Positional-correction weight by content distance: stereo (and near
+// game) depth is unreliable on very near content, and its parallax is large,
+// so a depth error there became a visible deformation of a hand held still
+// (Quest, 2026-10-23). Below 0.4 m the content keeps rotation-only behaviour;
+// the correction fades in up to 0.8 m.
+float positionalWeight(float metres) { return smoothstep(0.4,0.8,metres); }
 vec3 rotateVector(vec4 quat,vec3 v) {
     return v+2.0*cross(quat.xyz,cross(quat.xyz,v)+quat.w*v);
 }
@@ -177,8 +183,9 @@ vec2 olderPixel(vec2 at,bool right) {
     vec4 t=right?p.rightTans:p.leftTans;
     vec2 size=vec2(p.eyeWidth,p.height);
     vec2 uv=(at+0.5)/size;
-    vec3 point=vec3(mix(t.x,t.y,uv.x),mix(t.z,t.w,uv.y),-1)*newestDepth(at,right);
-    vec3 v=rotateVector(p.previousQuaternion,point)+p.previousTranslation.xyz;
+    float z=newestDepth(at,right);
+    vec3 point=vec3(mix(t.x,t.y,uv.x),mix(t.z,t.w,uv.y),-1)*z;
+    vec3 v=rotateVector(p.previousQuaternion,point)+p.previousTranslation.xyz*positionalWeight(z);
     if(v.z>=-1e-5) return vec2(-10000);
     vec2 ray=v.xy/-v.z;
     return vec2((ray.x-t.x)/(t.y-t.x),(ray.y-t.z)/(t.w-t.z))*size-0.5;
@@ -200,9 +207,10 @@ vec2 positionalPixel(vec2 at,bool right) {
         vec2 suv=(sq+0.5)/size;
         float z=depthAt(true,right,sq);
         vec3 source=vec3(mix(t.x,t.y,suv.x),mix(t.z,t.w,suv.y),-1)*z;
-        vec3 destination=rotateVector(inverse,source-p.targetTranslation.xyz);
+        vec3 moved=p.targetTranslation.xyz*positionalWeight(z);
+        vec3 destination=rotateVector(inverse,source-moved);
         float zd=max(-destination.z,1e-3);
-        vec3 back=rotateVector(p.targetQuaternion,ray*zd)+p.targetTranslation.xyz;
+        vec3 back=rotateVector(p.targetQuaternion,ray*zd)+moved;
         if (back.z>=-1e-5) return vec2(-10000);
         vec2 r=back.xy/-back.z;
         q=vec2((r.x-t.x)/(t.y-t.x),(r.y-t.z)/(t.w-t.z))*size-0.5;

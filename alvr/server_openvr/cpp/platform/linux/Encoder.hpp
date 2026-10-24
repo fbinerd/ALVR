@@ -126,7 +126,10 @@ private:
     uint64_t stereoFrames = 0;
     double stereoMsSum = 0, stereoMsMax = 0;
 
-    std::optional<motion::NativeMotion::Depth> stereoDepthFor(render::Output const& output) {
+    bool stereoPending = false;
+
+    // Re-reads the switch about once a second; true when stereo depth should run.
+    bool stereoWanted() {
         auto now = std::chrono::steady_clock::now();
         if (now - stereoChecked > std::chrono::seconds(1)) {
             stereoChecked = now;
@@ -137,7 +140,22 @@ private:
                 Info("Stereo depth for positional correction %s", on ? "on" : "off");
             stereoSwitch = on;
         }
-        if (!stereoSwitch || !stereoViews || stereoFailed || !nativeMotion)
+        return stereoSwitch && stereoViews && !stereoFailed && nativeMotion;
+    }
+
+    // After the real picture was sent: estimate its stereo depth (the output
+    // still holds it until the next render) and attach it to the captured
+    // picture, before prepare() computes the flow.
+    void attachStereoDepth(render::Output const& output) {
+        if (!stereoPending)
+            return;
+        stereoPending = false;
+        if (auto depth = stereoDepthFor(output))
+            nativeMotion->attachDepth(*depth);
+    }
+
+    std::optional<motion::NativeMotion::Depth> stereoDepthFor(render::Output const& output) {
+        if (!stereoWanted())
             return std::nullopt;
         try {
             if (!stereoDepth)
@@ -619,8 +637,9 @@ public:
             if (nativeMotion) {
                 output = renderer.get().getOutput();
                 auto depth = depthSource ? depthSource(targetTimestampNs) : std::nullopt;
-                if (!depth)
-                    depth = stereoDepthFor(output);
+                // Stereo depth is estimated after the picture is sent (off
+                // the latency path) and attached then; see attachStereoDepth.
+                stereoPending = !depth && stereoWanted();
                 nativeMotion->capture(
                     output.image.image, output.image.layout, targetTimestampNs, presentClockNs, historyRotation,
                     depth ? &*depth : nullptr
@@ -631,10 +650,13 @@ public:
 
         // Interpolation holds the real picture: it is captured now and sent
         // later with sendNewestReal(), after the synthesized one.
-        if (!send)
+        if (!send) {
+            attachStereoDepth(output);
             return;
+        }
 
         encodeAndSend(targetTimestampNs);
+        attachStereoDepth(output);
 
         // The real picture is on its way: compute the next prediction's flow
         // now, so the predicted picture only waits for the warp.

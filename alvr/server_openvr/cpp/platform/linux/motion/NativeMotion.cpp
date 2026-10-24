@@ -502,6 +502,66 @@ struct NativeMotion::State {
         r.render_accessible = true;
         return r;
     }
+
+    // Records the copy of a picture's depth into its retained slot (current
+    // command buffer). Kept at the producer's extent: a plain copy works on
+    // any queue (a blit needs a graphics queue). The warp scales coordinates.
+    void copyDepth(unsigned slot, NativeMotion::Depth const& depth) {
+        if (depths[0].extent != depth.extent) {
+            // begin() waited for earlier work, so nothing still reads them.
+            for (auto& image : depths) {
+                ctx.dev.destroy(image.view);
+                ctx.dev.destroy(image.handle);
+                ctx.dev.free(image.memory);
+                image = {};
+                makeImage(image, depth.extent, vk::Format::eR32Sfloat,
+                    vk::ImageUsageFlagBits::eSampled | vk::ImageUsageFlagBits::eTransferDst);
+                // Both are bound on every prediction, written or not.
+                transition(image, vk::ImageLayout::eShaderReadOnlyOptimal);
+            }
+            depthValid[1 - slot] = false;
+        }
+        barrier(depth.image, depth.layout, vk::ImageLayout::eTransferSrcOptimal);
+        transition(depths[slot], vk::ImageLayout::eTransferDstOptimal);
+        vk::ImageCopy depthCopy {
+            .srcSubresource = { vk::ImageAspectFlagBits::eColor, 0, 0, 1 },
+            .dstSubresource = { vk::ImageAspectFlagBits::eColor, 0, 0, 1 },
+            .extent = { depth.extent.width, depth.extent.height, 1 },
+        };
+        command.copyImage(depth.image, vk::ImageLayout::eTransferSrcOptimal, depths[slot].handle,
+            vk::ImageLayout::eTransferDstOptimal, depthCopy);
+        transition(depths[slot], vk::ImageLayout::eShaderReadOnlyOptimal);
+        barrier(depth.image, vk::ImageLayout::eTransferSrcOptimal, depth.layout);
+        depthValid[slot] = true;
+    }
+
+    // Records the rebuild of the older luma in the newest real picture's
+    // geometry (current command buffer). The older color stays untouched; the
+    // warp samples it with the same map. With depth on both pictures the
+    // newest depth also aligns parallax.
+    void rebuildOlderLuma(unsigned newest, unsigned older, Rotation const& rotation) {
+        for (uint32_t eye = 0; eye < 2; ++eye) {
+            auto& luma = lumas[older][eye];
+            transition(luma, vk::ImageLayout::eGeneral);
+            WarpPush params {};
+            params.eye = eye; params.eyeWidth = extent.width / 2; params.height = extent.height;
+            params.rotationMode = 1;
+            std::copy_n(rotation.quaternion,4,params.previousQuaternion);
+            std::copy_n(rotation.leftTans,4,params.leftTans);
+            std::copy_n(rotation.rightTans,4,params.rightTans);
+            bool positional = depthValid[newest] && depthValid[older];
+            if (positional) {
+                params.flags = 1;
+                std::copy_n(rotation.translation,3,params.previousTranslation);
+            }
+            dispatch(lumaPipeline,lumaLayout,
+                {sampled(colors[older]), sampled(positional ? depths[newest] : colors[older], true),
+                 {{},luma.view,vk::ImageLayout::eGeneral}},
+                &params,sizeof(params),lumaExtent);
+            transition(luma,vk::ImageLayout::eShaderReadOnlyOptimal);
+        }
+    }
+
     void estimate() {
         if (!flowDirty)
             return;
@@ -843,6 +903,23 @@ bool NativeMotion::gapFill() const { return state->gapFill; }
 
 void NativeMotion::setDepthOcclusion(bool enabled) { state->depthOcclusion = enabled; }
 
+bool NativeMotion::attachDepth(Depth const& depth) {
+    auto& s = *state;
+    if (!s.retained || !depth.image || !depth.extent.width || !depth.extent.height)
+        return false;
+    unsigned const newest = s.latest;
+    s.begin();
+    s.copyDepth(newest, depth);
+    if (s.rotationMode && s.retained == 2 && s.depthValid[1 - newest]) {
+        // The older luma was aligned without this depth: realign it, and the
+        // flow has to be estimated again.
+        s.rebuildOlderLuma(newest, 1 - newest, s.historyRotation);
+        s.flowDirty = true;
+    }
+    s.submit();
+    return true;
+}
+
 bool NativeMotion::depthActive() const {
     return state->retained == 2 && state->depthValid[0] && state->depthValid[1];
 }
@@ -899,35 +976,8 @@ void NativeMotion::capture(
     if (!deferred)
         s.barrier(output, copyLayout, layout);
     s.depthValid[slot] = depth && depth->image && depth->extent.width && depth->extent.height;
-    if (s.depthValid[slot]) {
-        // Kept at the producer's extent: a plain copy works on any queue
-        // (a blit needs a graphics queue). The warp scales coordinates.
-        if (s.depths[0].extent != depth->extent) {
-            // begin() waited for earlier work, so nothing still reads them.
-            for (auto& image : s.depths) {
-                s.ctx.dev.destroy(image.view);
-                s.ctx.dev.destroy(image.handle);
-                s.ctx.dev.free(image.memory);
-                image = {};
-                s.makeImage(image, depth->extent, vk::Format::eR32Sfloat,
-                    vk::ImageUsageFlagBits::eSampled | vk::ImageUsageFlagBits::eTransferDst);
-                // Both are bound on every prediction, written or not.
-                s.transition(image, vk::ImageLayout::eShaderReadOnlyOptimal);
-            }
-            s.depthValid[1 - slot] = false;
-        }
-        s.barrier(depth->image, depth->layout, vk::ImageLayout::eTransferSrcOptimal);
-        s.transition(s.depths[slot], vk::ImageLayout::eTransferDstOptimal);
-        vk::ImageCopy depthCopy {
-            .srcSubresource = { vk::ImageAspectFlagBits::eColor, 0, 0, 1 },
-            .dstSubresource = { vk::ImageAspectFlagBits::eColor, 0, 0, 1 },
-            .extent = { depth->extent.width, depth->extent.height, 1 },
-        };
-        s.command.copyImage(depth->image, vk::ImageLayout::eTransferSrcOptimal, s.depths[slot].handle,
-            vk::ImageLayout::eTransferDstOptimal, depthCopy);
-        s.transition(s.depths[slot], vk::ImageLayout::eShaderReadOnlyOptimal);
-        s.barrier(depth->image, vk::ImageLayout::eTransferSrcOptimal, depth->layout);
-    }
+    if (s.depthValid[slot])
+        s.copyDepth(slot, *depth);
     for (uint32_t eye = 0; eye < 2; ++eye) {
         WarpPush lumaPush {};
         lumaPush.eye = eye;
@@ -946,31 +996,8 @@ void NativeMotion::capture(
         );
         s.transition(luma, vk::ImageLayout::eShaderReadOnlyOptimal);
     }
-    if (historyRotation && s.retained) {
-        // Rebuild the older luma in the newest real picture's geometry. The
-        // older color stays untouched; the warp samples it with the same map.
-        for (uint32_t eye = 0; eye < 2; ++eye) {
-            auto& luma = s.lumas[s.latest][eye];
-            s.transition(luma, vk::ImageLayout::eGeneral);
-            WarpPush params {};
-            params.eye = eye; params.eyeWidth = s.extent.width / 2; params.height = s.extent.height;
-            params.rotationMode = 1;
-            std::copy_n(historyRotation->quaternion,4,params.previousQuaternion);
-            std::copy_n(historyRotation->leftTans,4,params.leftTans);
-            std::copy_n(historyRotation->rightTans,4,params.rightTans);
-            // With depth on both pictures the newest depth also aligns parallax.
-            bool positional = s.depthValid[slot] && s.depthValid[s.latest];
-            if (positional) {
-                params.flags = 1;
-                std::copy_n(historyRotation->translation,3,params.previousTranslation);
-            }
-            s.dispatch(s.lumaPipeline,s.lumaLayout,
-                {s.sampled(s.colors[s.latest]), s.sampled(positional ? s.depths[slot] : s.colors[s.latest], true),
-                 {{},luma.view,vk::ImageLayout::eGeneral}},
-                &params,sizeof(params),s.lumaExtent);
-            s.transition(luma,vk::ImageLayout::eShaderReadOnlyOptimal);
-        }
-    }
+    if (historyRotation && s.retained)
+        s.rebuildOlderLuma(slot, s.latest, *historyRotation);
     s.submit(!deferred);
     s.latest = slot;
     s.timestamps[slot] = timestamp;
