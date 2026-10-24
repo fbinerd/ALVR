@@ -126,6 +126,13 @@ void RenderPipeline::destroy(VkContext const& ctx) {
 #endif
 
 static bool filter_modifier(uint64_t modifier) {
+    // Intel: keep the image VAAPI reads uncompressed (X, Y, Yf or 4 tiling).
+    // ANV otherwise picks a CCS modifier (Y_TILED_GEN12_RC_CCS_CC, 3 planes,
+    // on Gen12); only the uncompressed layout was verified to encode.
+    if ((modifier >> 56) == 0x01) {
+        u64 const code = modifier & 0x00ffffffffffffffull;
+        return code == 1 || code == 2 || code == 3 || code == 9;
+    }
     if (IS_AMD_FMT_MOD(modifier)) {
         // DCC not supported as encode input
         if (AMD_FMT_MOD_GET(DCC, modifier)) {
