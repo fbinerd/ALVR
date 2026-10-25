@@ -104,7 +104,7 @@ struct StereoDepth::State {
     vk::CommandPool pool {};
     vk::CommandBuffer command {};
     std::array<vk::CommandBuffer,3> chainedCommands{};
-    bool singleWait=false, partial=false;
+    bool singleWait=false, partial=false, combinedFine=false;
     vk::Fence fence {};
 
     vk::QueryPool queries {};
@@ -181,6 +181,12 @@ struct StereoDepth::State {
         int chain=0;
         if(auto home=std::getenv("HOME"))std::ifstream(std::string(home)+"/.config/alvr/diag_stereo_single_wait")>>chain;
         singleWait=chain==1||(std::getenv("STEREO_SINGLE_WAIT")&&std::string(std::getenv("STEREO_SINGLE_WAIT"))=="1");
+        int combined=0;
+        if(auto home=std::getenv("HOME"))std::ifstream(std::string(home)+"/.config/alvr/diag_stereo_combined_fine")>>combined;
+        bool requestedCombined=combined==1||(std::getenv("STEREO_COMBINED_FINE")&&std::string(std::getenv("STEREO_COMBINED_FINE"))=="1");
+        // Small/coarse grids retain the proven two one-way operations. Some
+        // such grids returned an empty backward field in the combined mode.
+        combinedFine=singleWait&&requestedCombined&&coarseLumaDimension&&lumaExtent.width>=512&&lumaExtent.height>=512;
         initialize();
         if (coarseLumaDimension)
             coarse = std::make_unique<StereoDepth>(ctx, extent, format, coarseLumaDimension, true, 0);
@@ -422,40 +428,20 @@ struct StereoDepth::State {
         native.profile = profile;
         native.log = [](void*, const char* text) { std::cerr << "StereoDepth OF: " << text << std::endl; };
 
-        estimator = std::make_unique<NativeOpticalFlow>(
-            native,
-            lumaExtent.width,
-            lumaExtent.height,
-            // STEREO_FLOW_LEVEL=slow|medium (default fast, as native motion).
-            [] {
-                char const* level = std::getenv("STEREO_FLOW_LEVEL");
-                std::string text = level ? level : "";
-                return text == "slow" ? VK_OPTICAL_FLOW_PERFORMANCE_LEVEL_SLOW_NV
-                    : text == "medium" ? VK_OPTICAL_FLOW_PERFORMANCE_LEVEL_MEDIUM_NV
-                                       : VK_OPTICAL_FLOW_PERFORMANCE_LEVEL_FAST_NV;
-            }(),
-            // Two one-way estimates: the combined backward output came back
-            // empty at some luma sizes (every match then failed consistency).
-            false
-        );
-        if(singleWait){
-        reverseEstimator = std::make_unique<NativeOpticalFlow>(
-            native,
-            lumaExtent.width,
-            lumaExtent.height,
-            // STEREO_FLOW_LEVEL=slow|medium (default fast, as native motion).
-            [] {
-                char const* level = std::getenv("STEREO_FLOW_LEVEL");
-                std::string text = level ? level : "";
-                return text == "slow" ? VK_OPTICAL_FLOW_PERFORMANCE_LEVEL_SLOW_NV
-                    : text == "medium" ? VK_OPTICAL_FLOW_PERFORMANCE_LEVEL_MEDIUM_NV
-                                       : VK_OPTICAL_FLOW_PERFORMANCE_LEVEL_FAST_NV;
-            }(),
-            // Two one-way estimates: the combined backward output came back
-            // empty at some luma sizes (every match then failed consistency).
-            false
-        );
+        auto performance=[] {
+            char const* level=std::getenv("STEREO_FLOW_LEVEL");std::string text=level?level:"";
+            return text=="slow"?VK_OPTICAL_FLOW_PERFORMANCE_LEVEL_SLOW_NV:
+                text=="medium"?VK_OPTICAL_FLOW_PERFORMANCE_LEVEL_MEDIUM_NV:VK_OPTICAL_FLOW_PERFORMANCE_LEVEL_FAST_NV;
+        }();
+        auto makeEstimator=[&](bool both){return std::make_unique<NativeOpticalFlow>(
+            native,lumaExtent.width,lumaExtent.height,performance,both);};
+        try{estimator=makeEstimator(combinedFine);}
+        catch(std::exception const&){
+            if(!combinedFine)throw;
+            // Unsupported combined sessions fall back to the existing path.
+            combinedFine=false;estimator=makeEstimator(false);
         }
+        if(singleWait&&!combinedFine)reverseEstimator=makeEstimator(false);
 
         // Build Pipelines
         // 1. stereo_luma
@@ -768,11 +754,12 @@ bool StereoDepth::estimate(
     double opticalMs = 0;
     bool timed = true;
     for (bool rightToLeft : { false, true }) {
+        if(s.combinedFine&&rightToLeft)continue;
         auto& a = rightToLeft ? refRight : inLeft;
         auto& b = rightToLeft ? inLeft : refRight;
         auto& estimator=(s.singleWait&&rightToLeft)?s.reverseEstimator:s.estimator;
         if (!estimator->execute(a, b, rightToLeft ? motionR2L : motionL2R, rightToLeft ? costR2L : costL2R,
-                flowError, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, nullptr, nullptr, s.singleWait))
+                flowError, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, s.combinedFine?&motionR2L:nullptr, s.combinedFine?&costR2L:nullptr, s.singleWait))
             throw std::runtime_error("StereoDepth: Optical flow failed: " + flowError);
         double ms = estimator->opticalGpuMilliseconds();
         timed &= ms >= 0;
