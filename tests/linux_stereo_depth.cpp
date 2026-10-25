@@ -952,7 +952,14 @@ int main(int argc, char** argv) {
         if (std::getenv("STEREO_BENCH")) {
             std::cout << "Coarse luma cap: " << (std::getenv("STEREO_COARSE") ? std::getenv("STEREO_COARSE") : "0") << "\n";
             std::cout << "\nsize/eye     output   wall mean  p95    max   | flow GPU mean | depth GPU mean\n";
-            for (auto [w, h] : { std::pair<uint32_t, uint32_t> { 1832, 1920 }, { 2048, 2144 } }) {
+            std::vector<std::pair<uint32_t,uint32_t>> sizes{{1832,1920},{2048,2144}};
+            if(auto text=std::getenv("STEREO_BENCH_EYE")){
+                unsigned w=0,h=0;char tail;
+                if(sscanf(text,"%u,%u%c",&w,&h,&tail)!=2||w<64||h<64||w>4096||h>4096)
+                    throw std::runtime_error("STEREO_BENCH_EYE requires bounded width,height");
+                sizes={{w,h}};
+            }
+            for (auto [w, h] : sizes) {
                 uint32_t full = w * 2;
                 std::vector<uint8_t> rgba(size_t(full) * h * 4);
                 uint32_t seed = 12345;
