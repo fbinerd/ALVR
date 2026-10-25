@@ -20,7 +20,7 @@ inline bool valid(Calibration const& c,uint64_t now) {
     float norm=0;
     for(float x:c.trackingFromReference.position)if(!std::isfinite(x))return false;
     for(float x:c.trackingFromReference.orientation){if(!std::isfinite(x))return false;norm+=x*x;}
-    return c.magic==0x4344484d && (c.version==1||c.version==2) && c.size==sizeof(c) && !c.reserved &&
+    return c.magic==0x4344484d && (c.version==1||c.version==2||c.version==3) && c.size==sizeof(c) && !c.reserved &&
         c.producerId && c.referenceSpace && c.monotonicAnchor && c.targetAnchor &&
         c.validFrom<=c.monotonicAnchor && c.monotonicAnchor<=c.validUntil &&
         c.validFrom<=now && now<=c.validUntil && c.validUntil-c.validFrom<=60000000000ull &&
@@ -65,6 +65,11 @@ inline std::optional<uint64_t> displayTime(Calibration const& c,uint64_t target)
 }
 inline std::optional<uint64_t> runtimeDisplayTime(Calibration const& c,uint64_t predicted) {
     return c.version==2?mapCalibrationClock(c,predicted):std::nullopt;
+}
+// Version 3 is a frame association fitted from a unique full pose-history
+// tag and public OpenXR display time. It never accepts a rotational tie.
+inline std::optional<uint64_t> poseDisplayTime(Calibration const& c,uint64_t poseTag) {
+    return c.version==3&&poseTag?mapCalibrationClock(c,poseTag):std::nullopt;
 }
 inline MhlDepthPose compose(MhlDepthPose const& a,MhlDepthPose const& b) {
     MhlDepthPose r{};auto q=a.orientation;auto v=b.position;

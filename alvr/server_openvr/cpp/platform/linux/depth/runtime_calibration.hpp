@@ -34,7 +34,7 @@ inline double rotationError(MhlDepthPose const& a,MhlDepthPose const& b){
     double d=0;for(unsigned i=0;i<4;i++)d+=a.orientation[i]*b.orientation[i];return 1-std::min(1.,std::abs(d));
 }
 struct RuntimeObservation {
-    uint64_t target{},display{},observed{};uint32_t owner{},reserved{};
+    uint64_t target{},display{},observed{},poseTarget{};uint32_t owner{},reserved{};
     MhlDepthPose head{{0,0,0},{0,0,0,1}};
     std::array<MhlDepthPose,2> localEyes{};
     std::array<std::array<float,4>,2> fov{};
@@ -74,9 +74,20 @@ inline bool finitePose(MhlDepthPose const& p){
 class RuntimePairer {
     std::optional<MhlDepthPose> origin;
     std::deque<ClockPair> clocks;
-    uint64_t producer=0,reference=0,lastFrame=0;
+    uint64_t producer=0,reference=0,lastFrame=0;uint32_t clockVersion=0;
 public:
-    uint64_t matched=0,unmatched=0,late=0,resets=0;double lastPoseError=0;
+    uint64_t matched=0,unmatched=0,late=0,resets=0,clockResets=0;double lastPoseError=0;
+    bool knownFor(RuntimeFrame const& r)const{return origin&&r.packet.producer_id==producer&&r.reference==reference;}
+    bool poseCompatible(RuntimeObservation const& d,RuntimeFrame const& r)const{
+        if(!knownFor(r)||d.owner!=r.packet.producer_pid||!finitePose(d.head))return false;
+        for(unsigned eye=0;eye<2;eye++){
+            if(!finitePose(r.packet.eyes[eye].pose)||!finitePose(d.localEyes[eye]))return false;
+            for(unsigned i=0;i<4;i++)if(!std::isfinite(d.fov[eye][i])||!std::isfinite(r.packet.eyes[eye].fov[i])||std::abs(r.packet.eyes[eye].fov[i]-d.fov[eye][i])>1e-5)return false;
+            auto actual=compose(*origin,r.packet.eyes[eye].pose),expected=compose(d.head,d.localEyes[eye]);
+            if(positionError(actual,expected)>1e-4||rotationError(actual,expected)>1e-6)return false;
+        }
+        return true;
+    }
     std::optional<Calibration> add(RuntimeObservation const& d,RuntimeFrame const& r){
         auto const& p=r.packet;
         auto delta=d.display>p.display_time_ns?d.display-p.display_time_ns:p.display_time_ns-d.display;
@@ -84,11 +95,16 @@ public:
            !finitePose(p.eyes[0].pose)||!finitePose(p.eyes[1].pose)||
            !finitePose(d.localEyes[0])||!finitePose(d.localEyes[1])||
            !d.target||!d.display||!d.owner||p.producer_pid!=d.owner||!p.producer_id||!r.reference||
-           p.eye_count!=2||!(p.flags&MHL_CLOCK_MONOTONIC)||delta>1000000){++unmatched;return {};}
-        if(p.producer_id!=producer||r.reference!=reference){origin.reset();clocks.clear();producer=p.producer_id;reference=r.reference;lastFrame=0;}
+           p.eye_count!=2||!(p.flags&MHL_CLOCK_MONOTONIC)||delta>100000000){++unmatched;return {};}
+        if(delta>1000000&&(!d.poseTarget||!poseCompatible(d,r))){++unmatched;return {};}
+        if(p.producer_id!=producer||r.reference!=reference){origin.reset();clocks.clear();clockVersion=0;producer=p.producer_id;reference=r.reference;lastFrame=0;}
+        if(clockVersion==3&&!d.poseTarget){++unmatched;return {};}
+        uint32_t domain=d.poseTarget?3:2;
+        if(clockVersion&&clockVersion!=domain){clocks.clear();++clockResets;}
+        clockVersion=domain;auto pairedTag=domain==3?d.poseTarget:d.display;
         if(p.frame_id<=lastFrame){++late;return {};}
         for(unsigned eye=0;eye<2;eye++)for(unsigned i=0;i<4;i++)
-            if(!std::isfinite(p.eyes[eye].fov[i])||std::abs(p.eyes[eye].fov[i]-d.fov[eye][i])>1e-5){++unmatched;return {};}
+            if(!std::isfinite(d.fov[eye][i])||!std::isfinite(p.eyes[eye].fov[i])||std::abs(p.eyes[eye].fov[i]-d.fov[eye][i])>1e-5){++unmatched;return {};}
         // Derive head-in-XrSpace from the independently measured local eye,
         // not an assumed symmetric/identity IPD or a forced zero origin.
         auto referenceHead=compose(p.eyes[0].pose,inversePose(d.localEyes[0]));
@@ -100,13 +116,19 @@ public:
             if(lastPoseError>.00025||rotationError(*origin,candidate)>1e-6){origin.reset();clocks.clear();++resets;}
         }
         if(!origin)origin=candidate;
-        if(!clocks.empty()&&(d.display<=clocks.back().target||p.display_time_ns<=clocks.back().monotonic)){++late;return {};}
+        if(!clocks.empty()&&(pairedTag<=clocks.back().target||p.display_time_ns<=clocks.back().monotonic)){++late;return {};}
+        if(!clocks.empty()){
+            __int128 change=(__int128(p.display_time_ns)-pairedTag)-(__int128(clocks.back().monotonic)-clocks.back().target);
+            if(change>1000000||change< -1000000){clocks.clear();++clockResets;}
+        }
         lastFrame=p.frame_id;++matched;
-        clocks.push_back({d.display,p.display_time_ns,delta+100000});
+        // Geometry establishes the frame association in domain3; runtime
+        // prediction may be delayed by throttling and is only a bounded gate.
+        clocks.push_back({pairedTag,p.display_time_ns,domain==3?100000:delta+100000});
         while(clocks.size()>32)clocks.pop_front();
         if(clocks.size()<8)return {};
         auto result=calibrate(producer,reference,clocks.front(),clocks.back(),*origin,p.display_time_ns+3000000000ull);
-        if(result)result->version=2; // predicted-display domain, never client/poll tag
+        if(result)result->version=domain; // Explicitly versioned source clock/tag domain
         return result;
     }
 };
@@ -141,7 +163,9 @@ class RuntimeCalibrationService {
                     for(auto d=observations.begin();d!=observations.end();++d){
                         if(d->owner!=it->packet.producer_pid)continue;
                         auto t=d->display>it->packet.display_time_ns?d->display-it->packet.display_time_ns:it->packet.display_time_ns-d->display;
-                        if(t<=1000000){if(best!=observations.end())ambiguous=true;if(t<distance){best=d;distance=t;}}
+                        bool pose=pairer.poseCompatible(*d,*it);
+                        bool admissible=(t<=1000000&&(!pairer.knownFor(*it)||pose))||(t<=100000000&&d->poseTarget&&pose);
+                        if(admissible){if(best!=observations.end())ambiguous=true;if(best==observations.end()||t<distance){best=d;distance=t;}}
                     }
                     if(best!=observations.end()){
                         if(ambiguous)++pairer.unmatched;
@@ -156,7 +180,7 @@ class RuntimeCalibrationService {
                         if(ok&&!rename(temp.c_str(),file.c_str())){struct stat state{};lstat(file.c_str(),&state);fileInode=state.st_ino;written=now;}else unlink(temp.c_str());}
                 }
                 if(now-reported>=5000000000ull){
-                    reported=now;std::ostringstream s;s<<"Game depth calibration matched="<<pairer.matched<<" late="<<pairer.late<<" unmatched="<<pairer.unmatched<<" origin_resets="<<pairer.resets<<" pose_error_mm="<<pairer.lastPoseError*1000;
+                    reported=now;std::ostringstream s;s<<"Game depth calibration matched="<<pairer.matched<<" late="<<pairer.late<<" unmatched="<<pairer.unmatched<<" origin_resets="<<pairer.resets<<" clock_resets="<<pairer.clockResets<<" pose_error_mm="<<pairer.lastPoseError*1000;
                     if(last)s<<" clock_offset_ns="<<int64_t(last->monotonicAnchor-last->targetAnchor)<<" uncertainty_ns="<<last->uncertaintyNs;
                     if(log)log(s.str());
                 }

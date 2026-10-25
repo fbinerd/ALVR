@@ -161,7 +161,7 @@ PoseHistory::GetUniqueDepthPoseMatch(vr::HmdMatrix34_t const& pose) const {
             }
             double d=p-pose.m[i][3];positionError+=d*d;
         }
-        if(!std::isfinite(positionError)||!std::isfinite(rotationError)||positionError>1e-8||rotationError>1e-10)continue;
+        if(!std::isfinite(positionError)||!std::isfinite(rotationError)||positionError>1e-12||rotationError>1e-10)continue;
         if(result)return {}; // Still/ambiguous poses are not clock evidence.
         result=*it;
     }

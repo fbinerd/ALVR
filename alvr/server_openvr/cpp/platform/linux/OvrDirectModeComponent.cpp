@@ -1069,7 +1069,9 @@ void OvrDirectModeComponent::SubmitLayer(const SubmitLayerPerEye_t (&perEye)[2])
         }
     }
     if (m_submitLayer == 0) {
-        auto depthPose = mhl::depth::runtimeDepthMode()==2?m_poseHistory->GetUniqueDepthPoseMatch(*pPose):std::nullopt;
+        auto depthMode=mhl::depth::runtimeDepthMode();
+        auto depthPose = (depthMode==1||depthMode==2)?m_poseHistory->GetUniqueDepthPoseMatch(*pPose):std::nullopt;
+        m_depthPoseTargetNs=depthPose?depthPose->targetTimestampNs:0;
         alvr::depth::observeRuntimeClock(m_targetTimestampNs, ownerPid, perEye[0], m_framePosePosition, entryNs, depthPose?depthPose->targetTimestampNs:0);
     }
     if (m_submitLayer < MAX_LAYERS) {
@@ -1207,6 +1209,7 @@ void OvrDirectModeComponent::Present(vr::SharedTextureHandle_t syncTexture) {
         auto raw=m_poseHistory->TrackingFromSubmitted(m_submitLayers[0][0].mHmdPose);
         auto q=vrmath::quaternionFromRotationMatrix(raw);
         job.depthRuntime.target=job.targetTimestampNs;
+        job.depthRuntime.poseTarget=m_depthPoseTargetNs;
         job.depthRuntime.display=m_depthDisplayMonotonicNs;
         job.depthRuntime.observed=mhl::depth::runtimeNow();
         auto owner=m_handleMap.find(m_submitLayers[0][0].hTexture);

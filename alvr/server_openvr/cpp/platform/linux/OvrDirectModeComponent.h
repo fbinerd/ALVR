@@ -116,7 +116,7 @@ private:
     // Head position the frame was rendered with (metres), for positional
     // correction in frame synthesis.
     std::array<float, 3> m_framePosePosition {};
-    uint64_t m_depthDisplayMonotonicNs=0;
+    uint64_t m_depthDisplayMonotonicNs=0, m_depthPoseTargetNs=0;
     uint64_t m_targetTimestampNs;
     uint64_t m_prevTargetTimestampNs;
     // Track current texture index for each eye to avoid UB with uninitialized data
