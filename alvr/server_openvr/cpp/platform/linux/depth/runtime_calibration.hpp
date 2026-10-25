@@ -73,11 +73,12 @@ inline bool finitePose(MhlDepthPose const& p){
 }
 class RuntimePairer {
     std::optional<MhlDepthPose> origin;
+    bool originTrusted=false;
     std::deque<ClockPair> clocks;
     uint64_t producer=0,reference=0,lastFrame=0;uint32_t clockVersion=0;
 public:
     uint64_t matched=0,unmatched=0,late=0,resets=0,clockResets=0;double lastPoseError=0;
-    bool knownFor(RuntimeFrame const& r)const{return origin&&r.packet.producer_id==producer&&r.reference==reference;}
+    bool knownFor(RuntimeFrame const& r)const{return origin&&originTrusted&&r.packet.producer_id==producer&&r.reference==reference;}
     bool poseCompatible(RuntimeObservation const& d,RuntimeFrame const& r)const{
         if(!knownFor(r)||d.owner!=r.packet.producer_pid||!finitePose(d.head))return false;
         for(unsigned eye=0;eye<2;eye++){
@@ -97,7 +98,7 @@ public:
            !d.target||!d.display||!d.owner||p.producer_pid!=d.owner||!p.producer_id||!r.reference||
            p.eye_count!=2||!(p.flags&MHL_CLOCK_MONOTONIC)||delta>100000000){++unmatched;return {};}
         if(delta>1000000&&(!d.poseTarget||!poseCompatible(d,r))){++unmatched;return {};}
-        if(p.producer_id!=producer||r.reference!=reference){origin.reset();clocks.clear();clockVersion=0;producer=p.producer_id;reference=r.reference;lastFrame=0;}
+        if(p.producer_id!=producer||r.reference!=reference){origin.reset();originTrusted=false;clocks.clear();clockVersion=0;producer=p.producer_id;reference=r.reference;lastFrame=0;}
         if(clockVersion==3&&!d.poseTarget){++unmatched;return {};}
         uint32_t domain=d.poseTarget?3:2;
         if(clockVersion&&clockVersion!=domain){clocks.clear();++clockResets;}
@@ -111,9 +112,12 @@ public:
         auto candidate=compose(d.head,inversePose(referenceHead));
         auto right=compose(candidate,p.eyes[1].pose),expected=compose(d.head,d.localEyes[1]);
         if(positionError(right,expected)>1e-4||rotationError(right,expected)>1e-6){++unmatched;return {};}
+        // A first tight-clock pair can be a startup transient. Do not let
+        // its origin filter out subsequent correct tight-clock bootstrap pairs.
+        // Trust the origin only after a complete coherent calibration.
         if(origin){
             lastPoseError=positionError(compose(*origin,referenceHead),d.head);
-            if(lastPoseError>.00025||rotationError(*origin,candidate)>1e-6){origin.reset();clocks.clear();++resets;}
+            if(lastPoseError>.0001||rotationError(*origin,candidate)>1e-6){origin.reset();originTrusted=false;clocks.clear();++resets;}
         }
         if(!origin)origin=candidate;
         if(!clocks.empty()&&(pairedTag<=clocks.back().target||p.display_time_ns<=clocks.back().monotonic)){++late;return {};}
@@ -128,7 +132,7 @@ public:
         while(clocks.size()>32)clocks.pop_front();
         if(clocks.size()<8)return {};
         auto result=calibrate(producer,reference,clocks.front(),clocks.back(),*origin,p.display_time_ns+3000000000ull);
-        if(result)result->version=domain; // Explicitly versioned source clock/tag domain
+        if(result){originTrusted=true;result->version=domain;} // Explicitly versioned source clock/tag domain
         return result;
     }
 };
