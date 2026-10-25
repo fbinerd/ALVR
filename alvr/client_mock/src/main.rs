@@ -4,7 +4,9 @@ use alvr_client_core::{ClientCapabilities, ClientCoreContext, ClientCoreEvent};
 use alvr_common::{
     DeviceMotion, Fov, HAND_RIGHT_ID, HEAD_ID, Pose, RelaxedAtomic, ViewParams,
     glam::{Quat, UVec2, Vec3},
-    inputs::{BUTTON_INFO, QUEST_CONTROLLER_PROFILE_ID, RIGHT_SYSTEM_CLICK_ID},
+    inputs::{
+        BUTTON_INFO, CONTROLLER_PROFILE_INFO, QUEST_CONTROLLER_PROFILE_ID, RIGHT_SYSTEM_CLICK_ID,
+    },
     parking_lot::{Mutex, RwLock},
 };
 use alvr_packets::{ButtonEntry, ButtonValue, FaceData, TrackingData};
@@ -264,9 +266,14 @@ fn tracking_thread(
     let sway = video::Sway::from_env();
     let hand_sweep = video::HandSweep::from_env();
     if hand_sweep.is_some() {
-        let input_ids = BUTTON_INFO
+        let input_ids = CONTROLLER_PROFILE_INFO[&*QUEST_CONTROLLER_PROFILE_ID]
+            .button_set
             .iter()
-            .filter_map(|(id, info)| (info.device_id == *HAND_RIGHT_ID).then_some(*id))
+            .filter_map(|id| {
+                BUTTON_INFO
+                    .get(id)
+                    .and_then(|info| (info.device_id == *HAND_RIGHT_ID).then_some(*id))
+            })
             .collect();
         context.send_active_interaction_profile(
             *HAND_RIGHT_ID,
