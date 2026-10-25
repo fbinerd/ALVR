@@ -640,8 +640,12 @@ void OvrDirectModeComponent::EncodeWorkerLoop() {
             // local eye parameters used for this composed frame.
             alvr::depth::ComposedDepthPicture depthPicture;
             depthPicture.timestamp = stampTimestampNs;
+            depthPicture.runtime = job.depthRuntime;
             depthPicture.head = {{job.renderPosition[0], job.renderPosition[1], job.renderPosition[2]},
                 {float(job.renderOrientation.x), float(job.renderOrientation.y), float(job.renderOrientation.z), float(job.renderOrientation.w)}};
+            // Validate game depth against the actual submitted picture pose,
+            // not the newer pose selected by the driver's rotational matcher.
+            if(job.depthRuntime.display)depthPicture.head=job.depthRuntime.head;
             depthPicture.unwarpedSingleLayer = job.layers.size() == 1 && !warpParams.enabled
                 && stampTimestampNs == job.targetTimestampNs && !Settings_Instance()->m_enableFoveatedEncoding;
             {
@@ -975,6 +979,12 @@ void OvrDirectModeComponent::GetNextSwapTextureSetIndex(
  * be created using CreateSwapTextureSet and should be alternated per frame.  Call Present once all
  * layers have been submitted. */
 void OvrDirectModeComponent::SubmitLayer(const SubmitLayerPerEye_t (&perEye)[2]) {
+    if(m_submitLayer==0){
+        auto now=std::chrono::steady_clock::now().time_since_epoch();
+        auto ns=std::chrono::duration_cast<std::chrono::nanoseconds>(now).count();
+        double predicted=double(ns)+double(perEye[0].flHmdPosePredictionTimeInSecondsFromNow)*1e9;
+        m_depthDisplayMonotonicNs=std::isfinite(predicted)&&predicted>0&&std::abs(predicted-ns)<1e9?uint64_t(predicted):0;
+    }
     m_presentMutex.lock();
 
     static bool const traceDepth = [] {
@@ -1187,6 +1197,23 @@ void OvrDirectModeComponent::Present(vr::SharedTextureHandle_t syncTexture) {
         job.depthViews[0] = m_viewParams[0];
         job.depthViews[1] = m_viewParams[1];
         job.depthViewsValid = m_viewParamsValid;
+    }
+    if((mhl::depth::runtimeDepthMode()==1||mhl::depth::runtimeDepthMode()==2)&&m_depthDisplayMonotonicNs&&job.depthViewsValid){
+        auto raw=m_poseHistory->TrackingFromSubmitted(m_submitLayers[0][0].mHmdPose);
+        auto q=vrmath::quaternionFromRotationMatrix(raw);
+        job.depthRuntime.target=job.targetTimestampNs;
+        job.depthRuntime.display=m_depthDisplayMonotonicNs;
+        job.depthRuntime.observed=mhl::depth::runtimeNow();
+        auto owner=m_handleMap.find(m_submitLayers[0][0].hTexture);
+        if(owner!=m_handleMap.end())job.depthRuntime.owner=owner->second.first->pid;
+        job.depthRuntime.head={{raw.m[0][3],raw.m[1][3],raw.m[2][3]},
+            {float(q.x),float(q.y),float(q.z),float(q.w)}};
+        for(unsigned i=0;i<2;i++){
+            auto const& v=job.depthViews[i];
+            job.depthRuntime.localEyes[i]={{v.pose.position[0],v.pose.position[1],v.pose.position[2]},
+                {v.pose.orientation.x,v.pose.orientation.y,v.pose.orientation.z,v.pose.orientation.w}};
+            job.depthRuntime.fov[i]={v.fov.left,v.fov.right,v.fov.up,v.fov.down};
+        }
     }
     job.generation = m_encGeneration;
     job.enqueueTime = std::chrono::steady_clock::now();

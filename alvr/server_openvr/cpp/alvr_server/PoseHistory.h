@@ -27,6 +27,10 @@ public:
     // for that stamp to resolve on the Rust side.
     std::optional<TrackingHistoryFrame> GetLatestPose() const;
 
+    // Explicit inverse of the cached submitted-space transform, including translation.
+    // Used only by the optional depth geometry bridge; pose matching is unchanged.
+    vr::HmdMatrix34_t TrackingFromSubmitted(vr::HmdMatrix34_t const&) const;
+
     void SetTransform(const vr::HmdMatrix34_t& transform);
 
 private:

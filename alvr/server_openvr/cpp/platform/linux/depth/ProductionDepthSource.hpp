@@ -1,6 +1,7 @@
 #pragma once
 #include "GameDepthSource.hpp"
 #include "clock_space_bridge.hpp"
+#include "runtime_calibration.hpp"
 #include <chrono>
 #include <cstdlib>
 #include <fstream>
@@ -10,6 +11,7 @@ namespace alvr::depth {
 // worker, under the same encoder mutex, before querying/capturing the picture.
 struct ComposedDepthPicture {
     uint64_t timestamp{};
+    mhl::depth::RuntimeObservation runtime{};
     MhlDepthPose head{{0,0,0},{0,0,0,1}};
     std::array<MhlDepthPose,2> localEyes{};
     std::array<std::array<float,4>,2> fov{},sourceUv{};
@@ -18,6 +20,7 @@ struct ComposedDepthPicture {
 class ProductionDepthSource {
     std::optional<mhl::depth::Query> current;
     std::unique_ptr<GameDepthSource> binding;
+    std::unique_ptr<mhl::depth::RuntimeCalibrationService> calibrator;
     std::optional<mhl::depth::Calibration> calibration;
     uint64_t checked=0;
     std::string directory;
@@ -32,6 +35,9 @@ public:
         if(!checked||now-checked>=1000000000){
             checked=now;int enabled=0;std::ifstream(directory+"diag_depth_receiver")>>enabled;
             calibration=mhl::depth::loadCalibration(directory+"depth_calibration",now);
+            if((enabled==1||enabled==2)&&!calibrator)
+                calibrator=std::make_unique<mhl::depth::RuntimeCalibrationService>(directory+"depth_receiver.sock.calibrate",directory+"depth_calibration",log);
+            if(enabled!=1&&enabled!=2)calibrator.reset();
             // Do not instantiate/bind at all on the normal default path.
             if(enabled==1&&!binding)binding=std::make_unique<GameDepthSource>(encoder,device,
                 directory+"depth_receiver.sock",directory+"diag_depth_receiver",
@@ -39,6 +45,7 @@ public:
                     if(!current||current->targetTimestampNs!=stamp)return {};return current;
                 },std::move(log));
         }
+        if(calibrator)calibrator->observe(picture.runtime);
         if(!binding||!calibration||!mhl::depth::valid(*calibration,now)||!picture.viewsValid||!picture.unwarpedSingleLayer)return;
         auto display=mhl::depth::displayTime(*calibration,picture.timestamp);
         if(!display||!mhl::depth::valid(*calibration,*display))return;

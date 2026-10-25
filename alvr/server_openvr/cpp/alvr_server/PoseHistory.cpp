@@ -131,3 +131,14 @@ void PoseHistory::SetTransform(const vr::HmdMatrix34_t& transform) {
     }
     m_transformIdentity = true;
 }
+
+vr::HmdMatrix34_t PoseHistory::TrackingFromSubmitted(vr::HmdMatrix34_t const& pose) const {
+    std::unique_lock<std::mutex> lock(m_mutex);
+    vr::HmdMatrix34_t raw{};
+    for(unsigned i=0;i<3;i++) {
+        for(unsigned j=0;j<3;j++)for(unsigned k=0;k<3;k++)
+            raw.m[i][j]+=m_transform.m[k][i]*pose.m[k][j];
+        for(unsigned k=0;k<3;k++)raw.m[i][3]+=m_transform.m[k][i]*(pose.m[k][3]-m_transform.m[k][3]);
+    }
+    return raw;
+}

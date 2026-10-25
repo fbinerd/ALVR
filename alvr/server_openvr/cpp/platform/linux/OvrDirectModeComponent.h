@@ -116,6 +116,7 @@ private:
     // Head position the frame was rendered with (metres), for positional
     // correction in frame synthesis.
     std::array<float, 3> m_framePosePosition {};
+    uint64_t m_depthDisplayMonotonicNs=0;
     uint64_t m_targetTimestampNs;
     uint64_t m_prevTargetTimestampNs;
     // Track current texture index for each eye to avoid UB with uninitialized data
@@ -160,6 +161,7 @@ private:
         // Local eye geometry snapshot for the optional game-depth query.
         FfiViewParams depthViews[2] {};
         bool depthViewsValid = false;
+        mhl::depth::RuntimeObservation depthRuntime{};
         // Encoder-state generation this job was built against. The worker
         // discards the job if the generation moved (rebuild, shutdown, set
         // switch) between enqueue and processing.

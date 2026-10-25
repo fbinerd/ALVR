@@ -255,7 +255,7 @@ struct Receiver::Impl {
     }
     void report(){
         auto now=std::chrono::steady_clock::now();if(reported.time_since_epoch().count()&&now-reported<std::chrono::seconds(5))return;reported=now;
-        std::ostringstream s;s<<"depth match received="<<stats.received<<" accepted="<<stats.accepted<<" rejected="<<stats.rejected
+        std::ostringstream s;s<<"depth match matched="<<stats.accepted<<" late="<<stats.timestamp<<" unmatched="<<stats.missing<<" received="<<stats.received<<" accepted="<<stats.accepted<<" rejected="<<stats.rejected
             <<" timestamp="<<stats.timestamp<<" geometry="<<stats.geometry<<" pose="<<stats.pose<<" clock="<<stats.clock
             <<" protocol="<<stats.protocol<<" device="<<stats.device<<" not_ready="<<stats.notReady<<" missing="<<stats.missing;message(s.str());
     }
