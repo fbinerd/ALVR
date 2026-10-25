@@ -386,10 +386,18 @@ fn client_thread(
     output_sender: mpsc::Sender<WindowOutput>,
     input_receiver: mpsc::Receiver<WindowInput>,
 ) {
+    let max_view_resolution = std::env::var("MOCK_MAX_VIEW_RESOLUTION")
+        .ok()
+        .and_then(|value| {
+            let (width, height) = value.split_once(',')?;
+            let size = UVec2::new(width.trim().parse().ok()?, height.trim().parse().ok()?);
+            (size.min_element() > 0).then_some(size)
+        })
+        .unwrap_or(UVec2::new(1920, 1832));
     let capabilities = ClientCapabilities {
         platform: alvr_system_info::platform(None, None),
         default_view_resolution: UVec2::new(1920, 1832),
-        max_view_resolution: UVec2::new(1920, 1832),
+        max_view_resolution,
         refresh_rates: vec![60.0, 72.0, 80.0, 90.0, 120.0],
         foveated_encoding: false,
         encoder_high_profile: false,
