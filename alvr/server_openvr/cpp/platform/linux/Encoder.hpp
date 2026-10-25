@@ -120,7 +120,7 @@ private:
     std::unique_ptr<motion::NativeMotion> nativeMotion;
     DepthSource depthSource;
     depth::DeferredDepthSource deferredGameDepth;
-    uint64_t lateGameDepthAttached=0;
+    uint64_t lateGameDepthAttached=0, gameDepthPredictionMisses=0;
     bool gameDepthLateEligible=false; // This delivery prototype is mode7 only.
     std::unique_ptr<depth::ProductionDepthSource> gameDepth;
     // Stereo depth for the positional correction, computed from each real
@@ -630,7 +630,7 @@ public:
     // Optional depth for frame synthesis. Called for each real picture, with
     // that picture's target timestamp, just before it is captured; it returns
     // the matching depth or nothing (then synthesis works without depth).
-    // Gap filling may retry this SAME tag after send/before predict, without
+    // Gap filling may retry this SAME tag after send/before FIRST predict, without
     // waiting for packets, and attach a late depth to its retained picture.
     // The depth must be canonical (R32F view distance in metres, +0 invalid,
     // both eyes side by side) and in the geometry of the composed picture
@@ -735,6 +735,11 @@ public:
         if (!encoder || !nativeMotion || !nativeMotion->gapFill() || !renderer.hasValue())
             return false;
         attachGameDepth();
+        if(gameDepthLateEligible&&deferredGameDepth.predictionBoundary()){
+            ++gameDepthPredictionMisses;
+            if(gameDepthPredictionMisses<=4||gameDepthPredictionMisses%120==0)
+                Info("Game depth first-prediction misses=%llu",(unsigned long long)gameDepthPredictionMisses);
+        }
         auto output = renderer.get().getOutput();
         if (!nativeMotion->predict(
                 output.image.image,
