@@ -182,13 +182,20 @@ int main(int argc,char** argv) {
             std::getenv("STEREO_REDUCED")!=nullptr,
             std::getenv("STEREO_COARSE")?uint32_t(std::stoul(std::getenv("STEREO_COARSE"))):0u);
     }
+    // Test-only mode selection. Uses the existing mode 9 implementation;
+    // interpolation scores the withheld odd target only after the next real
+    // even picture is captured. No consumer or metric implementation changes.
+    unsigned testMode=std::getenv("DEPTH_MODE")?std::stoul(std::getenv("DEPTH_MODE")):7;
+    if(testMode!=7&&testMode!=9)throw std::runtime_error("DEPTH_MODE must be 7 or 9");
+    unsigned frameDivisor=std::getenv("DEPTH_DIVISOR")?std::stoul(std::getenv("DEPTH_DIVISOR")):2;
+    if(frameDivisor<2||frameDivisor>3)throw std::runtime_error("DEPTH_DIVISOR must be 2 or 3");
     for(unsigned variant=0;variant<(stereo?4u:3u);variant++){
         // DEPTH_VARIANTS=2,3 runs only those variants (quick A/B iterations;
         // the no-depth baseline does not change with depth-path edits).
         if(auto only=std::getenv("DEPTH_VARIANTS");only&&(","+std::string(only)+",").find(","+std::to_string(variant)+",")==std::string::npos)continue;
         std::string name=variant==0?"no_depth":variant==1?"exact_depth":variant==2?"exact_depth_translation":"stereo_depth_translation";
         auto directory=output/name;std::filesystem::create_directories(directory);
-        Motion motion(ctx,{size.width(),size.height},vk::Format::eR8G8B8A8Unorm);motion.setGapFill(true);motion.setStableResidual(true);
+        Motion motion(ctx,{size.width(),size.height},vk::Format::eR8G8B8A8Unorm);motion.setGapFill(true);motion.setStableResidual(true);motion.setInterpolate(testMode==9);
 #ifdef ALVR_NATIVE_MOTION_TESTING
         // DEPTH_DIAGNOSTIC=1 paints the depth decision (red covered, green filled).
         if(variant&&std::getenv("DEPTH_DIAGNOSTIC"))motion.setDiagnosticFlags(2);
@@ -198,9 +205,22 @@ int main(int argc,char** argv) {
         if(variant&&std::getenv("DEPTH_FLAGS"))motion.setDiagnosticFlags(uint32_t(std::stoul(std::getenv("DEPTH_FLAGS"))));
 #endif
         size_t latest=0;unsigned targets=0;double prepareMs=0,worst=-1,worstEdge=-1;Totals total;
+        auto evaluate=[&](size_t i){
+            auto const& f=frames[i];uint64_t clock=f.packet.display_time_ns;
+            auto transform=between(frames[latest].packet,f.packet,variant>=2);
+            if(!motion.predict(gpu.image,gpu.view,gpu.layout,clock,{},clock,&transform))throw std::runtime_error("Production gap-fill rejected target");
+            auto image=gpu.transfer(nullptr);auto timing=motion.lastPredictionTiming();auto mask=masks(f,frames[latest],size,ds);auto s=score(image,f,mask);total.add(s);targets++;
+            csv<<std::setprecision(12)<<name<<','<<i<<','<<f.packet.frame_id<<','<<clock<<','<<s.mae()<<','<<s.psnr()<<','<<s.bandMae()<<','<<s.bandPixels<<','<<s.shadowPixels<<','<<s.shadowEligible<<','<<prepareMs<<','<<timing.flowMs<<','<<timing.warpMs<<','<<timing.opticalGpuMs<<','<<timing.warpGpuMs<<'\n';
+            auto save=[&](std::string prefix){writePpm(directory/(prefix+"_prediction.ppm"),image,size);writePpm(directory/(prefix+"_truth.ppm"),f.colour,size);Pixels diff=image;for(size_t j=0;j<diff.size();j++)diff[j]=j%4==3?255:uint8_t(std::min(255,4*std::abs(int(image[j])-int(f.colour[j]))));writePpm(directory/(prefix+"_diff_x4.ppm"),diff,size);std::ofstream(directory/(prefix+"_frame.txt"))<<f.packet.frame_id<<'\n';};
+            // DEPTH_DUMP_INDEX=n saves that target for every variant (A/B by eye).
+            if(std::getenv("DEPTH_DUMP_INDEX")&&int(i)==std::atoi(std::getenv("DEPTH_DUMP_INDEX")))save("dump");
+            // Opt-in image export for independent parallax-only scoring.
+            if(std::getenv("DEPTH_DUMP_FRAMES"))save("frame_"+std::to_string(i));
+            if(s.mae()>worst){worst=s.mae();save("worst_overall");}if(s.bandMae()>worstEdge){worstEdge=s.bandMae();save("worst_edge");}
+        };
         for(size_t i=0;i<frames.size();i++){
             auto const& f=frames[i];uint64_t clock=f.packet.display_time_ns;
-            if(i%2==0){
+            if(i%frameDivisor==0){
                 motion.waitIdle();gpu.transfer(&f.colour);
                 bool queuedStereo=variant==3 && std::getenv("DEPTH_STEREO_QUEUED");
                 if(variant==3&&!queuedStereo){estimator->estimate(gpu.image,gpu.view,gpu.layout,{},{},vk::ImageLayout::eGeneral,stereoParams);}
@@ -215,15 +235,10 @@ int main(int argc,char** argv) {
                     if(!motion.attachDepth(stereoInput,true))throw std::runtime_error("Queued stereo attach rejected");
                 }
                 auto start=std::chrono::steady_clock::now();motion.prepare();prepareMs=elapsed(start);latest=i;
-            }else if(i>=7){
-                auto transform=between(frames[latest].packet,f.packet,variant>=2);
-                if(!motion.predict(gpu.image,gpu.view,gpu.layout,clock,{},clock,&transform))throw std::runtime_error("Production gap-fill rejected target");
-                auto image=gpu.transfer(nullptr);auto timing=motion.lastPredictionTiming();auto mask=masks(f,frames[latest],size,ds);auto s=score(image,f,mask);total.add(s);targets++;
-                csv<<std::setprecision(12)<<name<<','<<i<<','<<f.packet.frame_id<<','<<clock<<','<<s.mae()<<','<<s.psnr()<<','<<s.bandMae()<<','<<s.bandPixels<<','<<s.shadowPixels<<','<<s.shadowEligible<<','<<prepareMs<<','<<timing.flowMs<<','<<timing.warpMs<<','<<timing.opticalGpuMs<<','<<timing.warpGpuMs<<'\n';
-                auto save=[&](std::string prefix){writePpm(directory/(prefix+"_prediction.ppm"),image,size);writePpm(directory/(prefix+"_truth.ppm"),f.colour,size);Pixels diff=image;for(size_t j=0;j<diff.size();j++)diff[j]=j%4==3?255:uint8_t(std::min(255,4*std::abs(int(image[j])-int(f.colour[j]))));writePpm(directory/(prefix+"_diff_x4.ppm"),diff,size);std::ofstream(directory/(prefix+"_frame.txt"))<<f.packet.frame_id<<'\n';};
-                // DEPTH_DUMP_INDEX=n saves that target for every variant (A/B by eye).
-                if(std::getenv("DEPTH_DUMP_INDEX")&&int(i)==std::atoi(std::getenv("DEPTH_DUMP_INDEX")))save("dump");
-                if(s.mae()>worst){worst=s.mae();save("worst_overall");}if(s.bandMae()>worstEdge){worstEdge=s.bandMae();save("worst_edge");}
+                if(testMode==9&&i>=4*frameDivisor)
+                    for(size_t target=i-frameDivisor+1;target<i;target++)evaluate(target);
+            }else if(testMode==7&&i>=3*frameDivisor+1){
+                evaluate(i);
             }
         }
         motion.waitIdle();summary<<std::setprecision(12)<<name<<','<<targets<<','<<total.mae()<<','<<total.psnr()<<','<<total.bandMae()<<','<<total.bandPixels<<','<<total.shadowPixels<<','<<total.shadowEligible<<',';
