@@ -18,6 +18,9 @@ public:
     void OnPoseUpdated(uint64_t targetTimestampNs, FfiDeviceMotion motion);
 
     std::optional<TrackingHistoryFrame> GetBestPoseMatch(const vr::HmdMatrix34_t& pose) const;
+    // Depth-only association: require a unique full submitted pose. Normal
+    // synthesis matching above remains rotational and unchanged.
+    std::optional<TrackingHistoryFrame> GetUniqueDepthPoseMatch(const vr::HmdMatrix34_t& pose) const;
     // Return the most recent pose known at the given timestamp
     std::optional<TrackingHistoryFrame> GetPoseAt(uint64_t timestampNs) const;
     // The held pose whose target timestamp is closest to timestampNs.

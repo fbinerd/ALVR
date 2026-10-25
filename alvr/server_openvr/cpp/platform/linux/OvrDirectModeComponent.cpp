@@ -1069,7 +1069,8 @@ void OvrDirectModeComponent::SubmitLayer(const SubmitLayerPerEye_t (&perEye)[2])
         }
     }
     if (m_submitLayer == 0) {
-        alvr::depth::observeRuntimeClock(m_targetTimestampNs, ownerPid, perEye[0], m_framePosePosition, entryNs);
+        auto depthPose = mhl::depth::runtimeDepthMode()==2?m_poseHistory->GetUniqueDepthPoseMatch(*pPose):std::nullopt;
+        alvr::depth::observeRuntimeClock(m_targetTimestampNs, ownerPid, perEye[0], m_framePosePosition, entryNs, depthPose?depthPose->targetTimestampNs:0);
     }
     if (m_submitLayer < MAX_LAYERS) {
         m_submitLayers[m_submitLayer][0] = perEye[0];

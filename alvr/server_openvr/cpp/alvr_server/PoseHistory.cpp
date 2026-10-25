@@ -142,3 +142,28 @@ vr::HmdMatrix34_t PoseHistory::TrackingFromSubmitted(vr::HmdMatrix34_t const& po
     }
     return raw;
 }
+
+
+std::optional<PoseHistory::TrackingHistoryFrame>
+PoseHistory::GetUniqueDepthPoseMatch(vr::HmdMatrix34_t const& pose) const {
+    std::unique_lock<std::mutex> lock(m_mutex);
+    if(m_poseBuffer.empty())return {};
+    auto newest=m_poseBuffer.back().targetTimestampNs;
+    std::optional<TrackingHistoryFrame> result;
+    for(auto it=m_poseBuffer.rbegin();it!=m_poseBuffer.rend();++it){
+        if(newest-it->targetTimestampNs>MATCH_WINDOW_NS)break;
+        double positionError=0,rotationError=0;
+        for(unsigned i=0;i<3;i++){
+            double p=m_transform.m[i][3];
+            for(unsigned j=0;j<3;j++){
+                p+=m_transform.m[i][j]*it->motion.pose.position[j];
+                double d=it->rotationMatrix.m[i][j]-pose.m[i][j];rotationError+=d*d;
+            }
+            double d=p-pose.m[i][3];positionError+=d*d;
+        }
+        if(!std::isfinite(positionError)||!std::isfinite(rotationError)||positionError>1e-8||rotationError>1e-10)continue;
+        if(result)return {}; // Still/ambiguous poses are not clock evidence.
+        result=*it;
+    }
+    return result;
+}
