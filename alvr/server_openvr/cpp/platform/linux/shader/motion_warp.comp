@@ -319,6 +319,28 @@ vec4 colorAt(bool recent,bool right,vec2 q) {
     vec2 uv=(q+0.5)/vec2(2*p.eyeWidth,p.height);
     return recent?texture(latestImage,uv):texture(previousImage,uv);
 }
+// Catmull-Rom (4x4 texels, clamped to the eye) for final output samples of
+// interpolated pictures: half-motion positions fall between texels, and a
+// bilinear read there softened every moving edge (~8% less edge energy than
+// the real pictures around it, read as flicker when alternating).
+vec4 sharpColorAt(bool recent,bool right,vec2 q) {
+    if (!recent && p.rotationMode!=0) q=olderPixel(q,right);
+    q=clamp(q,vec2(0),vec2(p.eyeWidth-1,p.height-1));
+    vec2 base=floor(q), t=q-base;
+    vec4 wx=vec4(((-0.5*t.x+1.0)*t.x-0.5)*t.x, (1.5*t.x-2.5)*t.x*t.x+1.0,
+                 ((-1.5*t.x+2.0)*t.x+0.5)*t.x, (0.5*t.x-0.5)*t.x*t.x);
+    vec4 wy=vec4(((-0.5*t.y+1.0)*t.y-0.5)*t.y, (1.5*t.y-2.5)*t.y*t.y+1.0,
+                 ((-1.5*t.y+2.0)*t.y+0.5)*t.y, (0.5*t.y-0.5)*t.y*t.y);
+    vec4 sum=vec4(0);
+    int offset=right?int(p.eyeWidth):0;
+    for (int j=0;j<4;j++) for (int i=0;i<4;i++) {
+        ivec2 c=ivec2(clamp(base+vec2(i-1,j-1),vec2(0),vec2(p.eyeWidth-1,p.height-1)));
+        c.x+=offset;
+        vec4 v=recent?texelFetch(latestImage,c,0):texelFetch(previousImage,c,0);
+        sum+=wx[i]*wy[j]*v;
+    }
+    return clamp(sum,vec4(0),vec4(1));
+}
 void main() {
     uvec2 xy=gl_GlobalInvocationID.xy;
     uvec2 base=gl_WorkGroupID.xy*8;
@@ -539,11 +561,13 @@ void main() {
         // the side closer in time weighs more, so content hidden in one
         // picture (behind a moving hand) is taken from the other.
         float confLatest=valid?residualConfidence:0.0;
+        // Sharper final samples for the interpolated picture.
+        if (valid) color=sharpColorAt(true,right,q);
         vec4 fromLatest=color;
         vec2 qOld;
         bool validOld=sourceAt(target,p.time,false,right,qOld);
         float confOld=validOld?residualConfidence:0.0;
-        vec4 fromOld=validOld?colorAt(false,right,qOld):fromLatest;
+        vec4 fromOld=validOld?sharpColorAt(false,right,qOld):fromLatest;
         float wLatest=p.time*confLatest+1e-4, wOld=(1.0-p.time)*confOld;
         color=(wLatest*fromLatest+wOld*fromOld)/(wLatest+wOld);
         residualConfidence=max(confLatest,confOld);
