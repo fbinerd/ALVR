@@ -196,6 +196,8 @@ int main(int argc,char** argv) {
         motion.setDepthOcclusion(std::getenv("DEPTH_OCCLUSION")!=nullptr);
         // DEPTH_FLAGS=n sets extra warp flags on depth variants (experiments).
         if(variant&&std::getenv("DEPTH_FLAGS"))motion.setDiagnosticFlags(uint32_t(std::stoul(std::getenv("DEPTH_FLAGS"))));
+        // SHARP_OUTPUT=1: Catmull-Rom output samples in every variant (experiment).
+        if(std::getenv("SHARP_OUTPUT"))motion.setDiagnosticFlags(16u|(variant&&std::getenv("DEPTH_FLAGS")?uint32_t(std::stoul(std::getenv("DEPTH_FLAGS"))):0u));
 #endif
         // DEPTH_INTERPOLATE=1: mode 9. Each odd frame is synthesized between
         // its two even neighbours, after the later one is captured (the

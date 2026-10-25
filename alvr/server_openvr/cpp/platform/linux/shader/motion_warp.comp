@@ -371,7 +371,10 @@ void main() {
     vec2 target=vec2(xy.x%p.eyeWidth,xy.y), q;
     if(p.rotationMode!=0) target=hasDepth() && dot(p.targetTranslation.xyz,p.targetTranslation.xyz)>0.0
         ? positionalPixel(target,right) : rotatePixel(target,right,p.targetQuaternion);
-    vec4 color=p.rotationMode!=0?colorAt(true,right,target):texelFetch(latestImage,ivec2(xy),0);
+    // flags bit 4 (experiment): Catmull-Rom output samples in every mode.
+    bool sharpOutput=(p.flags&16u)!=0u;
+    vec4 color=p.rotationMode!=0?(sharpOutput?sharpColorAt(true,right,target):colorAt(true,right,target))
+        :texelFetch(latestImage,ivec2(xy),0);
     vec4 rotationOnly=color;
     // Depth edge near this pixel: the occlusion resolution below handles it,
     // so the static shortcuts (which would leave an arriving object behind)
@@ -464,7 +467,7 @@ void main() {
         }
     }
     if (valid) {
-        vec4 source=colorAt(true,right,q);
+        vec4 source=sharpOutput?sharpColorAt(true,right,q):colorAt(true,right,q);
         // Comparing the actual sampled source detects an entering moving edge;
         // identity at both sites preserves the exact current texel. This replaces
         // two 3x3 patch scans per output pixel.
