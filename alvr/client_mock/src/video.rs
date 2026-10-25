@@ -257,6 +257,42 @@ impl Sway {
     }
 }
 
+// Scripted right-controller motion in front of the headset. The mock tracking
+// thread keeps it 45 cm forward and 25 cm below the head, while this component
+// moves it horizontally: MOCK_HAND_SWEEP="<amplitude metres>,<period seconds>".
+#[derive(Clone, Copy, PartialEq)]
+pub struct HandSweep {
+    pub amplitude_m: f32,
+    pub period_s: f32,
+}
+
+impl HandSweep {
+    pub fn from_env() -> Option<Self> {
+        let value = std::env::var("MOCK_HAND_SWEEP").ok()?;
+        let (amplitude, period) = value.split_once(',')?;
+        let amplitude_m: f32 = amplitude.trim().parse().ok()?;
+        let period_s: f32 = period.trim().parse().ok()?;
+        (amplitude_m.is_finite()
+            && amplitude_m > 0.0
+            && period_s.is_finite()
+            && period_s > 0.0)
+        .then_some(Self {
+            amplitude_m,
+            period_s,
+        })
+    }
+
+    // Returns (right-controller x, x velocity) at time t.
+    pub fn at(&self, t: Duration) -> (f32, f32) {
+        let w = std::f32::consts::TAU / self.period_s;
+        let phase = w * t.as_secs_f32();
+        (
+            self.amplitude_m * phase.sin(),
+            self.amplitude_m * w * phase.cos(),
+        )
+    }
+}
+
 pub struct PoseLog(Option<BufWriter<File>>);
 
 impl PoseLog {
@@ -264,15 +300,32 @@ impl PoseLog {
         let file = output_dir().and_then(|dir| {
             fs::create_dir_all(&dir).ok()?;
             let mut file = BufWriter::new(File::create(dir.join("poses.csv")).ok()?);
-            writeln!(file, "poll_ns,yaw_rad,pitch_rad,yaw_velocity_rad_s,x_m").ok()?;
+            writeln!(
+                file,
+                "poll_ns,yaw_rad,pitch_rad,yaw_velocity_rad_s,x_m,right_hand_x_m"
+            )
+            .ok()?;
             Some(file)
         });
         Self(file)
     }
 
-    pub fn write(&mut self, poll: Duration, yaw: f32, pitch: f32, yaw_velocity: f32, x: f32) {
+    pub fn write(
+        &mut self,
+        poll: Duration,
+        yaw: f32,
+        pitch: f32,
+        yaw_velocity: f32,
+        x: f32,
+        hand_x: f32,
+    ) {
         if let Some(file) = &mut self.0 {
-            writeln!(file, "{},{yaw},{pitch},{yaw_velocity},{x}", poll.as_nanos()).ok();
+            writeln!(
+                file,
+                "{},{yaw},{pitch},{yaw_velocity},{x},{hand_x}",
+                poll.as_nanos()
+            )
+            .ok();
         }
     }
 }

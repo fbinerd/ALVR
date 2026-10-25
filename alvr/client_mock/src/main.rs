@@ -2,8 +2,9 @@ mod video;
 
 use alvr_client_core::{ClientCapabilities, ClientCoreContext, ClientCoreEvent};
 use alvr_common::{
-    DeviceMotion, Fov, HEAD_ID, Pose, RelaxedAtomic, ViewParams,
+    DeviceMotion, Fov, HAND_RIGHT_ID, HEAD_ID, Pose, RelaxedAtomic, ViewParams,
     glam::{Quat, UVec2, Vec3},
+    inputs::{BUTTON_INFO, QUEST_CONTROLLER_PROFILE_ID},
     parking_lot::{Mutex, RwLock},
 };
 use alvr_packets::{FaceData, TrackingData};
@@ -261,6 +262,19 @@ fn tracking_thread(
     context.send_view_params(mock_view_params());
     let sweep = video::Sweep::from_env();
     let sway = video::Sway::from_env();
+    let hand_sweep = video::HandSweep::from_env();
+    if hand_sweep.is_some() {
+        let input_ids = BUTTON_INFO
+            .iter()
+            .filter_map(|(id, info)| (info.device_id == *HAND_RIGHT_ID).then_some(*id))
+            .collect();
+        context.send_active_interaction_profile(
+            *HAND_RIGHT_ID,
+            *QUEST_CONTROLLER_PROFILE_ID,
+            input_ids,
+        );
+        alvr_common::info!("Mock right controller sweep enabled");
+    }
     let mut pose_log = video::PoseLog::open();
 
     let mut loop_deadline = Instant::now();
@@ -271,7 +285,15 @@ fn tracking_thread(
         let (sweep_yaw, yaw_velocity) = sweep.map_or((0.0, 0.0), |s| s.at(poll_timestamp));
         let yaw = input_lock.yaw + sweep_yaw;
         let (sway_x, x_velocity) = sway.map_or((0.0, 0.0), |s| s.at(poll_timestamp));
-        pose_log.write(poll_timestamp, yaw, input_lock.pitch, yaw_velocity, sway_x);
+        let (hand_x, hand_x_velocity) = hand_sweep.map_or((0.0, 0.0), |s| s.at(poll_timestamp));
+        pose_log.write(
+            poll_timestamp,
+            yaw,
+            input_lock.pitch,
+            yaw_velocity,
+            sway_x,
+            hand_x,
+        );
 
         let mut orientation = Quat::from_rotation_y(yaw) * Quat::from_rotation_x(input_lock.pitch);
 
@@ -281,19 +303,34 @@ fn tracking_thread(
 
         let position = Vec3::new(sway_x, input_lock.height, 0.0);
 
-        context.send_tracking(TrackingData {
-            poll_timestamp,
-            device_motions: vec![(
-                *HEAD_ID,
+        let mut device_motions = vec![(
+            *HEAD_ID,
+            DeviceMotion {
+                pose: Pose {
+                    orientation,
+                    position,
+                },
+                linear_velocity: Vec3::new(x_velocity, 0.0, 0.0),
+                angular_velocity: Vec3::new(0.0, yaw_velocity, 0.0),
+            },
+        )];
+        if hand_sweep.is_some() {
+            device_motions.push((
+                *HAND_RIGHT_ID,
                 DeviceMotion {
                     pose: Pose {
-                        orientation,
-                        position,
+                        orientation: Quat::IDENTITY,
+                        position: Vec3::new(hand_x, input_lock.height - 0.25, -0.45),
                     },
-                    linear_velocity: Vec3::new(x_velocity, 0.0, 0.0),
-                    angular_velocity: Vec3::new(0.0, yaw_velocity, 0.0),
+                    linear_velocity: Vec3::new(hand_x_velocity, 0.0, 0.0),
+                    angular_velocity: Vec3::ZERO,
                 },
-            )],
+            ));
+        }
+
+        context.send_tracking(TrackingData {
+            poll_timestamp,
+            device_motions,
             hand_skeletons: [None, None],
             face: FaceData::default(),
             body: None,
