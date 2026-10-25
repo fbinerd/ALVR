@@ -12,6 +12,7 @@
 #include "Renderer.hpp"
 #include "motion/NativeMotion.hpp"
 #include "depth/ProductionDepthSource.hpp"
+#include "depth/DeferredDepthSource.hpp"
 #include "motion/StereoDepth.hpp"
 #include "motion/StereoProfileLog.hpp"
 #include <optional>
@@ -118,6 +119,8 @@ private:
     Optional<render::Renderer> renderer;
     std::unique_ptr<motion::NativeMotion> nativeMotion;
     DepthSource depthSource;
+    depth::DeferredDepthSource deferredGameDepth;
+    uint64_t lateGameDepthAttached=0;
     std::unique_ptr<depth::ProductionDepthSource> gameDepth;
     // Stereo depth for the positional correction, computed from each real
     // picture's two eyes. Experimental: on while ~/.config/alvr/diag_stereo_depth
@@ -147,10 +150,22 @@ private:
         return stereoSwitch && stereoViews && !stereoFailed && nativeMotion;
     }
 
+    // Optional external producer can complete after colour capture. Retry
+    // without waiting for packets, before stereo and before a filled slot.
+    void attachGameDepth(){
+        if(nativeMotion&&nativeMotion->gapFill()&&!nativeMotion->interpolate()&&deferredGameDepth.retry(depthSource,nativeMotion.get())){
+            stereoPending=false; // A registered game source takes precedence.
+            ++lateGameDepthAttached;
+            if(lateGameDepthAttached<=4||lateGameDepthAttached%120==0)
+                Info("Game depth late attachments=%llu",(unsigned long long)lateGameDepthAttached);
+        }
+    }
+
     // After the real picture was sent: estimate its stereo depth (the output
     // still holds it until the next render) and attach it to the captured
     // picture, before prepare() computes the flow.
     void attachStereoDepth(render::Output const& output) {
+        attachGameDepth();
         if (!stereoPending)
             return;
         stereoPending = false;
@@ -610,14 +625,16 @@ public:
         }
     }
 
-    // Optional depth for frame synthesis. Called once per real picture, with
+    // Optional depth for frame synthesis. Called for each real picture, with
     // that picture's target timestamp, just before it is captured; it returns
     // the matching depth or nothing (then synthesis works without depth).
+    // Gap filling may retry this SAME tag after send/before predict, without
+    // waiting for packets, and attach a late depth to its retained picture.
     // The depth must be canonical (R32F view distance in metres, +0 invalid,
     // both eyes side by side) and in the geometry of the composed picture
     // (same FOV and eye layout). Its image must stay valid and unwritten
     // until the next present() call returns. Set it from the present() thread.
-    void setDepthSource(DepthSource source) { depthSource = std::move(source); }
+    void setDepthSource(DepthSource source) { deferredGameDepth.reset(); depthSource = std::move(source); }
     // Eye FOV tangents and separation for the stereo depth (see stereoDepthFor).
     void setStereoViews(motion::StereoParams const& params) {
         stereoParams = params;
@@ -678,6 +695,7 @@ public:
             if (nativeMotion) {
                 output = renderer.get().getOutput();
                 auto depth = depthSource ? depthSource(targetTimestampNs) : std::nullopt;
+                deferredGameDepth.captured(targetTimestampNs,bool(depth),bool(depthSource)&&nativeMotion->gapFill()&&!nativeMotion->interpolate());
                 // Stereo depth is estimated after the picture is sent (off
                 // the latency path) and attached then; see attachStereoDepth.
                 stereoPending = !depth && stereoWanted();
@@ -714,6 +732,7 @@ public:
     bool fill(u64 targetTimestampNs, u64 slotClockNs, motion::NativeMotion::Rotation const* targetRotation = nullptr) {
         if (!encoder || !nativeMotion || !nativeMotion->gapFill() || !renderer.hasValue())
             return false;
+        attachGameDepth();
         auto output = renderer.get().getOutput();
         if (!nativeMotion->predict(
                 output.image.image,

@@ -1,5 +1,6 @@
 // Offline only: production query provider + registration + unmodified capture.
 #include "platform/linux/depth/ProductionDepthSource.hpp"
+#include "platform/linux/depth/DeferredDepthSource.hpp"
 #include "alvr_server/Settings.h"
 #include <cstdarg>
 #include <filesystem>
@@ -72,15 +73,32 @@ int main(int argc,char** argv){signal(SIGPIPE,SIG_IGN);pid_t producer=-1;int con
         alvr::motion::NativeMotion capture(ctx,{32,16},vk::Format::eR8G8B8A8Unorm);capture.setGapFill(true);GpuImage colour(ctx);
         int fd[2];check(pipe(fd)==0,"control pipe");posix_spawn_file_actions_t actions;posix_spawn_file_actions_init(&actions);posix_spawn_file_actions_adddup2(&actions,fd[0],0);posix_spawn_file_actions_addclose(&actions,fd[1]);
         std::string exe=fs::absolute(argv[1]),gpu="Intel";char* args[]={exe.data(),(char*)"--producer",cp.data(),gpu.data(),socket.data(),nullptr};check(posix_spawn(&producer,exe.c_str(),&actions,nullptr,args,environ)==0,"spawn");posix_spawn_file_actions_destroy(&actions);close(fd[0]);control=fd[1];
-        unsigned deferredAttachments=0;
+        unsigned deferredAttachments=0;alvr::depth::DeferredDepthSource deferred;
         for(unsigned id=1;id<=60;id++){
             pic.timestamp=c.targetAnchor+id*13888889ull;binding.prepare(encoder,device,pic);check(!encoder.source(pic.timestamp+1),"wrong callback timestamp accepted");
-            check(write(control,"x",1)==1,"control write");std::optional<alvr::motion::NativeMotion::Depth> depth;auto deadline=Clock::now()+std::chrono::seconds(10);
-            while(!(depth=encoder.source(pic.timestamp))){check(Clock::now()<deadline,"production callback timeout");std::this_thread::sleep_for(std::chrono::milliseconds(1));}
-            checkDepth(ctx,*depth,id);
-            // Alternate direct game depth and the post-send attachment contract.
-            capture.capture(colour.image,vk::ImageLayout::eGeneral,pic.timestamp,c.monotonicAnchor+id*13888889ull,nullptr,id%2?nullptr:&*depth);
-            if(id%2){check(capture.attachDepth(*depth,true),"deferred depth attachment rejected");++deferredAttachments;}
+            bool late=id%2;
+            if(late){
+                capture.capture(colour.image,vk::ImageLayout::eGeneral,pic.timestamp,c.monotonicAnchor+id*13888889ull,nullptr,nullptr);
+                deferred.captured(pic.timestamp,false,true);
+                check(!deferred.retry(encoder.source,&capture),"unavailable late depth accepted");
+            }
+            check(write(control,"x",1)==1,"control write");auto deadline=Clock::now()+std::chrono::seconds(10);
+            if(late){
+                EncoderHook::DepthSource checked=[&](uint64_t stamp){
+                    check(stamp==pic.timestamp,"late image retargeted");auto image=encoder.source(stamp);
+                    if(image)checkDepth(ctx,*image,id);return image;
+                };
+                while(!deferred.retry(checked,&capture)){check(Clock::now()<deadline,"deferred callback timeout");std::this_thread::sleep_for(std::chrono::milliseconds(1));}
+                ++deferredAttachments;
+                check(!deferred.retry(checked,&capture),"same retained picture attached twice");
+            }else{
+                std::optional<alvr::motion::NativeMotion::Depth> depth;
+                while(!(depth=encoder.source(pic.timestamp))){check(Clock::now()<deadline,"production callback timeout");std::this_thread::sleep_for(std::chrono::milliseconds(1));}
+                checkDepth(ctx,*depth,id);
+                capture.capture(colour.image,vk::ImageLayout::eGeneral,pic.timestamp,c.monotonicAnchor+id*13888889ull,nullptr,&*depth);
+                deferred.captured(pic.timestamp,true,true);
+                check(!deferred.retry(encoder.source,&capture),"direct source overwritten by deferred attachment");
+            }
             capture.waitIdle();if(id>1)check(capture.depthActive(),"NativeMotion did not retain both depth pictures");
             encoder.source(pic.timestamp);
         }
