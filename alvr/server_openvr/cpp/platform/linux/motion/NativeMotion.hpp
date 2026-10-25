@@ -78,9 +78,11 @@ public:
     void capture(vk::Image output, vk::ImageLayout, uint64_t timestamp, uint64_t clockNs = 0, Rotation const* historyRotation = nullptr, Depth const* depth = nullptr);
     // Attaches depth to the newest retained picture after its capture, so a
     // depth estimate can run after the real picture was sent (off the
-    // latency path). Call before prepare(). Waits for its copy; the caller
-    // may reuse the depth image when it returns. False without a picture.
-    bool attachDepth(Depth const&);
+    // latency path). Call before prepare(). By default waits for its copy;
+    // the caller may then reuse the image. False without a picture.
+    // defer=true preserves input until waitIdle or the next same-queue capture;
+    // caller must not overwrite/free the source depth before then.
+    bool attachDepth(Depth const&, bool defer = false);
     // True when both retained pictures carry depth, so the next prediction uses it.
     bool depthActive() const;
     // Depth always drives the positional correction. This also enables the

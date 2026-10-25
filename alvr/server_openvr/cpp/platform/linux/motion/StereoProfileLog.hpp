@@ -29,7 +29,7 @@ public:
         if(++count<360)return {};
         std::ostringstream out;out<<std::fixed<<std::setprecision(3)<<"Stereo profile mean_ms n="<<count;
         for(size_t i=0;i<fields.size();++i)out<<' '<<names[i]<<'='<<(unknown[i]?-1:sum[i]/count);
-        out<<" pass_wait_calls="<<t.passWaitCalls<<" optical_includes_copies="<<t.flowGpuIncludesCopies;
+        out<<" completion_deferred="<<t.completionDeferred<<" pass_wait_calls="<<t.passWaitCalls<<" optical_includes_copies="<<t.flowGpuIncludesCopies;
         count=0;sum.fill(0);unknown.fill(false);return out.str();
     }
 };

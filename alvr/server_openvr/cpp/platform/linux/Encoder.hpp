@@ -130,7 +130,7 @@ private:
     double stereoMsSum = 0, stereoMsMax = 0;
     motion::StereoProfileLog stereoProfile;
 
-    bool stereoPending = false;
+    bool stereoPending = false, stereoQueued = false;
 
     // Re-reads the switch about once a second; true when stereo depth should run.
     bool stereoWanted() {
@@ -154,15 +154,21 @@ private:
         if (!stereoPending)
             return;
         stereoPending = false;
-        if (auto depth = stereoDepthFor(output))
-            nativeMotion->attachDepth(*depth);
+        if (auto depth = stereoDepthFor(output)) {
+            if(!nativeMotion->attachDepth(*depth,stereoQueued) && stereoQueued)
+                stereoDepth->waitIdle(); // No retained picture owns a completion fence.
+        }
     }
 
     std::optional<motion::NativeMotion::Depth> stereoDepthFor(render::Output const& output) {
         if (!stereoWanted())
             return std::nullopt;
         try {
-            if (!stereoDepth)
+            if (!stereoDepth) {
+                int requested=0;
+                if(auto home=std::getenv("HOME"))std::ifstream(std::string(home)+"/.config/alvr/diag_stereo_queued") >> requested;
+                stereoQueued=requested==1;
+                Info("Stereo depth queue chaining %s",stereoQueued?"on":"off");
                 // A 768 luma cap (even flow grid) keeps near objects within
                 // the flow's reach: offline, near box 90% valid at 0.37%
                 // error (640: 73%, 0.44%); reduced output costs ~2.7 ms at
@@ -173,20 +179,25 @@ private:
                     // 768 alone returned wrong distances there.
                     320
                 );
+            }
             motion::StereoDepthTiming timing;
             stereoDepth->estimate(output.image.image, output.image.view, output.image.layout,
-                {}, {}, vk::ImageLayout::eGeneral, stereoParams, &timing);
+                {}, {}, vk::ImageLayout::eGeneral, stereoParams, &timing, stereoQueued);
             if(auto line=stereoProfile.add(timing))Info("%s",line->c_str());
             stereoMsSum += timing.totalWallMs;
             stereoMsMax = std::max(stereoMsMax, timing.totalWallMs);
             if (++stereoFrames % 360 == 0) {
-                Info("Stereo depth: %llu pictures, mean %.2f ms, max %.2f ms (last 360)",
+                Info(stereoQueued?"Stereo depth submission: %llu pictures, mean %.2f ms, max %.2f ms (last 360; GPU completion deferred)":"Stereo depth: %llu pictures, mean %.2f ms, max %.2f ms (last 360)",
                     static_cast<unsigned long long>(stereoFrames), stereoMsSum / 360, stereoMsMax);
                 stereoMsSum = stereoMsMax = 0;
             }
             return motion::NativeMotion::Depth { stereoDepth->internalDepthImage(),
                 vk::ImageLayout::eGeneral, stereoDepth->depthExtent() };
         } catch (std::exception const& e) {
+            // A failed queued operation must quiesce before the renderer can
+            // overwrite its input. An unconfirmed drain propagates to the
+            // encoder-worker teardown path rather than continuing unsafely.
+            if(stereoDepth)stereoDepth->waitIdle();
             Warn("Stereo depth unavailable: %s; positional correction off", e.what());
             stereoFailed = true;
             return std::nullopt;

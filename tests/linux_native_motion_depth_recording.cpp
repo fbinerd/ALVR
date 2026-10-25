@@ -202,12 +202,18 @@ int main(int argc,char** argv) {
             auto const& f=frames[i];uint64_t clock=f.packet.display_time_ns;
             if(i%2==0){
                 motion.waitIdle();gpu.transfer(&f.colour);
-                if(variant==3){estimator->estimate(gpu.image,gpu.view,gpu.layout,{},{},vk::ImageLayout::eGeneral,stereoParams);}
+                bool queuedStereo=variant==3 && std::getenv("DEPTH_STEREO_QUEUED");
+                if(variant==3&&!queuedStereo){estimator->estimate(gpu.image,gpu.view,gpu.layout,{},{},vk::ImageLayout::eGeneral,stereoParams);}
                 else if(variant)depth.transfer(&f.depth);
                 auto transform=between(frames[latest].packet,f.packet,variant>=2);
                 Motion::Depth input{depth.image,depth.layout,{ds.width(),ds.height}};
                 Motion::Depth stereoInput{variant==3?estimator->internalDepthImage():vk::Image{},vk::ImageLayout::eGeneral,variant==3?estimator->depthExtent():vk::Extent2D{}};
-                motion.capture(gpu.image,gpu.layout,clock,clock,&transform,variant==3?&stereoInput:variant?&input:nullptr);
+                motion.capture(gpu.image,gpu.layout,clock,clock,&transform,variant==3?(queuedStereo?nullptr:&stereoInput):variant?&input:nullptr);
+                // Optional execution-strategy check; quality metrics stay unchanged.
+                if(queuedStereo){
+                    estimator->estimate(gpu.image,gpu.view,gpu.layout,{},{},vk::ImageLayout::eGeneral,stereoParams,nullptr,true);
+                    if(!motion.attachDepth(stereoInput,true))throw std::runtime_error("Queued stereo attach rejected");
+                }
                 auto start=std::chrono::steady_clock::now();motion.prepare();prepareMs=elapsed(start);latest=i;
             }else if(i>=7){
                 auto transform=between(frames[latest].packet,f.packet,variant>=2);

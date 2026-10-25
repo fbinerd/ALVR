@@ -903,7 +903,7 @@ bool NativeMotion::gapFill() const { return state->gapFill; }
 
 void NativeMotion::setDepthOcclusion(bool enabled) { state->depthOcclusion = enabled; }
 
-bool NativeMotion::attachDepth(Depth const& depth) {
+bool NativeMotion::attachDepth(Depth const& depth, bool defer) {
     auto& s = *state;
     if (!s.retained || !depth.image || !depth.extent.width || !depth.extent.height)
         return false;
@@ -916,7 +916,7 @@ bool NativeMotion::attachDepth(Depth const& depth) {
         s.rebuildOlderLuma(newest, 1 - newest, s.historyRotation);
         s.flowDirty = true;
     }
-    s.submit();
+    s.submit(!defer);
     return true;
 }
 

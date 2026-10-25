@@ -33,7 +33,7 @@ struct StereoDepthTiming {
     double fillWallMs = 0.0;
     double opticalGpuMs = -1.0;
     double depthGpuMs = -1.0; // Legacy bracket includes coarse/host gaps.
-    bool profiled = false, flowGpuIncludesCopies = false;
+    bool profiled = false, flowGpuIncludesCopies = false, completionDeferred = false;
     double coarseWallMs = 0, fineDepthWallMs = 0, mergeWallMs = 0;
     double passWaitCpuMs = 0, flowWaitCpuMs = 0, flowRecordCpuMs = 0, flowSubmitCpuMs = 0;
     uint32_t passWaitCalls = 0;
@@ -83,8 +83,16 @@ public:
         vk::ImageView outputDepthView,
         vk::ImageLayout outputDepthLayout,
         const StereoParams& params,
-        StereoDepthTiming* timing = nullptr
+        StereoDepthTiming* timing = nullptr,
+        bool queued = false
     );
+
+    // queued=true chains passes on this context's render queue, deferring the
+    // final completion wait. Consumers MUST submit on that same queue with a
+    // shader-write -> read barrier, or call waitIdle before external access.
+    // Caller keeps input alive/unwritten until completion. Re-entry drains the
+    // prior submission before resetting command buffers; ordinary API is sync.
+    void waitIdle();
 
     vk::Extent2D fullExtent() const;
     vk::Extent2D eyeExtent() const;

@@ -670,7 +670,7 @@ TestResults runResolutionTest(
         fixture.depthView,
         vk::ImageLayout::eGeneral,
         params,
-        &warmTiming
+        &warmTiming, std::getenv("STEREO_QUEUED")!=nullptr
     );
 
     // Timed run
@@ -684,7 +684,7 @@ TestResults runResolutionTest(
         fixture.depthView,
         vk::ImageLayout::eGeneral,
         params,
-        &timing
+        &timing, std::getenv("STEREO_QUEUED")!=nullptr
     );
 
     res.wallMs = timing.totalWallMs;
@@ -930,25 +930,30 @@ int main(int argc, char** argv) {
                         std::getenv("STEREO_LUMA_MAX") ? uint32_t(std::stoul(std::getenv("STEREO_LUMA_MAX"))) : 768u, reduced,
                         std::getenv("STEREO_COARSE") ? uint32_t(std::stoul(std::getenv("STEREO_COARSE"))) : 0u
                     );
-                    std::vector<double> wall, flow, depth;
+                    std::vector<double> wall, flow, depth, enqueue;
+                    bool queued=std::getenv("STEREO_QUEUED")!=nullptr;
                     std::vector<alvr::motion::StereoDepthTiming> profiles;
                     for (int run = 0; run < 55; ++run) {
                         alvr::motion::StereoDepthTiming t {};
+                        auto readyStart=std::chrono::steady_clock::now();
                         estimator.estimate(
                             fixture.colorImage, fixture.colorView, vk::ImageLayout::eShaderReadOnlyOptimal,
                             reduced ? vk::Image {} : fixture.depthImage,
                             reduced ? vk::ImageView {} : fixture.depthView,
-                            vk::ImageLayout::eGeneral, params, &t
+                            vk::ImageLayout::eGeneral, params, &t, queued
                         );
+                        estimator.waitIdle();
+                        auto readyMs=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-readyStart).count();
                         if (run < 5) continue;
-                        wall.push_back(t.totalWallMs);
+                        wall.push_back(readyMs);
+                        enqueue.push_back(t.totalWallMs);
                         flow.push_back(t.opticalGpuMs);
                         depth.push_back(t.depthGpuMs);
                         if(t.profiled)profiles.push_back(t);
                     }
                     auto mean = [](std::vector<double> const& v) {
                         double s = 0;
-                        for (double x : v) s += x;
+                        for (double x : v) { if(x<0)return -1.0; s += x; }
                         return s / v.size();
                     };
                     std::vector<double> sorted = wall;
@@ -958,6 +963,7 @@ int main(int argc, char** argv) {
                               << "  " << std::setw(5) << sorted[size_t(sorted.size() * 0.95)] << "  "
                               << std::setw(5) << sorted.back() << " | " << std::setw(6) << mean(flow)
                               << "        | " << std::setw(6) << mean(depth) << "\n";
+                    std::cout<<"SUBMISSION mean_ms="<<mean(enqueue)<<" completion_deferred="<<queued<<" (wall above includes explicit completion wait)\n";
                     if(!profiles.empty()){
                         auto avg=[&](auto member){double sum=0;for(auto const& p:profiles){if(p.*member<0)return -1.0;sum+=p.*member;}return sum/profiles.size();};
                         using T=alvr::motion::StereoDepthTiming;
