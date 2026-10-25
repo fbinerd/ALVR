@@ -56,6 +56,14 @@ int main(int argc,char** argv) {
             auto const& s=row.second;
             csv<<targetFrame<<','<<targetPose<<','<<targetClock<<','<<targetYaw<<','<<row.first<<','<<s.mae<<','<<s.psnr<<','<<s.gradient<<','<<s.block<<','<<s.temporal<<','<<(row.first==std::string("synth")?prepareMs+timing.flowMs:0)<<','<<(row.first==std::string("synth")?timing.warpMs:0)<<','<<(row.first==std::string("synth")?timing.opticalGpuMs:0)<<','<<(row.first==std::string("synth")?timing.warpGpuMs:0)<<','<<(row.first==std::string("synth")?stillError:0)<<'\n';
         }
+        // Optional image export for independent controller-silhouette scoring.
+        // Existing metrics and normal evaluator output remain unchanged.
+        if(auto value=std::getenv("MOTION_DUMP_FRAMES");value&&std::string(value)=="1") {
+            auto stem="frame_"+std::to_string(targetFrame);
+            writePpm(output/(stem+"_synth.ppm"),image,size);
+            writePpm(output/(stem+"_truth.ppm"),target,size);
+            writePpm(output/(stem+"_repeat.ppm"),repeated,size);
+        }
         if(synth.mae>worst) {
             worst=synth.mae; writePpm(output/"worst_synth.ppm",image,size); writePpm(output/"worst_truth.ppm",target,size);
             Pixels diff=target; for(size_t i=0;i<diff.size();++i) diff[i]=i%4==3?255:uint8_t(std::min(255,4*std::abs(int(image[i])-int(target[i]))));
