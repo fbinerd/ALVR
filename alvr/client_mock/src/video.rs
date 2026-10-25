@@ -273,7 +273,7 @@ impl HandSweep {
         let amplitude_m: f32 = amplitude.trim().parse().ok()?;
         let period_s: f32 = period.trim().parse().ok()?;
         (amplitude_m.is_finite()
-            && amplitude_m > 0.0
+            && amplitude_m >= 0.0
             && period_s.is_finite()
             && period_s > 0.0)
         .then_some(Self {
