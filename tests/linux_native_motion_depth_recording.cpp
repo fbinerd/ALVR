@@ -197,6 +197,12 @@ int main(int argc,char** argv) {
         // DEPTH_FLAGS=n sets extra warp flags on depth variants (experiments).
         if(variant&&std::getenv("DEPTH_FLAGS"))motion.setDiagnosticFlags(uint32_t(std::stoul(std::getenv("DEPTH_FLAGS"))));
 #endif
+        // DEPTH_INTERPOLATE=1: mode 9. Each odd frame is synthesized between
+        // its two even neighbours, after the later one is captured (the
+        // driver holds that real picture back), instead of extrapolated.
+        bool const interpolate=std::getenv("DEPTH_INTERPOLATE")!=nullptr;
+        if(interpolate)motion.setInterpolate(true);
+        long pending=-1;
         size_t latest=0;unsigned targets=0;double prepareMs=0,worst=-1,worstEdge=-1;Totals total;
         for(size_t i=0;i<frames.size();i++){
             auto const& f=frames[i];uint64_t clock=f.packet.display_time_ns;
@@ -209,14 +215,22 @@ int main(int argc,char** argv) {
                 Motion::Depth stereoInput{variant==3?estimator->internalDepthImage():vk::Image{},vk::ImageLayout::eGeneral,variant==3?estimator->depthExtent():vk::Extent2D{}};
                 motion.capture(gpu.image,gpu.layout,clock,clock,&transform,variant==3?&stereoInput:variant?&input:nullptr);
                 auto start=std::chrono::steady_clock::now();motion.prepare();prepareMs=elapsed(start);latest=i;
-            }else if(i>=7){
+                if(!interpolate||pending<8)continue;
+            }
+            if(interpolate&&i%2){pending=long(i);continue;}
+            if(!interpolate&&(i%2==0||i<7))continue;
+            {
+                size_t const ti=interpolate?size_t(pending):i;
+                auto const& f=frames[ti];uint64_t const clock=f.packet.display_time_ns;
+                // Shown before this target: the previous real picture.
+                size_t const shown=interpolate?ti-1:latest;
                 auto transform=between(frames[latest].packet,f.packet,variant>=2);
                 if(!motion.predict(gpu.image,gpu.view,gpu.layout,clock,{},clock,&transform))throw std::runtime_error("Production gap-fill rejected target");
-                auto image=gpu.transfer(nullptr);auto timing=motion.lastPredictionTiming();auto mask=masks(f,frames[latest],size,ds);auto s=score(image,f,mask);total.add(s);targets++;
-                csv<<std::setprecision(12)<<name<<','<<i<<','<<f.packet.frame_id<<','<<clock<<','<<s.mae()<<','<<s.psnr()<<','<<s.bandMae()<<','<<s.bandPixels<<','<<s.shadowPixels<<','<<s.shadowEligible<<','<<prepareMs<<','<<timing.flowMs<<','<<timing.warpMs<<','<<timing.opticalGpuMs<<','<<timing.warpGpuMs<<'\n';
+                auto image=gpu.transfer(nullptr);auto timing=motion.lastPredictionTiming();auto mask=masks(f,frames[shown],size,ds);auto s=score(image,f,mask);total.add(s);targets++;
+                csv<<std::setprecision(12)<<name<<','<<ti<<','<<f.packet.frame_id<<','<<clock<<','<<s.mae()<<','<<s.psnr()<<','<<s.bandMae()<<','<<s.bandPixels<<','<<s.shadowPixels<<','<<s.shadowEligible<<','<<prepareMs<<','<<timing.flowMs<<','<<timing.warpMs<<','<<timing.opticalGpuMs<<','<<timing.warpGpuMs<<'\n';
                 auto save=[&](std::string prefix){writePpm(directory/(prefix+"_prediction.ppm"),image,size);writePpm(directory/(prefix+"_truth.ppm"),f.colour,size);Pixels diff=image;for(size_t j=0;j<diff.size();j++)diff[j]=j%4==3?255:uint8_t(std::min(255,4*std::abs(int(image[j])-int(f.colour[j]))));writePpm(directory/(prefix+"_diff_x4.ppm"),diff,size);std::ofstream(directory/(prefix+"_frame.txt"))<<f.packet.frame_id<<'\n';};
                 // DEPTH_DUMP_INDEX=n saves that target for every variant (A/B by eye).
-                if(std::getenv("DEPTH_DUMP_INDEX")&&int(i)==std::atoi(std::getenv("DEPTH_DUMP_INDEX")))save("dump");
+                if(std::getenv("DEPTH_DUMP_INDEX")&&int(ti)==std::atoi(std::getenv("DEPTH_DUMP_INDEX")))save("dump");
                 if(s.mae()>worst){worst=s.mae();save("worst_overall");}if(s.bandMae()>worstEdge){worstEdge=s.bandMae();save("worst_edge");}
             }
         }
