@@ -11,6 +11,7 @@
 
 #include "OvrDirectModeComponent.h"
 #include "SteamVrSync.h"
+#include "depth/RuntimeClockProbe.hpp"
 
 #include "alvr_server/Logger.h"
 #include "alvr_server/driverlog.h"
@@ -1052,6 +1053,9 @@ void OvrDirectModeComponent::SubmitLayer(const SubmitLayerPerEye_t (&perEye)[2])
             m_targetTimestampNs = 0;
             m_framePoseRotation = HmdQuaternion_Init(0.0, 0.0, 0.0, 0.0);
         }
+    }
+    if (m_submitLayer == 0) {
+        alvr::depth::observeRuntimeClock(m_targetTimestampNs, ownerPid, perEye[0], m_framePosePosition);
     }
     if (m_submitLayer < MAX_LAYERS) {
         m_submitLayers[m_submitLayer][0] = perEye[0];
