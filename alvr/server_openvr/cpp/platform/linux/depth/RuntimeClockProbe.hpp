@@ -14,7 +14,7 @@
 namespace alvr::depth {
 inline void observeRuntimeClock(uint64_t tag, uint32_t owner,
     vr::IVRDriverDirectModeComponent::SubmitLayerPerEye_t const& eye,
-    std::array<float,3> const& trackedPosition) {
+    std::array<float,3> const& trackedPosition, uint64_t entryNs=0) {
     using Clock=std::chrono::steady_clock;
     static Clock::time_point checked{};
     static bool enabled=false;
@@ -32,6 +32,7 @@ inline void observeRuntimeClock(uint64_t tag, uint32_t owner,
     auto prediction=eye.flHmdPosePredictionTimeInSecondsFromNow;
     if(!std::isfinite(prediction))return;
     std::ostringstream s;s<<std::setprecision(12)<<"Game depth observation {\"mono_ns\":"<<ns
+        <<",\"entry_ns\":"<<entryNs<<",\"uv\":["<<eye.bounds.uMin<<','<<eye.bounds.vMin<<','<<eye.bounds.uMax<<','<<eye.bounds.vMax<<"]"
         <<",\"tag_ns\":"<<tag<<",\"owner\":"<<owner<<",\"prediction_s\":"<<prediction
         <<",\"submitted\":[";
     for(unsigned i=0;i<3;i++)for(unsigned j=0;j<4;j++)s<<(i||j?",":"")<<eye.mHmdPose.m[i][j];

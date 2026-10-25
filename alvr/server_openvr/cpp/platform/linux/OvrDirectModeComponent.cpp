@@ -979,12 +979,15 @@ void OvrDirectModeComponent::GetNextSwapTextureSetIndex(
  * be created using CreateSwapTextureSet and should be alternated per frame.  Call Present once all
  * layers have been submitted. */
 void OvrDirectModeComponent::SubmitLayer(const SubmitLayerPerEye_t (&perEye)[2]) {
-
+    // Prediction is relative to callback entry, not to an eventual mutex
+    // acquisition or a history lookup after the callback has already waited.
+    auto entry=std::chrono::steady_clock::now().time_since_epoch();
+    auto entryNs=std::chrono::duration_cast<std::chrono::nanoseconds>(entry).count();
     m_presentMutex.lock();
     if(m_submitLayer==0){
         auto now=std::chrono::steady_clock::now().time_since_epoch();
         auto ns=std::chrono::duration_cast<std::chrono::nanoseconds>(now).count();
-        double predicted=double(ns)+double(perEye[0].flHmdPosePredictionTimeInSecondsFromNow)*1e9;
+        double predicted=double(entryNs)+double(perEye[0].flHmdPosePredictionTimeInSecondsFromNow)*1e9;
         m_depthDisplayMonotonicNs=std::isfinite(predicted)&&predicted>0&&std::abs(predicted-ns)<1e9?uint64_t(predicted):0;
     }
 
@@ -1066,7 +1069,7 @@ void OvrDirectModeComponent::SubmitLayer(const SubmitLayerPerEye_t (&perEye)[2])
         }
     }
     if (m_submitLayer == 0) {
-        alvr::depth::observeRuntimeClock(m_targetTimestampNs, ownerPid, perEye[0], m_framePosePosition);
+        alvr::depth::observeRuntimeClock(m_targetTimestampNs, ownerPid, perEye[0], m_framePosePosition, entryNs);
     }
     if (m_submitLayer < MAX_LAYERS) {
         m_submitLayers[m_submitLayer][0] = perEye[0];
