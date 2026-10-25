@@ -55,6 +55,8 @@ public:
     explicit CalibrationPublisher(std::string p):path(std::move(p)){}
     ~CalibrationPublisher(){if(fd>=0)close(fd);}
     void send(MhlDepthPacket const& packet,uint64_t reference){
+        // Optional bootstrap must not disable existing calibrated delivery.
+        if(path.size()>=sizeof(sockaddr_un{}.sun_path))return;
         if(fd<0){auto now=runtimeNow();if(now<retry)return;retry=now+100000000;
             fd=socket(AF_UNIX,SOCK_SEQPACKET|SOCK_NONBLOCK|SOCK_CLOEXEC,0);auto a=registrationAddress(path);
             if(fd<0)return;if(connect(fd,reinterpret_cast<sockaddr*>(&a),sizeof(a))||!registrationPeer(fd)){close(fd);fd=-1;return;}}

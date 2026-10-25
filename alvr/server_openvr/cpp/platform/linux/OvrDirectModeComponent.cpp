@@ -979,13 +979,14 @@ void OvrDirectModeComponent::GetNextSwapTextureSetIndex(
  * be created using CreateSwapTextureSet and should be alternated per frame.  Call Present once all
  * layers have been submitted. */
 void OvrDirectModeComponent::SubmitLayer(const SubmitLayerPerEye_t (&perEye)[2]) {
+
+    m_presentMutex.lock();
     if(m_submitLayer==0){
         auto now=std::chrono::steady_clock::now().time_since_epoch();
         auto ns=std::chrono::duration_cast<std::chrono::nanoseconds>(now).count();
         double predicted=double(ns)+double(perEye[0].flHmdPosePredictionTimeInSecondsFromNow)*1e9;
         m_depthDisplayMonotonicNs=std::isfinite(predicted)&&predicted>0&&std::abs(predicted-ns)<1e9?uint64_t(predicted):0;
     }
-    m_presentMutex.lock();
 
     static bool const traceDepth = [] {
         auto home=std::getenv("HOME");
