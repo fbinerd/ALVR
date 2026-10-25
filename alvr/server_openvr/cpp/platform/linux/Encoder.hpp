@@ -121,6 +121,7 @@ private:
     DepthSource depthSource;
     depth::DeferredDepthSource deferredGameDepth;
     uint64_t lateGameDepthAttached=0;
+    bool gameDepthLateEligible=false; // This delivery prototype is mode7 only.
     std::unique_ptr<depth::ProductionDepthSource> gameDepth;
     // Stereo depth for the positional correction, computed from each real
     // picture's two eyes. Experimental: on while ~/.config/alvr/diag_stereo_depth
@@ -153,7 +154,7 @@ private:
     // Optional external producer can complete after colour capture. Retry
     // without waiting for packets, before stereo and before a filled slot.
     void attachGameDepth(){
-        if(nativeMotion&&nativeMotion->gapFill()&&!nativeMotion->interpolate()&&deferredGameDepth.retry(depthSource,nativeMotion.get())){
+        if(nativeMotion&&gameDepthLateEligible&&deferredGameDepth.retry(depthSource,nativeMotion.get())){
             stereoPending=false; // A registered game source takes precedence.
             ++lateGameDepthAttached;
             if(lateGameDepthAttached<=4||lateGameDepthAttached%120==0)
@@ -486,6 +487,7 @@ public:
                         true,
                         bidirectional
                     );
+                    gameDepthLateEligible = motion::nativeMotionMode() == 7;
                     if (motion::nativeMotionMode() == 3) {
                         nativeMotion->setRepeatReference(true);
                         Info("Native motion repeat reference: predicted pictures repeat the "
@@ -695,7 +697,7 @@ public:
             if (nativeMotion) {
                 output = renderer.get().getOutput();
                 auto depth = depthSource ? depthSource(targetTimestampNs) : std::nullopt;
-                deferredGameDepth.captured(targetTimestampNs,bool(depth),bool(depthSource)&&nativeMotion->gapFill()&&!nativeMotion->interpolate());
+                deferredGameDepth.captured(targetTimestampNs,bool(depth),bool(depthSource)&&gameDepthLateEligible);
                 // Stereo depth is estimated after the picture is sent (off
                 // the latency path) and attached then; see attachStereoDepth.
                 stereoPending = !depth && stereoWanted();
