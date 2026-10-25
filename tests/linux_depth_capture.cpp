@@ -58,7 +58,8 @@ struct EncoderHook {
 };
 int main(int argc,char** argv){signal(SIGPIPE,SIG_IGN);pid_t producer=-1;int control=-1;try{
     check(argc==3,"Usage: depth_capture_test ONLINE_TEST_EXECUTABLE NEW_OUTPUT");fs::path root=fs::absolute(argv[2]);check(!fs::exists(root),"fresh output required");fs::create_directories(root);
-    auto now=ns();Calibration c{};c.producerId=42;c.referenceSpace=84;c.monotonicAnchor=now+1000000000;c.targetAnchor=1000000000;c.validFrom=now;c.validUntil=now+60000000000ull;c.uncertaintyNs=100;
+    bool poseMapped=getenv("MHL_DEPTH_CAPTURE_V3")!=nullptr;
+    auto now=ns();Calibration c{};if(poseMapped)c.version=3;c.producerId=42;c.referenceSpace=84;c.monotonicAnchor=now+1000000000;c.targetAnchor=1000000000;c.validFrom=now;c.validUntil=now+60000000000ull;c.uncertaintyNs=100;
     auto cp=(root/"depth_calibration").string(),socket=(root/"depth_receiver.sock").string();std::ofstream(cp,std::ios::binary).write((char*)&c,sizeof(c));chmod(cp.c_str(),0600);
     alvr::VkContext ctx(std::vector<uint8_t>{});check(ctx.physDev.getProperties().vendorID==0x8086,"Intel required");
     {
@@ -75,7 +76,7 @@ int main(int argc,char** argv){signal(SIGPIPE,SIG_IGN);pid_t producer=-1;int con
         std::string exe=fs::absolute(argv[1]),gpu="Intel";char* args[]={exe.data(),(char*)"--producer",cp.data(),gpu.data(),socket.data(),nullptr};check(posix_spawn(&producer,exe.c_str(),&actions,nullptr,args,environ)==0,"spawn");posix_spawn_file_actions_destroy(&actions);close(fd[0]);control=fd[1];
         unsigned deferredAttachments=0;alvr::depth::DeferredDepthSource deferred;
         for(unsigned id=1;id<=60;id++){
-            pic.timestamp=c.targetAnchor+id*13888889ull;binding.prepare(encoder,device,pic);check(!encoder.source(pic.timestamp+1),"wrong callback timestamp accepted");
+            pic.runtime.poseTarget=c.targetAnchor+id*13888889ull;pic.timestamp=(poseMapped?100000000000ull:c.targetAnchor)+id*13888889ull;binding.prepare(encoder,device,pic);check(!encoder.source(pic.timestamp+1),"wrong callback timestamp accepted");
             bool late=id%2;
             if(late){
                 capture.capture(colour.image,vk::ImageLayout::eGeneral,pic.timestamp,c.monotonicAnchor+id*13888889ull,nullptr,nullptr);
