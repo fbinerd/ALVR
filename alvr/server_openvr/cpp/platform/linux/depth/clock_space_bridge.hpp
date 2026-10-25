@@ -20,7 +20,7 @@ inline bool valid(Calibration const& c,uint64_t now) {
     float norm=0;
     for(float x:c.trackingFromReference.position)if(!std::isfinite(x))return false;
     for(float x:c.trackingFromReference.orientation){if(!std::isfinite(x))return false;norm+=x*x;}
-    return c.magic==0x4344484d && c.version==1 && c.size==sizeof(c) && !c.reserved &&
+    return c.magic==0x4344484d && (c.version==1||c.version==2) && c.size==sizeof(c) && !c.reserved &&
         c.producerId && c.referenceSpace && c.monotonicAnchor && c.targetAnchor &&
         c.validFrom<=c.monotonicAnchor && c.monotonicAnchor<=c.validUntil &&
         c.validFrom<=now && now<=c.validUntil && c.validUntil-c.validFrom<=60000000000ull &&
@@ -54,9 +54,17 @@ inline std::optional<Calibration> loadCalibration(std::string const& path,uint64
         !(s.st_mode&0077) && s.st_size==sizeof(c) && read(fd,&c,sizeof(c))==sizeof(c);
     close(fd);if(!ok||!valid(c,now))return {};return c;
 }
-inline std::optional<uint64_t> displayTime(Calibration const& c,uint64_t target) {
+inline std::optional<uint64_t> mapCalibrationClock(Calibration const& c,uint64_t target) {
     if(target>=c.targetAnchor){auto d=target-c.targetAnchor;if(d>UINT64_MAX-c.monotonicAnchor)return {};return c.monotonicAnchor+d;}
     auto d=c.targetAnchor-target;if(d>=c.monotonicAnchor)return {};return c.monotonicAnchor-d;
+}
+// Version 1 maps a genuinely paired client tag. Version 2 maps the driver's
+// public-runtime predicted-display monotonic clock. Never mix those domains.
+inline std::optional<uint64_t> displayTime(Calibration const& c,uint64_t target) {
+    return c.version==1?mapCalibrationClock(c,target):std::nullopt;
+}
+inline std::optional<uint64_t> runtimeDisplayTime(Calibration const& c,uint64_t predicted) {
+    return c.version==2?mapCalibrationClock(c,predicted):std::nullopt;
 }
 inline MhlDepthPose compose(MhlDepthPose const& a,MhlDepthPose const& b) {
     MhlDepthPose r{};auto q=a.orientation;auto v=b.position;

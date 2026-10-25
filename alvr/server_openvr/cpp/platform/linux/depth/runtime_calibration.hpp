@@ -100,12 +100,14 @@ public:
             if(lastPoseError>.00025||rotationError(*origin,candidate)>1e-6){origin.reset();clocks.clear();++resets;}
         }
         if(!origin)origin=candidate;
-        if(!clocks.empty()&&(d.target<=clocks.back().target||p.display_time_ns<=clocks.back().monotonic)){++late;return {};}
+        if(!clocks.empty()&&(d.display<=clocks.back().target||p.display_time_ns<=clocks.back().monotonic)){++late;return {};}
         lastFrame=p.frame_id;++matched;
-        clocks.push_back({d.target,p.display_time_ns,delta+100000});
+        clocks.push_back({d.display,p.display_time_ns,delta+100000});
         while(clocks.size()>32)clocks.pop_front();
         if(clocks.size()<8)return {};
-        return calibrate(producer,reference,clocks.front(),clocks.back(),*origin,p.display_time_ns+3000000000ull);
+        auto result=calibrate(producer,reference,clocks.front(),clocks.back(),*origin,p.display_time_ns+3000000000ull);
+        if(result)result->version=2; // predicted-display domain, never client/poll tag
+        return result;
     }
 };
 class RuntimeCalibrationService {

@@ -47,7 +47,9 @@ public:
         }
         if(calibrator)calibrator->observe(picture.runtime);
         if(!binding||!calibration||!mhl::depth::valid(*calibration,now)||!picture.viewsValid||!picture.unwarpedSingleLayer)return;
-        auto display=mhl::depth::displayTime(*calibration,picture.timestamp);
+        auto display=calibration->version==2
+            ?mhl::depth::runtimeDisplayTime(*calibration,picture.runtime.display)
+            :mhl::depth::displayTime(*calibration,picture.timestamp);
         if(!display||!mhl::depth::valid(*calibration,*display))return;
         mhl::depth::Query q;q.targetTimestampNs=picture.timestamp;q.displayMonotonicNs=*display;
         q.toleranceNs=calibration->uncertaintyNs;q.producerId=calibration->producerId;
