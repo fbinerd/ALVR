@@ -99,10 +99,12 @@ struct StereoDepth::State {
     Image rawDepth;
     Image internalDepth;
 
-    std::unique_ptr<NativeOpticalFlow> estimator;
+    std::unique_ptr<NativeOpticalFlow> estimator, reverseEstimator;
 
     vk::CommandPool pool {};
     vk::CommandBuffer command {};
+    std::array<vk::CommandBuffer,3> chainedCommands{};
+    bool singleWait=false, partial=false;
     vk::Fence fence {};
 
     vk::QueryPool queries {};
@@ -176,6 +178,9 @@ struct StereoDepth::State {
 
         flowExtent = vk::Extent2D { lumaExtent.width / 4, lumaExtent.height / 4 };
         depthExtent = reducedDepth ? vk::Extent2D { 2 * lumaExtent.width, lumaExtent.height } : fullExtent;
+        int chain=0;
+        if(auto home=std::getenv("HOME"))std::ifstream(std::string(home)+"/.config/alvr/diag_stereo_single_wait")>>chain;
+        singleWait=chain==1||(std::getenv("STEREO_SINGLE_WAIT")&&std::string(std::getenv("STEREO_SINGLE_WAIT"))=="1");
         initialize();
         if (coarseLumaDimension)
             coarse = std::make_unique<StereoDepth>(ctx, extent, format, coarseLumaDimension, true, 0);
@@ -184,6 +189,9 @@ struct StereoDepth::State {
     ~State() {
         try {
             ctx.dev.waitIdle();
+            std::string error;
+            if(estimator)estimator->quiesce(error);
+            if(reverseEstimator)reverseEstimator->quiesce(error);
         } catch (...) {
         }
         destroyImage(leftLuma);
@@ -355,6 +363,11 @@ struct StereoDepth::State {
             .level = vk::CommandBufferLevel::ePrimary,
             .commandBufferCount = 1,
         })[0];
+        if(singleWait){
+            auto allocated=ctx.dev.allocateCommandBuffers(vk::CommandBufferAllocateInfo{
+                .commandPool=pool,.level=vk::CommandBufferLevel::ePrimary,.commandBufferCount=3});
+            std::copy(allocated.begin(),allocated.end(),chainedCommands.begin());
+        }
         fence = ctx.dev.createFence({});
 
         // Explicit profiling only; ordinary mode allocates no extra queries.
@@ -425,6 +438,24 @@ struct StereoDepth::State {
             // empty at some luma sizes (every match then failed consistency).
             false
         );
+        if(singleWait){
+        reverseEstimator = std::make_unique<NativeOpticalFlow>(
+            native,
+            lumaExtent.width,
+            lumaExtent.height,
+            // STEREO_FLOW_LEVEL=slow|medium (default fast, as native motion).
+            [] {
+                char const* level = std::getenv("STEREO_FLOW_LEVEL");
+                std::string text = level ? level : "";
+                return text == "slow" ? VK_OPTICAL_FLOW_PERFORMANCE_LEVEL_SLOW_NV
+                    : text == "medium" ? VK_OPTICAL_FLOW_PERFORMANCE_LEVEL_MEDIUM_NV
+                                       : VK_OPTICAL_FLOW_PERFORMANCE_LEVEL_FAST_NV;
+            }(),
+            // Two one-way estimates: the combined backward output came back
+            // empty at some luma sizes (every match then failed consistency).
+            false
+        );
+        }
 
         // Build Pipelines
         // 1. stereo_luma
@@ -563,6 +594,7 @@ StereoDepth::~StereoDepth() = default;
 
 void StereoDepth::waitIdle(){
     auto& s=*state;
+    if(s.partial){s.ctx.dev.waitIdle();s.partial=false;}
     if(s.pending){
         if(s.ctx.dev.waitForFences(s.fence,true,TimeoutNs)!=vk::Result::eSuccess)
             throw std::runtime_error("StereoDepth: queued completion timed out");
@@ -572,6 +604,8 @@ void StereoDepth::waitIdle(){
         std::string error;
         if(!s.estimator->quiesce(error))throw std::runtime_error("StereoDepth: optical quiescence failed: "+error);
     }
+    if(s.reverseEstimator){std::string error;if(!s.reverseEstimator->quiesce(error))
+        throw std::runtime_error("StereoDepth: reverse optical quiescence failed: "+error);}
     if(s.coarse)s.coarse->waitIdle();
 }
 
@@ -608,6 +642,9 @@ bool StereoDepth::estimate(
         return result;
     };
 
+    // Distinct command buffers and optical contexts allow one final fence.
+    // On a partial submission failure, drain before any reuse.
+    if(s.singleWait)waitIdle();
     // No reset/reuse while a prior queued command is still executing.
     if(s.pending){
         auto status=s.ctx.dev.getFenceStatus(s.fence);
@@ -627,6 +664,7 @@ bool StereoDepth::estimate(
 
     // --- PHASE 1: Luma extraction ---
     auto tLuma0 = std::chrono::steady_clock::now();
+    if(s.singleWait)s.command=s.chainedCommands[0];
     s.command.reset();
     s.command.begin(vk::CommandBufferBeginInfo {
         .flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit,
@@ -706,11 +744,12 @@ bool StereoDepth::estimate(
     s.command.end();
     s.ctx.dev.resetFences(s.fence);
     vk::SubmitInfo lumaSubmit { .commandBufferCount = 1, .pCommandBuffers = &s.command };
-    s.ctx.useQueue([&](auto& queue) { queue.submit(lumaSubmit, s.fence); });
-    s.pending=true;
+    if(s.singleWait)s.partial=true;
+    s.ctx.useQueue([&](auto& queue) { queue.submit(lumaSubmit, s.singleWait?vk::Fence{}:s.fence); });
+    s.pending=!s.singleWait;
     // NativeOpticalFlow's input-copy submission follows this pass on the same
     // render queue; its existing barrier/semaphore chain covers luma writes.
-    if(!queued){
+    if(!queued&&!s.singleWait){
         if(waitFence()!=vk::Result::eSuccess)throw std::runtime_error("StereoDepth: Luma pass timed out");
         s.pending=false;
     }
@@ -731,14 +770,15 @@ bool StereoDepth::estimate(
     for (bool rightToLeft : { false, true }) {
         auto& a = rightToLeft ? refRight : inLeft;
         auto& b = rightToLeft ? inLeft : refRight;
-        if (!s.estimator->execute(a, b, rightToLeft ? motionR2L : motionL2R, rightToLeft ? costR2L : costL2R,
-                flowError, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, nullptr, nullptr))
+        auto& estimator=(s.singleWait&&rightToLeft)?s.reverseEstimator:s.estimator;
+        if (!estimator->execute(a, b, rightToLeft ? motionR2L : motionL2R, rightToLeft ? costR2L : costL2R,
+                flowError, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, nullptr, nullptr, s.singleWait))
             throw std::runtime_error("StereoDepth: Optical flow failed: " + flowError);
-        double ms = s.estimator->opticalGpuMilliseconds();
+        double ms = estimator->opticalGpuMilliseconds();
         timed &= ms >= 0;
         opticalMs += ms;
         if(s.profile){
-            auto t=s.estimator->executionTiming();
+            auto t=estimator->executionTiming();
             flowWaitCpuMs+=t.waitCpuMs;flowRecordCpuMs+=t.recordCpuMs;flowSubmitCpuMs+=t.submitCpuMs;
             flowIncludesCopies|=t.opticalIncludesCopies;
             copiesTimed &= t.inputCopyGpuMs>=0 && t.outputCopyGpuMs>=0;
@@ -758,7 +798,7 @@ bool StereoDepth::estimate(
 
     // STEREO_FLOW_STATS=1 (diagnostic): read both flow grids back and print
     // the share of zero vectors and the median |x|, |y| in luma pixels.
-    if (std::getenv("STEREO_FLOW_STATS")) {
+    if (!s.singleWait && std::getenv("STEREO_FLOW_STATS")) {
         for (bool rightToLeft : { false, true }) {
             auto& flow = rightToLeft ? s.rightToLeftFlow : s.leftToRightFlow;
             uint32_t w = s.flowExtent.width, h = s.flowExtent.height;
@@ -811,6 +851,7 @@ bool StereoDepth::estimate(
 
     // --- PHASE 3 & 4: Disparity-to-Depth & Hole Filling ---
     auto tDepth0 = std::chrono::steady_clock::now();
+    if(s.singleWait)s.command=s.chainedCommands[1];
     s.command.reset();
     s.command.begin(vk::CommandBufferBeginInfo {
         .flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit,
@@ -902,20 +943,21 @@ bool StereoDepth::estimate(
         s.command.end();
         s.ctx.dev.resetFences(s.fence);
         vk::SubmitInfo fineSubmit { .commandBufferCount = 1, .pCommandBuffers = &s.command };
-        s.ctx.useQueue([&](auto& queue) { queue.submit(fineSubmit, s.fence); });
-        s.pending=true;
-        if(!queued){
+        s.ctx.useQueue([&](auto& queue) { queue.submit(fineSubmit, s.singleWait?vk::Fence{}:s.fence); });
+        s.pending=!s.singleWait;
+        if(!queued&&!s.singleWait){
             if(waitFence()!=vk::Result::eSuccess)throw std::runtime_error("StereoDepth: Depth/fill pass timed out");
             s.pending=false;
         }
         fineEnd=std::chrono::steady_clock::now();
-        s.coarse->estimate(inputColor, inputColorView, sampledInputLayout, {}, {}, vk::ImageLayout::eGeneral, params, &coarseTiming, queued);
+        s.coarse->estimate(inputColor, inputColorView, sampledInputLayout, {}, {}, vk::ImageLayout::eGeneral, params, &coarseTiming, queued||s.singleWait);
         mergeStart=std::chrono::steady_clock::now();
         // Coarse optical-flow completion normally covers fine GPU work; still
         // verify the fence before resetting this command buffer/fence.
         if(s.pending && s.ctx.dev.getFenceStatus(s.fence)!=vk::Result::eSuccess && waitFence()!=vk::Result::eSuccess)
             throw std::runtime_error("StereoDepth: fine command reuse timed out");
         s.pending=false;
+        if(s.singleWait)s.command=s.chainedCommands[2];
         s.command.reset();
         s.command.begin(vk::CommandBufferBeginInfo { .flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit });
         if(s.profile && s.queries)s.command.writeTimestamp(vk::PipelineStageFlagBits::eTopOfPipe,s.queries,2);
@@ -968,7 +1010,7 @@ bool StereoDepth::estimate(
     s.ctx.dev.resetFences(s.fence);
     vk::SubmitInfo depthSubmit { .commandBufferCount = 1, .pCommandBuffers = &s.command };
     s.ctx.useQueue([&](auto& queue) { queue.submit(depthSubmit, s.fence); });
-    s.pending=true;
+    s.pending=true;s.partial=false;
     if(!queued){
         if(waitFence()!=vk::Result::eSuccess)throw std::runtime_error("StereoDepth: Depth/fill pass timed out");
         s.pending=false;

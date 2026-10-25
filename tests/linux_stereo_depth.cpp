@@ -1,5 +1,6 @@
 #include "alvr_server/Settings.h"
 #include "platform/linux/motion/StereoDepth.hpp"
+#include "platform/linux/depth/depth_packet.h"
 
 #include <algorithm>
 #include <array>
@@ -896,6 +897,53 @@ int main(int argc, char** argv) {
                   << ", " << params.leftTans.up << ", " << params.leftTans.down << "]\n";
         std::cout << "Right Eye Tans: [" << params.rightTans.left << ", " << params.rightTans.right
                   << ", " << params.rightTans.up << ", " << params.rightTans.down << "]\n";
+
+        // Recorded colour/depth quality gate; no runtime or synthesis code.
+        if(auto recorded=std::getenv("STEREO_RECORDING")){
+            auto source=std::filesystem::path(recorded);
+            std::ifstream headers(source/"headers.bin",std::ios::binary),
+                colours(source/"colour.rgba8",std::ios::binary),truth(source/"depth.r32f",std::ios::binary);
+            if(!headers||!colours||!truth)throw std::runtime_error("Missing recording fixture planes");
+            MhlDepthPacket packet{};
+            if(!headers.read(reinterpret_cast<char*>(&packet),sizeof(packet)))throw std::runtime_error("Missing recording header");
+            uint32_t width=packet.eyes[0].colour.width*2,height=packet.eyes[0].colour.height;
+            if(!width||!height||width>8192||height>4096||packet.size!=608||packet.eye_count!=2)
+                throw std::runtime_error("Invalid recording geometry");
+            headers.seekg(0);size_t pixels=size_t(width)*height;
+            GpuFixture fixture(ctx,width,height);
+            alvr::motion::StereoDepth estimator(ctx,{width,height},vk::Format::eR8G8B8A8Unorm,
+                std::getenv("STEREO_LUMA_MAX")?uint32_t(std::stoul(std::getenv("STEREO_LUMA_MAX"))):768u,false,
+                std::getenv("STEREO_COARSE")?uint32_t(std::stoul(std::getenv("STEREO_COARSE"))):320u);
+            std::ofstream output(outDir/"estimated.r32f",std::ios::binary);
+            std::vector<uint8_t> rgba(pixels*4);std::vector<float> gt(pixels),estimated(pixels);
+            unsigned count=0;
+            while(headers.read(reinterpret_cast<char*>(&packet),sizeof(packet))){
+                if(packet.size!=608||packet.version!=1||packet.eye_count!=2||
+                   packet.eyes[0].colour.width*2!=width||packet.eyes[1].colour.width*2!=width||
+                   packet.eyes[0].colour.height!=height||packet.eyes[1].colour.height!=height||
+                   packet.eyes[0].depth.width*2!=width||packet.eyes[1].depth.width*2!=width||
+                   packet.eyes[0].depth.height!=height||packet.eyes[1].depth.height!=height)
+                    throw std::runtime_error("Recording changes geometry");
+                if(!colours.read(reinterpret_cast<char*>(rgba.data()),rgba.size())||
+                   !truth.read(reinterpret_cast<char*>(gt.data()),gt.size()*sizeof(float)))
+                    throw std::runtime_error("Short recording payload");
+                auto const& left=packet.eyes[0].pose;auto const& right=packet.eyes[1].pose;
+                double ipd=0;for(unsigned i=0;i<3;i++)ipd+=std::pow(left.position[i]-right.position[i],2);
+                params.ipd=std::sqrt(ipd);if(params.ipd<.01||params.ipd>.1)throw std::runtime_error("Recording is not stereo");
+                auto tangents=[](MhlDepthEye const& eye){return alvr::motion::StereoEyeTangents{
+                    std::tan(eye.fov[0]),std::tan(eye.fov[1]),std::tan(eye.fov[2]),std::tan(eye.fov[3])};};
+                params.leftTans=tangents(packet.eyes[0]);params.rightTans=tangents(packet.eyes[1]);
+                fixture.uploadColor(rgba.data());
+                estimator.estimate(fixture.colorImage,fixture.colorView,vk::ImageLayout::eShaderReadOnlyOptimal,
+                    fixture.depthImage,fixture.depthView,vk::ImageLayout::eGeneral,params,nullptr,false);
+                fixture.downloadDepth(estimated.data());
+                output.write(reinterpret_cast<char*>(estimated.data()),estimated.size()*sizeof(float));++count;
+            }
+            if(!headers.eof()||headers.gcount()!=0||colours.peek()!=EOF||truth.peek()!=EOF||!count||!output)
+                throw std::runtime_error("Recording plane/frame count mismatch");
+            std::cout<<"RECORDING frames="<<count<<" extent="<<width<<"x"<<height<<"\n";
+            return 0;
+        }
 
         // STEREO_BENCH=1: timing only, in the driver's configuration (luma cap
         // 768, see Encoder.hpp), with full and reduced (luma grid) output, at

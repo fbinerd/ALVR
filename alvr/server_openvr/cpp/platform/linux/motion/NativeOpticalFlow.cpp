@@ -776,7 +776,8 @@ bool NativeOpticalFlow::execute(
     std::string& error,
     VkImageLayout after,
     ImageResource* backwardMotion,
-    ImageResource* backwardCost
+    ImageResource* backwardCost,
+    bool deferCompletion
 ) noexcept {
     auto& s = *state;
     std::lock_guard lock(s.mutex);
@@ -838,7 +839,7 @@ bool NativeOpticalFlow::execute(
             );
             auto waitStart = s.c.profile ? ProfileClock::now() : ProfileClock::time_point{};
             if (s.c.profile) s.execution_timing.submitCpuMs = std::chrono::duration<double,std::milli>(waitStart-submitStart).count();
-            s.wait();
+            if (!deferCompletion) s.wait();
             if (s.c.profile) s.execution_timing.waitCpuMs = std::chrono::duration<double,std::milli>(ProfileClock::now()-waitStart).count();
             if (s.copy_queries) {
                 std::array<uint64_t,4> ticks{};

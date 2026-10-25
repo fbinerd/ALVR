@@ -77,8 +77,13 @@ public:
         std::string& error,
         VkImageLayout output_layout = VK_IMAGE_LAYOUT_GENERAL,
         ImageResource* backwardMotion = nullptr,
-        ImageResource* backwardCost = nullptr
+        ImageResource* backwardCost = nullptr,
+        bool deferCompletion = false
     ) noexcept;
+
+    // deferCompletion chains same-render-queue consumers without a host wait.
+    // All images remain alive/unwritten until quiesce() or downstream completion.
+    // Metadata describes the scheduled output layout; timing may be unavailable.
 
     // With bothDirections enabled at construction, both backward outputs are
     // mandatory and receive reference -> input motion/cost in the same operation.

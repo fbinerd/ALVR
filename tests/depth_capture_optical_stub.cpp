@@ -7,7 +7,7 @@ struct NativeOpticalFlow::State {};
 int depthTestOpticalExecutions=0;
 NativeOpticalFlow::NativeOpticalFlow(Context const&,uint32_t,uint32_t,VkOpticalFlowPerformanceLevelNV,bool):state(std::make_unique<State>()){}
 NativeOpticalFlow::~NativeOpticalFlow()=default;
-bool NativeOpticalFlow::execute(ImageResource const&,ImageResource const&,ImageResource&,ImageResource&,std::string& error,VkImageLayout,ImageResource*,ImageResource*) noexcept {
+bool NativeOpticalFlow::execute(ImageResource const&,ImageResource const&,ImageResource&,ImageResource&,std::string& error,VkImageLayout,ImageResource*,ImageResource*,bool) noexcept {
     ++depthTestOpticalExecutions;error="optical flow forbidden in capture-only Intel test";return false;
 }
 bool NativeOpticalFlow::quiesce(std::string&) noexcept{return true;}
