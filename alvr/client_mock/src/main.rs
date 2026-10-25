@@ -4,10 +4,10 @@ use alvr_client_core::{ClientCapabilities, ClientCoreContext, ClientCoreEvent};
 use alvr_common::{
     DeviceMotion, Fov, HAND_RIGHT_ID, HEAD_ID, Pose, RelaxedAtomic, ViewParams,
     glam::{Quat, UVec2, Vec3},
-    inputs::{BUTTON_INFO, QUEST_CONTROLLER_PROFILE_ID},
+    inputs::{BUTTON_INFO, QUEST_CONTROLLER_PROFILE_ID, RIGHT_SYSTEM_CLICK_ID},
     parking_lot::{Mutex, RwLock},
 };
-use alvr_packets::{FaceData, TrackingData};
+use alvr_packets::{ButtonEntry, ButtonValue, FaceData, TrackingData};
 use alvr_session::CodecType;
 use eframe::{
     Frame, NativeOptions,
@@ -276,9 +276,35 @@ fn tracking_thread(
         alvr_common::info!("Mock right controller sweep enabled");
     }
     let mut pose_log = video::PoseLog::open();
+    // Test-only handshake: the runner requests a normal controller System
+    // click only after observing an open SteamVR dashboard. No automatic
+    // startup toggle, since that would open an already closed dashboard.
+    let system_click_file = std::env::var_os("MOCK_SYSTEM_CLICK_FILE").map(std::path::PathBuf::from);
+    let mut system_release_at = None;
+    let mut next_command_check = Instant::now();
 
     let mut loop_deadline = Instant::now();
     while streaming.value() {
+        let now = Instant::now();
+        if system_release_at.is_some_and(|deadline| now >= deadline) {
+            context.send_buttons(vec![ButtonEntry {
+                path_id: *RIGHT_SYSTEM_CLICK_ID,
+                value: ButtonValue::Binary(false),
+            }]);
+            system_release_at = None;
+        }
+        if hand_sweep.is_some() && system_release_at.is_none() && now >= next_command_check {
+            next_command_check = now + Duration::from_millis(100);
+            if let Some(path) = &system_click_file
+                && std::fs::remove_file(path).is_ok()
+            {
+                context.send_buttons(vec![ButtonEntry {
+                    path_id: *RIGHT_SYSTEM_CLICK_ID,
+                    value: ButtonValue::Binary(true),
+                }]);
+                system_release_at = Some(now + Duration::from_millis(100));
+            }
+        }
         let input_lock = input.read();
 
         let poll_timestamp = timestamp_origin.elapsed();
@@ -340,6 +366,12 @@ fn tracking_thread(
 
         loop_deadline += Duration::from_secs_f32(1.0 / fps / 3.0);
         thread::sleep(loop_deadline.saturating_duration_since(Instant::now()))
+    }
+    if system_release_at.is_some() {
+        context.send_buttons(vec![ButtonEntry {
+            path_id: *RIGHT_SYSTEM_CLICK_ID,
+            value: ButtonValue::Binary(false),
+        }]);
     }
 }
 
