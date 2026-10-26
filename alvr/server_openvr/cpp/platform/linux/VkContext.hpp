@@ -27,6 +27,7 @@
 #include "utils.hpp"
 
 #include "alvr_server/Logger.h"
+#include "GpuDiag.h"
 
 extern "C" {
 #include <libavutil/log.h>
@@ -104,6 +105,7 @@ public:
         auto physDevs = instance.enumeratePhysicalDevices();
 
         physDev = physDevs[0];
+        alvr::gpudiag::logDevices(physDevs, 0, "first in the system's list; the device UUID that would match SteamVR's GPU is never passed");
         //    for (auto dev : physDevs) {
         //        vk::PhysicalDeviceVulkan11Properties props11{};
         //        vk::PhysicalDeviceProperties2 props {

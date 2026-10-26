@@ -177,6 +177,7 @@ public:
         vkGetPhysicalDeviceProperties2(vkCtx.physDev, &deviceProps);
 
         std::string devicePath;
+        std::string scanned;
         for (int i = 128; i < 136; ++i) {
             auto path = "/dev/dri/renderD" + std::to_string(i);
             int fd = open(path.c_str(), O_RDONLY);
@@ -191,15 +192,25 @@ public:
             }
             dev_t primaryDev = makedev(drmProps.primaryMajor, drmProps.primaryMinor);
             dev_t renderDev = makedev(drmProps.renderMajor, drmProps.renderMinor);
+            scanned += " " + alvr::gpudiag::describeNode(path);
             if (primaryDev == s.st_rdev || renderDev == s.st_rdev) {
                 devicePath = path;
                 break;
             }
         }
+        bool const fellBack = devicePath.empty();
         if (devicePath.empty()) {
             devicePath = "/dev/dri/renderD128";
         }
         Info("Using device path %s", devicePath.c_str());
+        Info(
+            "[gpu-diag] encoder node: ALVR device DRM primary %s render %s; scanned:%s; chosen %s%s",
+            drmProps.hasPrimary ? (std::to_string(drmProps.primaryMajor) + ":" + std::to_string(drmProps.primaryMinor)).c_str() : "-",
+            drmProps.hasRender ? (std::to_string(drmProps.renderMajor) + ":" + std::to_string(drmProps.renderMinor)).c_str() : "-",
+            scanned.empty() ? " (none)" : scanned.c_str(),
+            alvr::gpudiag::describeNode(devicePath).c_str(),
+            fellBack ? " (FALLBACK: no node matched ALVR's device)" : " (matched)"
+        );
 
         // av_log_set_level(AV_LOG_DEBUG);
 
