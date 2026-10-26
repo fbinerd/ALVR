@@ -9,7 +9,7 @@ class DeferredDepthSource {
 public:
     void reset(){pending=0;}
     // Keep one correction contract throughout a gap: no mid-gap flow rebuild.
-    bool predictionBoundary(){bool missed=pending!=0;pending=0;return missed;}
+    bool predictionBoundary(bool produced){if(!produced)return false;bool missed=pending!=0;pending=0;return missed;}
     void captured(uint64_t stamp,bool hasDepth,bool eligible){pending=eligible&&!hasDepth?stamp:0;}
     template<class Source,class Motion>
     bool retry(Source const& source,Motion* motion){

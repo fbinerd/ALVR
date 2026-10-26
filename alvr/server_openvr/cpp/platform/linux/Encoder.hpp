@@ -735,11 +735,6 @@ public:
         if (!encoder || !nativeMotion || !nativeMotion->gapFill() || !renderer.hasValue())
             return false;
         attachGameDepth();
-        if(gameDepthLateEligible&&deferredGameDepth.predictionBoundary()){
-            ++gameDepthPredictionMisses;
-            if(gameDepthPredictionMisses<=4||gameDepthPredictionMisses%120==0)
-                Info("Game depth first-prediction misses=%llu",(unsigned long long)gameDepthPredictionMisses);
-        }
         auto output = renderer.get().getOutput();
         if (!nativeMotion->predict(
                 output.image.image,
@@ -750,6 +745,11 @@ public:
                 slotClockNs, targetRotation
             ))
             return false;
+        if(gameDepthLateEligible&&deferredGameDepth.predictionBoundary(true)){
+            ++gameDepthPredictionMisses;
+            if(gameDepthPredictionMisses<=4||gameDepthPredictionMisses%120==0)
+                Info("Game depth first-prediction misses=%llu",(unsigned long long)gameDepthPredictionMisses);
+        }
         ReportPresent(targetTimestampNs, 0);
         updateFoveationCenters(targetTimestampNs);
         ReportComposed(targetTimestampNs, 0);

@@ -10,8 +10,14 @@ int main(){
     alvr::depth::DeferredDepthSource pending;Motion motion{101};bool ready=false;
     std::function<std::optional<Depth>(uint64_t)> source=[&](uint64_t stamp)->std::optional<Depth>{return ready?std::optional<Depth>{{stamp}}:std::nullopt;};
     pending.captured(101,false,true);assert(!pending.retry(source,&motion));
-    pending.predictionBoundary();ready=true;
+    pending.predictionBoundary(true);ready=true;
     assert(!pending.retry(source,&motion)&&motion.attached==0); // Late after first filled slot.
+    // A rejected prediction attempt did not fill a slot: late input is still
+    // admissible before the first successful picture, not after it.
+    ready=false;motion.latest=151;pending.captured(151,false,true);
+    assert(!pending.predictionBoundary(false));ready=true;
+    assert(pending.retry(source,&motion)&&motion.attached==1);
+    motion.attached=0;
     motion.latest=202;pending.captured(202,false,true);
     assert(pending.retry(source,&motion)&&motion.attached==1); // New capture has a new deadline.
     assert(!pending.retry(source,&motion));
