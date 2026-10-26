@@ -560,17 +560,16 @@ fn gpu_choice_schema(
 }
 
 // The GPU the streamer's automatic choice will take, by the same rule
-// (VkContext::selectPhysicalDevice): the first discrete GPU, else the first
-// integrated one. A prediction: ALVR_VULKAN_DEVICE in SteamVR's environment
-// is not visible here.
+// (VkContext::selectPhysicalDevice): the system's order, i.e. the first
+// hardware GPU listed. A prediction: SteamVR's own environment (for example
+// prime-run or ALVR_VULKAN_DEVICE) can change that order and is not visible
+// here.
 #[cfg(target_os = "linux")]
 fn predicted_automatic_gpu() -> Option<String> {
-    let gpus = detected_gpus();
-    ["discrete", "integrated"].into_iter().find_map(|wanted| {
-        gpus.iter()
-            .find(|(_, kind)| *kind == wanted)
-            .map(|(name, _)| name.clone())
-    })
+    detected_gpus()
+        .into_iter()
+        .find(|(_, kind)| *kind == "discrete" || *kind == "integrated")
+        .map(|(name, _)| name)
 }
 
 #[cfg(target_os = "linux")]
@@ -587,7 +586,7 @@ pub fn render_gpu_schema() -> PresetSchemaNode {
         SteamVR and games pick their GPU from their launch options: with a GPU chosen here, \
         the dashboard prints those launch options when it starts SteamVR. \
         Automatic forces nothing; the GPU it shows is the one ALVR's automatic rule takes \
-        (first discrete GPU, else first integrated).",
+        (the system's choice: the first hardware GPU listed, as ALVR always did).",
     )
 }
 
