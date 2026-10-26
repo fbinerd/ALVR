@@ -229,7 +229,7 @@ pub struct LinuxGpuConfig {
     #[schema(strings(
         display_name = "Render GPU",
         help = r#"GPU that SteamVR and the games render on. ALVR's own Vulkan device must be the same GPU, because SteamVR shares its textures only within one GPU.
-Value: a device index or part of the GPU name, as listed in the log ("Vulkan device N: name"). Unset: discrete GPU first, then integrated.
+Value: a device index or part of the GPU name, as listed in the log ("Vulkan device N: name"). Unset: the system's choice (the first hardware GPU Vulkan lists, as ALVR always did).
 SteamVR itself is moved through its launch options; the dashboard prints the line to use for the selected GPU.
 The ALVR_VULKAN_DEVICE environment variable, if set, takes precedence."#
     ))]
