@@ -1,4 +1,5 @@
 #include "gpu_transport.hpp"
+#include "payload_validation.h"
 #include <algorithm>
 #include <cerrno>
 #include <chrono>
@@ -134,15 +135,8 @@ struct Resource {
     }
 };
 void payloadCheck(MhlDepthPacket const& p,void const* data,size_t bytes){
-    if(auto error=mhl_depth_validate(&p,sizeof(p)))throw std::runtime_error(error);
-    if(bytes!=p.buffer_size||bytes>MaxBytes||!data)throw std::runtime_error("payload size");
-    auto* raw=static_cast<uint8_t const*>(data);
-    for(auto const& eye:p.eyes){
-        for(uint32_t y=0;y<eye.depth.height;y++)for(uint32_t x=0;x<eye.depth.width;x++){
-            float z;memcpy(&z,raw+eye.depth.offset+y*eye.depth.row_stride+x*4,4);if(!std::isfinite(z)||z<0||std::signbit(z))throw std::runtime_error("noncanonical R32F");}
-        for(uint32_t y=0;y<eye.colour.height;y++)for(uint32_t x=0;x<eye.colour.width*4;x++){
-            uint16_t h;memcpy(&h,raw+eye.colour.offset+y*eye.colour.row_stride+x*2,2);if((h&0x7c00)==0x7c00)throw std::runtime_error("nonfinite RGBA16F");}
-    }
+    if(bytes>MaxBytes)throw std::runtime_error("payload size");
+    if(auto error=mhl_depth_validate_payload_bytes(&p,data,bytes))throw std::runtime_error(error);
 }
 }
 
