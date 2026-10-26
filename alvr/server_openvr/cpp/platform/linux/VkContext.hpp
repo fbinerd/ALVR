@@ -31,6 +31,7 @@
 #include "alvr_server/Logger.h"
 #include "alvr_server/Settings.h"
 #include "alvr_server/bindings.h"
+#include "GpuDiag.h"
 
 extern "C" {
 #include <libavutil/log.h>
@@ -301,6 +302,15 @@ public:
         auto physDevs = instance.enumeratePhysicalDevices();
 
         physDev = selectPhysicalDevice(physDevs);
+        {
+            // Diagnostics: every device and the one the selector took (the
+            // reason is on the "Using Vulkan device" line above).
+            size_t chosen = 0;
+            for (size_t i = 0; i < physDevs.size(); ++i)
+                if (physDevs[i] == physDev)
+                    chosen = i;
+            alvr::gpudiag::logDevices(physDevs, chosen, "GPU selector: ALVR_VULKAN_DEVICE, Render GPU setting, else the system's order");
+        }
 
         auto queueFamilyProps = physDev.getQueueFamilyProperties();
 

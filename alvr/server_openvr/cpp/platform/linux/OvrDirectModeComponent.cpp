@@ -13,6 +13,7 @@
 #include "OvrDirectModeComponent.h"
 #include "SteamVrSync.h"
 #include "TextureTimelineWait.h"
+#include "GpuDiag.h"
 
 #include "alvr_server/Logger.h"
 #include "alvr_server/include/openvr_math.h"
@@ -207,6 +208,19 @@ void OvrDirectModeComponent::EncodeWorkerLoop() {
                     return false;
                 }
             );
+            {
+                // Periodic texture-confirmation summary for diagnostics.
+                static uint64_t diagConfirmed = 0, diagSkipped = 0;
+                static auto diagLast = std::chrono::steady_clock::now();
+                (confirmed ? diagConfirmed : diagSkipped)++;
+                auto diagNow = std::chrono::steady_clock::now();
+                if (diagNow - diagLast >= std::chrono::seconds(10)) {
+                    Info("[gpu-diag] last 10 s: %llu frames confirmed by SteamVR's timeline, %llu skipped",
+                        (unsigned long long)diagConfirmed, (unsigned long long)diagSkipped);
+                    diagConfirmed = diagSkipped = 0;
+                    diagLast = diagNow;
+                }
+            }
             if (!confirmed) {
                 ++m_unconfirmedSkips;
                 Warn(
@@ -353,6 +367,16 @@ void OvrDirectModeComponent::CreateSwapTextureSet(
 
         processResource->fds[i] = fd;
         processResource->sharedHandles[i] = myHandle;
+        if (i == 0) {
+            // The texture set lives on ALVR's GPU; vrcompositor must import
+            // it on the same GPU (a failure shows in vrcompositor.txt).
+            static bool compositorLogged = false;
+            if (!compositorLogged) {
+                compositorLogged = true;
+                alvr::gpudiag::logCompositor();
+            }
+            Info("[gpu-diag] shared texture set for pid %d created and fd received", (int)unPid);
+        }
 
         {
             std::lock_guard<std::mutex> lock(m_presentMutex);
