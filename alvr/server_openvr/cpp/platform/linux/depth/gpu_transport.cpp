@@ -1,5 +1,6 @@
 #include "gpu_transport.hpp"
 #include "payload_validation.h"
+#include "plane_workers.hpp"
 #include <algorithm>
 #include <cerrno>
 #include <chrono>
@@ -79,8 +80,10 @@ std::array<uint8_t,16> uuid(Device d,Api& a){
     VkPhysicalDeviceIDProperties id{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES};VkPhysicalDeviceProperties2 props{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};props.pNext=&id;get(d.physical,&props);
     std::array<uint8_t,16> out;std::copy_n(id.deviceUUID,16,out.begin());return out;
 }
-uint32_t memoryType(Device d,Api& a,uint32_t bits,VkMemoryPropertyFlags flags){
+uint32_t memoryType(Device d,Api& a,uint32_t bits,VkMemoryPropertyFlags flags,bool preferCached=false){
     auto get=reinterpret_cast<PFN_vkGetPhysicalDeviceMemoryProperties>(a.gipa(d.instance,"vkGetPhysicalDeviceMemoryProperties"));VkPhysicalDeviceMemoryProperties p;get(d.physical,&p);
+    if(preferCached)for(uint32_t i=0;i<p.memoryTypeCount;i++)
+        if((bits&(1u<<i))&&(p.memoryTypes[i].propertyFlags&(flags|VK_MEMORY_PROPERTY_HOST_CACHED_BIT))==(flags|VK_MEMORY_PROPERTY_HOST_CACHED_BIT))return i;
     for(uint32_t i=0;i<p.memoryTypeCount;i++)if((bits&(1u<<i))&&(p.memoryTypes[i].propertyFlags&flags)==flags)return i;
     throw std::runtime_error("No compatible Vulkan memory type");
 }
@@ -88,9 +91,11 @@ struct Resource {
     Device device;Api& api;VkBuffer buffer{};VkDeviceMemory memory{},imageMemory{};VkImage image{};VkExtent2D extent{};
     VkSemaphore semaphore{};VkCommandPool pool{};VkCommandBuffer command{};VkFence fence{};uint32_t type{};uint64_t allocation{};Wire wire{};
     bool memoryFdConsumed=false,semaphoreFdConsumed=false,submitted=false;
+    void* hostMapped=nullptr;
     uint64_t connectionEpoch=0;
     Resource(Device d,Api& a):device(d),api(a){}
     ~Resource(){
+        if(hostMapped)api.UnmapMemory(device.device,memory);
         if(fence)api.DestroyFence(device.device,fence,nullptr);
         if(pool)api.DestroyCommandPool(device.device,pool,nullptr);
         if(image)api.DestroyImage(device.device,image,nullptr);
@@ -99,6 +104,8 @@ struct Resource {
         if(memory)api.FreeMemory(device.device,memory,nullptr);
         if(semaphore)api.DestroySemaphore(device.device,semaphore,nullptr);
     }
+    void* mapHost(){if(!hostMapped)check(api.MapMemory(device.device,memory,0,wire.allocationBytes?wire.allocationBytes:allocation,0,&hostMapped),"producer map");return hostMapped;}
+    void unmapHost(){if(hostMapped){api.UnmapMemory(device.device,memory);hostMapped=nullptr;}}
     bool ready()const{return !submitted||api.GetFenceStatus(device.device,fence)==VK_SUCCESS;}
     void wait(){if(submitted)check(api.WaitForFences(device.device,1,&fence,VK_TRUE,10'000'000'000ull),"diagnostic fence wait");}
     void commands(){
@@ -111,7 +118,7 @@ struct Resource {
         VkExternalMemoryBufferCreateInfo e{VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO};e.handleTypes=VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
         VkBufferCreateInfo b{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};b.pNext=external?&e:nullptr;b.size=bytes;b.usage=BufferUsage;b.sharingMode=VK_SHARING_MODE_EXCLUSIVE;
         check(api.CreateBuffer(device.device,&b,nullptr,&buffer),"buffer");VkMemoryRequirements req;api.GetBufferMemoryRequirements(device.device,buffer,&req);
-        type=fd>=0?importedType:memoryType(device,api,req.memoryTypeBits,VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        type=fd>=0?importedType:memoryType(device,api,req.memoryTypeBits,VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,external&&!getenv("MHL_DEPTH_TEST_UNCACHED_EXPORT"));
         if(type>=32||!(req.memoryTypeBits&(1u<<type)))throw std::runtime_error("import memory type mismatch");
         allocation=fd>=0?importedAllocation:req.size;if(allocation<req.size||allocation>MaxBytes)throw std::runtime_error("allocation bounds");
         VkMemoryDedicatedAllocateInfo dedicated{VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO};dedicated.buffer=buffer;
@@ -134,9 +141,16 @@ struct Resource {
         check(api.AllocateMemory(device.device,&m,nullptr,&imageMemory),"private image allocation");check(api.BindImageMemory(device.device,image,imageMemory,0),"private image bind");
     }
 };
-void payloadCheck(MhlDepthPacket const& p,void const* data,size_t bytes){
-    if(bytes>MaxBytes)throw std::runtime_error("payload size");
-    if(auto error=mhl_depth_validate_payload_bytes(&p,data,bytes))throw std::runtime_error(error);
+void payloadCheck(MhlDepthPacket const& p,void const* data,size_t bytes,PlaneWorkers& workers){
+    if(auto error=mhl_depth_validate(&p,sizeof(p)))throw std::runtime_error(error);
+    if(!data||bytes!=p.buffer_size||bytes>MaxBytes)throw std::runtime_error("payload size");
+    std::array<char const*,4> errors{};
+    bool checked=workers.normalize([&](unsigned i){
+        auto const& plane=i%2?p.eyes[i/2].colour:p.eyes[i/2].depth;
+        errors[i]=mhl_depth_validate_plane_pixels(&plane,i%2,data);return errors[i]==nullptr;
+    });
+    for(auto error:errors)if(error)throw std::runtime_error(error);
+    if(!checked)throw std::runtime_error("payload validation failed");
 }
 }
 
@@ -169,7 +183,9 @@ OwnedDevice::~OwnedDevice(){if(p->api){p->api->DeviceWaitIdle(p->d.device);p->ap
 Device OwnedDevice::get()const{return p->d;}
 
 struct Producer::Impl {
+    PlaneWorkers validators;
     Device d;Api api;std::string path;int socket=-1;uint64_t serial=0;Counters stats{};
+    std::unique_ptr<Resource> prepared;size_t preparedBytes=0;
     struct Loan {std::unique_ptr<Resource> resource;bool acknowledged=false;};std::deque<Loan> loans;
     Impl(Device d,std::string path):d(d),api(d.device),path(std::move(path)){}
     ~Impl(){api.DeviceWaitIdle(d.device);closeFd(socket);loans.clear();}
@@ -191,15 +207,59 @@ struct Producer::Impl {
 };
 Producer::Producer(Device d,std::string path):p(std::make_unique<Impl>(d,std::move(path))){}
 Producer::~Producer()=default;
+void Producer::reserveFresh(size_t bytes){
+    if(!bytes||bytes>MaxBytes)return;
+    p->poll();if(p->prepared&&p->preparedBytes==bytes)return;
+    if(p->loans.size()>=Capacity)return;
+    auto start=std::chrono::steady_clock::now();
+    auto fresh=std::make_unique<Resource>(p->d,p->api);fresh->makeBuffer(bytes,true);fresh->makeSemaphore();
+    memset(fresh->mapHost(),0,bytes); // Fault/initialize only before publication.
+    p->prepared=std::move(fresh);p->preparedBytes=bytes;++p->stats.prefetched;
+    p->stats.prefetchNs+=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-start).count();
+}
 void Producer::poll(){p->poll();}
 Counters Producer::counters()const{return p->stats;}
 bool Producer::send(MhlDepthPacket const& packet,void const* bytes,size_t size){
+    return produce(packet,[&](void* mapped,size_t requested){
+        if(!bytes||size!=requested)throw std::runtime_error("payload size");
+        (void)mapped;return bytes;
+    });
+}
+bool Producer::produce(MhlDepthPacket const& packet,std::function<void const*(void*,size_t)> const& fill){
     p->poll();if(p->loans.size()>=Capacity){p->stats.busy++;return false;}
     if(p->socket<0){int s=socket(AF_UNIX,SOCK_SEQPACKET|SOCK_NONBLOCK|SOCK_CLOEXEC,0);auto addr=address(p->path);
         if(s<0)return false;if(connect(s,reinterpret_cast<sockaddr*>(&addr),sizeof(addr))||!sameUid(s)){close(s);return false;}p->socket=s;}
-    payloadCheck(packet,bytes,size);
-    auto r=std::make_unique<Resource>(p->d,p->api);r->makeBuffer(size,true);r->makeSemaphore();
-    void* mapped=nullptr;check(p->api.MapMemory(p->d.device,r->memory,0,size,0,&mapped),"producer map");memcpy(mapped,bytes,size);p->api.UnmapMemory(p->d.device,r->memory);
+    if(auto error=mhl_depth_validate(&packet,sizeof(packet)))throw std::runtime_error(error);
+    if(!fill||!packet.buffer_size||packet.buffer_size>MaxBytes)throw std::runtime_error("payload size");
+    auto allocationStart=std::chrono::steady_clock::now();
+    std::unique_ptr<Resource> r;
+    if(p->prepared&&p->preparedBytes==packet.buffer_size)r=std::move(p->prepared);
+    else{p->prepared.reset();r=std::make_unique<Resource>(p->d,p->api);r->makeBuffer(packet.buffer_size,true);r->makeSemaphore();}
+    p->preparedBytes=0;void* mapped=r->mapHost();
+    VkPhysicalDeviceMemoryProperties memoryProperties{};
+    auto getMemory=reinterpret_cast<PFN_vkGetPhysicalDeviceMemoryProperties>(p->api.gipa(p->d.instance,"vkGetPhysicalDeviceMemoryProperties"));
+    getMemory(p->d.physical,&memoryProperties);
+    VkPhysicalDeviceDriverProperties driver{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES};
+    VkPhysicalDeviceProperties2 properties{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};properties.pNext=&driver;
+    auto getProperties=reinterpret_cast<PFN_vkGetPhysicalDeviceProperties2>(p->api.gipa(p->d.instance,"vkGetPhysicalDeviceProperties2"));
+    if(getProperties)getProperties(p->d.physical,&properties);
+    // Direct mapped normalization is validated on this driver only. Intel/NVK
+    // retain CPU staging: scalar reads of their mapped export can be costly
+    // despite HOST_CACHED being advertised. No unsupported fast-path guess.
+    bool cached=getProperties&&driver.driverID==VK_DRIVER_ID_NVIDIA_PROPRIETARY
+        &&(memoryProperties.memoryTypes[r->type].propertyFlags&VK_MEMORY_PROPERTY_HOST_CACHED_BIT)
+        &&!getenv("MHL_DEPTH_TEST_STAGING_EXPORT");
+    auto writeStart=std::chrono::steady_clock::now();
+    std::chrono::steady_clock::time_point validationStart,validationEnd;
+    try{
+        auto canonical=fill(cached?mapped:nullptr,packet.buffer_size);
+        if(!canonical){r->unmapHost();p->stats.rejected++;return false;}
+        validationStart=std::chrono::steady_clock::now();payloadCheck(packet,canonical,packet.buffer_size,p->validators);
+        validationEnd=std::chrono::steady_clock::now();
+        if(canonical!=mapped)memcpy(mapped,canonical,packet.buffer_size);
+    }catch(...){r->unmapHost();throw;}
+    r->unmapHost();
+    auto publishStart=std::chrono::steady_clock::now();
     r->wire.packet=packet;r->wire.packet.transport=MHL_TRANSPORT_VULKAN_OPAQUE_FD;r->wire.packet.timeline_value=1;r->wire.packet.memory_fd_index=0;r->wire.packet.semaphore_fd_index=1;
     auto id=uuid(p->d,p->api);std::copy(id.begin(),id.end(),r->wire.packet.device_uuid);r->wire.memoryType=r->type;r->wire.allocationBytes=r->allocation;r->wire.lease=++p->serial;
     r->commands();VkBufferMemoryBarrier b{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};b.srcAccessMask=VK_ACCESS_HOST_WRITE_BIT;b.srcQueueFamilyIndex=p->d.family;b.dstQueueFamilyIndex=VK_QUEUE_FAMILY_EXTERNAL;b.buffer=r->buffer;b.size=VK_WHOLE_SIZE;
@@ -212,7 +272,11 @@ bool Producer::send(MhlDepthPacket const& packet,void const* bytes,size_t size){
         VkMemoryGetFdInfoKHR m{VK_STRUCTURE_TYPE_MEMORY_GET_FD_INFO_KHR};m.memory=r->memory;m.handleType=VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;check(p->api.GetMemoryFdKHR(p->d.device,&m,&memory),"memory FD");
         VkSemaphoreGetFdInfoKHR s{VK_STRUCTURE_TYPE_SEMAPHORE_GET_FD_INFO_KHR};s.semaphore=r->semaphore;s.handleType=VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT;check(p->api.GetSemaphoreFdKHR(p->d.device,&s,&semaphore),"semaphore FD");
         bool sent=sendWire(p->socket,r->wire,{memory,semaphore});closeFd(memory);closeFd(semaphore);
-        if(sent){p->stats.sent++;p->loans.push_back({std::move(r),false});return true;}
+        if(sent){
+            auto elapsed=[](auto a,auto b){return uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(b-a).count());};
+            p->stats.validationNs+=elapsed(validationStart,validationEnd);p->stats.allocationNs+=elapsed(allocationStart,writeStart);
+            p->stats.writeNs+=elapsed(writeStart,validationStart);p->stats.copyNs+=elapsed(validationEnd,publishStart);p->stats.publishNs+=elapsed(publishStart,std::chrono::steady_clock::now());
+            p->stats.sent++;p->loans.push_back({std::move(r),false});return true;}
         closeFd(p->socket);p->loans.push_back({std::move(r),true});return false;
     }catch(...){closeFd(memory);closeFd(semaphore);r->wait();throw;}
 }

@@ -32,7 +32,8 @@ private:
 };
 struct Counters {
     uint64_t received{},accepted{},rejected{},timestamp{},geometry{},pose{},clock{},
-        protocol{},device{},notReady{},missing{},disabled{},busy{},sent{},acknowledged{};
+        protocol{},device{},notReady{},missing{},disabled{},busy{},sent{},acknowledged{},
+        validationNs{},allocationNs{},writeNs{},copyNs{},publishNs{},prefetched{},prefetchNs{};
 };
 struct Query {
     uint64_t targetTimestampNs{},displayMonotonicNs{},toleranceNs{},producerId{};
@@ -58,6 +59,13 @@ public:
     // Worker-only: copies a validated canonical allocation to owned exportable
     // Vulkan memory. Never borrows a raw capture slot or sends a file path.
     bool send(MhlDepthPacket const&,void const* canonical,size_t bytes);
+    // A cached mapped destination may be offered; otherwise it is NULL and
+    // the writer uses its own CPU staging. Return canonical bytes valid until
+    // produce returns, or NULL on failure. Full validation precedes publication.
+    bool produce(MhlDepthPacket const&,std::function<void const*(void*,size_t)> const& fill);
+    // Reserve at most one fresh, never-published allocation between frames.
+    // Single producer worker only; published allocations are never rewritten.
+    void reserveFresh(size_t bytes);
     void poll();
     Counters counters() const;
 private:
