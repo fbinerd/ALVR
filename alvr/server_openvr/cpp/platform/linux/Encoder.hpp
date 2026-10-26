@@ -382,6 +382,11 @@ public:
         // only touched it trivially (unused variable, spacing), which caused
         // the merge conflict for v3.
         Info("Using device path %s", target.devicePath.c_str());
+        Info(
+            "[gpu-diag] encoder node (GPU selector): %s, backend %d, %s",
+            alvr::gpudiag::describeNode(target.devicePath).c_str(), (int)target.backend,
+            target.crossDevice ? "on a DIFFERENT GPU than the render device (host-memory hand-over)" : "on the render device"
+        );
 
         // av_log_set_level(AV_LOG_DEBUG);
 
