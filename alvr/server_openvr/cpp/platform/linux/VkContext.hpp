@@ -146,8 +146,8 @@ private:
     // only on the GPU that created them, and SteamVR does not tell the driver
     // which one that is. Order: ALVR_VULKAN_DEVICE, then the "Render GPU"
     // setting (video.encoder_config.linux_gpu.render_gpu), then automatic:
-    // the first discrete GPU, then the first integrated one (never a CPU
-    // implementation such as llvmpipe when hardware exists), then devs[0].
+    // the system's order (the first hardware device, as upstream ALVR's
+    // devs[0]; a CPU implementation such as llvmpipe listed first is skipped).
     static vk::PhysicalDevice selectPhysicalDevice(std::vector<vk::PhysicalDevice> const& devs) {
         if (devs.empty()) {
             throw std::runtime_error("No Vulkan device found");
@@ -187,13 +187,18 @@ private:
             Warn("%s", renderGpuWarning.c_str());
         }
 
-        for (auto type :
-             { vk::PhysicalDeviceType::eDiscreteGpu, vk::PhysicalDeviceType::eIntegratedGpu }) {
-            for (usize i = 0; i < devs.size(); ++i) {
-                if (devs[i].getProperties().deviceType == type) {
-                    Info("Using Vulkan device %zu (automatic)", i);
-                    return devs[i];
-                }
+        // Automatic = what the system presents, as ALVR always did: the first
+        // device in the Vulkan loader's order, which already follows the
+        // system's defaults and any GPU environment Steam/SteamVR was started
+        // with (prime-run, DRI_PRIME, ...). No discrete-first preference: on a
+        // hybrid laptop that moved the driver to the NVIDIA GPU while Steam,
+        // started without the selector's environment, stayed on the integrated
+        // one. Only a CPU implementation (llvmpipe) listed first is skipped
+        // when a hardware device exists. (User decision, 2026-10-25.)
+        for (usize i = 0; i < devs.size(); ++i) {
+            if (devs[i].getProperties().deviceType != vk::PhysicalDeviceType::eCpu) {
+                Info("Using Vulkan device %zu (automatic: system order)", i);
+                return devs[i];
             }
         }
         return devs[0];
