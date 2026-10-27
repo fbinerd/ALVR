@@ -46,12 +46,13 @@ struct EncoderTarget {
     std::string devicePath;
     // Vendor of the encoder GPU.
     Vendor vendor = Vendor::Intel;
-    // The encoder GPU is not the render GPU. VAAPI only: the renderer copies
+    // The encoder GPU is not the render GPU. The renderer copies
     // each frame into host memory (hostPixels) and the encoder uploads it.
     bool crossDevice = false;
     // Set by the Encoder after the renderer exists (crossDevice only).
     void const* hostPixels = nullptr;
     unsigned hostRowPitch = 0;
+    VkFormat hostFormat = VK_FORMAT_UNDEFINED;
 };
 
 class EncodePipeline {
@@ -72,7 +73,7 @@ public:
     static std::unique_ptr<EncodePipeline> Create(
         alvr::VkContext& vk_ctx,
         EncoderTarget const& target,
-        VkFrame& input_frame,
+        VkFrame* input_frame,
         /* VkFrameCtx &vk_frame_ctx,  */ uint32_t width,
         uint32_t height
     );

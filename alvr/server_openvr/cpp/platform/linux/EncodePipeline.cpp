@@ -44,22 +44,21 @@ char const* alvr::encoderBackendName(EncoderBackend backend) {
 std::unique_ptr<alvr::EncodePipeline> alvr::EncodePipeline::Create(
     alvr::VkContext& vk_ctx,
     EncoderTarget const& target,
-    VkFrame& input_frame,
+    VkFrame* input_frame,
     /* VkFrameCtx &vk_frame_ctx,  */ uint32_t width,
     uint32_t height
 ) {
     switch (target.backend) {
     case EncoderBackend::Nvenc:
-        // CUDA interop imports the renderer's opaque-fd image, which exists
-        // only on the render GPU.
-        if (target.crossDevice) {
-            Error("NVENC can only encode on the render GPU; choose VAAPI or the same GPU");
-            return nullptr;
-        }
         try {
+            if (target.crossDevice) {
+                return std::make_unique<alvr::EncodePipelineNvEnc>(target, width, height);
+            }
+            if (!input_frame)
+                throw std::runtime_error("NVENC Vulkan input frame is missing");
             alvr::HWContext hwCtx(vk_ctx);
             auto nvenc = std::make_unique<alvr::EncodePipelineNvEnc>(
-                hwCtx, vk_ctx, input_frame, width, height
+                hwCtx, vk_ctx, *input_frame, width, height
             );
             Info("Using NvEnc encoder");
             return nvenc;
@@ -73,12 +72,14 @@ std::unique_ptr<alvr::EncodePipeline> alvr::EncodePipeline::Create(
         return nullptr;
     case EncoderBackend::Vaapi:
         try {
+            if (!input_frame)
+                throw std::runtime_error("VAAPI Vulkan input frame is missing");
             alvr::HWContext hwCtx(vk_ctx);
             auto vaapi = std::make_unique<alvr::EncodePipelineVAAPI>(
                 hwCtx,
                 target.devicePath,
                 target.vendor,
-                input_frame,
+                *input_frame,
                 width,
                 height,
                 target.hostPixels,

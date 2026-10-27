@@ -360,10 +360,11 @@ public:
         }
 
         resolveTarget();
-        rendererCI.outputHandle = target.backend == EncoderBackend::Nvenc
-            ? render::HandleType::OpaqueFd
-            : render::HandleType::DmaBuf;
-        rendererCI.linearOutput = target.crossDevice;
+        bool const hostNvenc = target.crossDevice && target.backend == EncoderBackend::Nvenc;
+        rendererCI.outputHandle = hostNvenc           ? render::HandleType::None
+            : target.backend == EncoderBackend::Nvenc ? render::HandleType::OpaqueFd
+                                                      : render::HandleType::DmaBuf;
+        rendererCI.linearOutput = target.crossDevice && !hostNvenc;
         rendererCI.hostOutputCopy = target.crossDevice;
 
         outExtent = rendererCI.outputExtent;
@@ -372,6 +373,7 @@ public:
             auto host = renderer.get().hostOutput();
             target.hostPixels = host.pixels;
             target.hostRowPitch = host.rowPitch;
+            target.hostFormat = renderer.get().getOutput().imageCI.format;
         }
     }
 
@@ -397,11 +399,14 @@ public:
 
         // TODO: Fix Nvidia
 
-        frame = std::make_unique<VkFrame>(
-            vkCtx, out.image.image, out.imageCI, out.size, out.image.memory, out.drm
-        );
+        if (!(target.crossDevice && target.backend == EncoderBackend::Nvenc)) {
+            frame = std::make_unique<VkFrame>(
+                vkCtx, out.image.image, out.imageCI, out.size, out.image.memory, out.drm
+            );
+        }
 
-        encoder = EncodePipeline::Create(vkCtx, target, *frame, outExtent.width, outExtent.height);
+        encoder
+            = EncodePipeline::Create(vkCtx, target, frame.get(), outExtent.width, outExtent.height);
         if (!encoder) {
             throw std::runtime_error("no usable encoder for the current settings");
         }
