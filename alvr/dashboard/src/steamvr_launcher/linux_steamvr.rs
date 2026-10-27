@@ -239,6 +239,87 @@ pub fn maybe_unwrap_vrcompositor_launcher() -> Result<()> {
     Ok(())
 }
 
+const MIRROR_BEGIN: &str = "# ALVR Intel mirror compatibility begin\n";
+const MIRROR_END: &str = "# ALVR Intel mirror compatibility end\n";
+const MIRROR_BODY: &str = r#"# A virtual HMD does not need a desktop mirror. Some Intel/Mesa Wayland
+# mirror swapchains fail when NVIDIA owns the primary display. Scope Mesa's
+# headless workaround to this compositor process; never to Steam or games.
+case "${MESA_VK_DEVICE_SELECT-}" in
+    8086:*)
+        if [ -n "${WAYLAND_DISPLAY-}" ] && [ "${MESA_VK_WSI_HEADLESS_SWAPCHAIN-}" != 1 ]; then
+            for alvr_gpu_device in /sys/class/drm/card[0-9]*/device; do
+                if [ "$(cat "$alvr_gpu_device/vendor" 2>/dev/null)" = 0x10de ] &&
+                   [ "$(cat "$alvr_gpu_device/boot_vga" 2>/dev/null)" = 1 ]; then
+                    export MESA_VK_WSI_HEADLESS_SWAPCHAIN=1
+                    echo '[ALVR] Using Mesa headless compositor mirror: Intel render, NVIDIA primary' >&2
+                    break
+                fi
+            done
+            unset alvr_gpu_device
+        fi
+        ;;
+esac
+"#;
+
+// A small managed section in Valve's existing shell launcher avoids wrapping
+// or renaming its ELF binary. Preserve the rest of the script byte for byte.
+fn mirror_launcher_script(script: &str, enabled: bool) -> Result<String> {
+    if !script.starts_with("#!") {
+        bail!("SteamVR compositor launcher is not a shell script");
+    }
+    let Some(newline) = script.find('\n') else {
+        bail!("SteamVR compositor launcher has no body");
+    };
+    let (shebang, mut body) = script.split_at(newline + 1);
+    if let Some(previous) = body.strip_prefix(MIRROR_BEGIN) {
+        let Some(end) = previous.find(MIRROR_END) else {
+            bail!("Incomplete ALVR mirror compatibility section; leaving launcher untouched");
+        };
+        body = &previous[end + MIRROR_END.len()..];
+    }
+    if body.contains(MIRROR_BEGIN) || body.contains(MIRROR_END) {
+        bail!("Unexpected ALVR mirror compatibility marker; leaving launcher untouched");
+    }
+    Ok(if enabled {
+        format!("{shebang}{MIRROR_BEGIN}{MIRROR_BODY}{MIRROR_END}{body}")
+    } else {
+        format!("{shebang}{body}")
+    })
+}
+
+pub fn configure_compositor_mirror() -> Result<()> {
+    let path = alvr_server_io::steamvr_root_dir()?.join("bin/linux64/vrcompositor-launcher.sh");
+    if fs::symlink_metadata(&path)?.file_type().is_symlink() {
+        bail!("SteamVR compositor shell launcher is a custom symlink; leaving it untouched");
+    }
+    let enabled =
+        selected_render_gpu_adapter().is_some_and(|adapter| adapter.get_info().vendor == 0x8086);
+    let original = fs::read_to_string(&path)?;
+    let updated = mirror_launcher_script(&original, enabled)?;
+    if original == updated {
+        return Ok(());
+    }
+    let temporary = path.with_extension(format!("alvr-{}.tmp", std::process::id()));
+    let result = (|| -> Result<()> {
+        fs::write(&temporary, updated)?;
+        fs::set_permissions(&temporary, fs::metadata(&path)?.permissions())?;
+        if fs::read_to_string(&path)? != original {
+            bail!("SteamVR launcher changed during preparation; leaving it untouched");
+        }
+        fs::rename(&temporary, &path)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        fs::remove_file(&temporary).ok();
+    }
+    result?;
+    info!(
+        "{} Intel compositor mirror compatibility (Wayland with NVIDIA primary only)",
+        if enabled { "Prepared" } else { "Removed" }
+    );
+    Ok(())
+}
+
 #[derive(PartialEq)]
 enum DeviceInfo {
     // NVIDIA GPU on NVIDIA's proprietary driver.
@@ -783,5 +864,85 @@ mod gpu_environment_tests {
         let mut current = selected.clone();
         current.push(("VK_LOADER_LAYERS_DISABLE".into(), "~implicit~".into()));
         assert!(!gpu_environment_changes(&selected, &current).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod mirror_tests {
+    use super::{MIRROR_BEGIN, MIRROR_END, mirror_launcher_script};
+    use std::{fs, process::Command, time::SystemTime};
+
+    const ORIGINAL: &str =
+        "#!/bin/bash\n# Vendor launcher\nprintf '%s' \"${MESA_VK_WSI_HEADLESS_SWAPCHAIN-unset}\"\n";
+
+    #[test]
+    fn installation_is_idempotent_and_removal_restores_original() {
+        let installed = mirror_launcher_script(ORIGINAL, true).unwrap();
+        assert!(installed.starts_with("#!/bin/bash\n"));
+        assert!(installed.ends_with(ORIGINAL.split_once('\n').unwrap().1));
+        assert_eq!(mirror_launcher_script(&installed, true).unwrap(), installed);
+        assert_eq!(mirror_launcher_script(&installed, false).unwrap(), ORIGINAL);
+        assert_eq!(mirror_launcher_script(ORIGINAL, false).unwrap(), ORIGINAL);
+    }
+
+    #[test]
+    fn malformed_or_misplaced_sections_are_rejected() {
+        assert!(mirror_launcher_script("ELF", true).is_err());
+        assert!(mirror_launcher_script(&format!("#!/bin/sh\n{MIRROR_BEGIN}broken"), true).is_err());
+        assert!(mirror_launcher_script(&format!("{ORIGINAL}{MIRROR_END}"), false).is_err());
+    }
+
+    #[test]
+    fn compatibility_updates_preserve_the_vendor_body() {
+        let previous =
+            format!("#!/bin/bash\n{MIRROR_BEGIN}# Older managed code\n{MIRROR_END}vendor_body\n");
+        let updated = mirror_launcher_script(&previous, true).unwrap();
+        assert!(!updated.contains("Older managed code"));
+        assert!(updated.ends_with("vendor_body\n"));
+    }
+
+    #[test]
+    fn headless_environment_is_scoped_to_intel_wayland_and_nvidia_primary() {
+        let unique = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root =
+            std::env::temp_dir().join(format!("alvr-mirror-{}-{unique}", std::process::id()));
+        struct Cleanup(std::path::PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                fs::remove_dir_all(&self.0).ok();
+            }
+        }
+        let _cleanup = Cleanup(root.clone());
+        let card = root.join("card0/device");
+        fs::create_dir_all(&card).unwrap();
+        fs::write(card.join("vendor"), "0x10de\n").unwrap();
+        let script = mirror_launcher_script(ORIGINAL, true)
+            .unwrap()
+            .replace("/sys/class/drm", root.to_str().unwrap());
+        for (gpu, wayland, primary, expected) in [
+            ("8086:a782!", true, "1", "1"),
+            ("8086:a782!", true, "0", "unset"),
+            ("8086:a782!", false, "1", "unset"),
+            ("10de:2504!", true, "1", "unset"),
+            ("", true, "1", "unset"),
+        ] {
+            fs::write(card.join("boot_vga"), primary).unwrap();
+            let mut command = Command::new("bash");
+            command
+                .arg("-c")
+                .arg(&script)
+                .env("MESA_VK_DEVICE_SELECT", gpu)
+                .env_remove("MESA_VK_WSI_HEADLESS_SWAPCHAIN")
+                .env_remove("WAYLAND_DISPLAY");
+            if wayland {
+                command.env("WAYLAND_DISPLAY", "wayland-test");
+            }
+            let result = command.output().unwrap();
+            assert!(result.status.success(), "{result:?}");
+            assert_eq!(String::from_utf8(result.stdout).unwrap(), expected);
+        }
     }
 }
