@@ -378,6 +378,12 @@ public:
     }
 
     void initEncoding() {
+        // Kept from mesa-v2: the GPU selector already resolved the encoder's
+        // render node (target.devicePath), which may belong to a different
+        // GPU than the render device. Upstream's search for the render
+        // device's own node (from #3398) stays replaced; Vixea's 3c468d97
+        // only touched it trivially (unused variable, spacing), which caused
+        // the merge conflict for v3.
         Info("Using device path %s", target.devicePath.c_str());
         InfoToDriver(
             "[gpu-diag] encoder node (GPU selector): %s, backend %d, %s",
