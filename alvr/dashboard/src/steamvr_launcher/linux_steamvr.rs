@@ -63,30 +63,31 @@ pub fn restart_steam_with_render_gpu() {
             return;
         }
 
-        let Some(steam_script) = steam_script_path() else {
-            error!(
-                "Could not locate Steam's steam.sh script to restart it with ALVR's GPU environment"
-            );
-            return;
-        };
-        let mut command = Command::new(steam_script);
-        command.arg("steam://rungameid/250820");
-        apply_render_gpu_environment(&mut command, &adapter);
-        if let Err(e) = super::spawn_and_reap(&mut command) {
-            error!("Failed to restart SteamVR with Render GPU {gpu_name}: {e}");
-        } else {
-            info!("Started Steam and SteamVR with ALVR Render GPU {gpu_name}");
-        }
+        // Re-enter the normal launcher so the current ALVR driver is
+        // registered even when the confirmation interrupted the Launch action.
+        let launcher = super::LAUNCHER.lock();
+        launcher.ensure_steamvr_shutdown();
+        launcher.launch_steamvr();
     });
 }
 
 pub fn render_gpu_conflict_for_confirmation() -> Option<(String, String)> {
-    let adapter = selected_render_gpu_adapter()?;
-    let conflicts = conflicting_steam_overrides(&adapter);
-    if conflicts.is_empty() || running_steam_pids().is_empty() {
+    if running_steam_pids().is_empty() {
         return None;
     }
-    Some((adapter.get_info().name, conflicts.join(" ")))
+    let adapter = selected_render_gpu_adapter()?;
+    let conflicts = conflicting_steam_overrides(&adapter);
+    if conflicts.is_empty() {
+        return None;
+    }
+    Some((
+        adapter.get_info().name,
+        format!(
+            "{}\n\nSteam will restart with:\n{}",
+            conflicts.join("\n"),
+            render_gpu_launch_options(&adapter)
+        ),
+    ))
 }
 
 fn selected_render_gpu_adapter() -> Option<wgpu::Adapter> {
@@ -143,32 +144,46 @@ fn apply_render_gpu_environment(command: &mut Command, adapter: &wgpu::Adapter) 
     for name in GPU_OVERRIDE_VARS {
         command.env_remove(name);
     }
+    command.envs(render_gpu_environment(adapter));
+}
+
+// Use the same environment for launch, validation, and the confirmation UI.
+// Explicit selection must not depend on firmware's primary GPU or on the
+// desktop GPU. In particular, an empty Steam environment does not select the
+// GPU requested by ALVR on a hybrid system.
+fn render_gpu_environment(adapter: &wgpu::Adapter) -> Vec<(String, String)> {
+    let mut variables = vec![];
+    let mut set = |name: &str, value: &str| {
+        variables.push((name.to_owned(), value.to_owned()));
+    };
     let info = adapter.get_info();
     if is_nvidia_proprietary(&info) {
-        command.env("__GLX_VENDOR_LIBRARY_NAME", "nvidia");
-        command.env("__NV_PRIME_RENDER_OFFLOAD", "1");
+        set("__GLX_VENDOR_LIBRARY_NAME", "nvidia");
+        set("__NV_PRIME_RENDER_OFFLOAD", "1");
+        // Keep this even when pinning the host ICD. Steam's runtime can
+        // rewrite ICD paths; this layer still hides the integrated device.
+        set("__VK_LAYER_NV_optimus", "NVIDIA_only");
         let base = "/usr/share/vulkan/icd.d/nvidia_icd";
         let path = [format!("{base}.json"), format!("{base}.x86_64.json")]
             .into_iter()
             .find(|path| Path::new(path).is_file());
         if let Some(path) = path {
-            command.env("VK_DRIVER_FILES", path);
-        } else {
-            command.env("__VK_LAYER_NV_optimus", "NVIDIA_only");
+            set("VK_DRIVER_FILES", &path);
         }
     } else {
         let ids = format!("{:04x}:{:04x}", info.vendor, info.device);
-        command.env("DRI_PRIME", &ids);
-        command.env("MESA_VK_DEVICE_SELECT", format!("{ids}!"));
-        command.env("__GLX_VENDOR_LIBRARY_NAME", "mesa");
+        set("DRI_PRIME", &ids);
+        set("MESA_VK_DEVICE_SELECT", &format!("{ids}!"));
+        set("__GLX_VENDOR_LIBRARY_NAME", "mesa");
         let mesa_egl = "/usr/share/glvnd/egl_vendor.d/50_mesa.json";
         if Path::new(mesa_egl).is_file() {
-            command.env("__EGL_VENDOR_LIBRARY_FILENAMES", mesa_egl);
+            set("__EGL_VENDOR_LIBRARY_FILENAMES", mesa_egl);
         }
         // MESA_VK_DEVICE_SELECT (with "!") already hides the other GPUs.
         // Limiting VK_DRIVER_FILES to one host ICD as well breaks Proton
         // games (VRChat: no graphics device on Intel), so leave it alone.
     }
+    variables
 }
 
 pub fn apply_selected_render_gpu_environment(command: &mut Command) -> bool {
@@ -314,10 +329,13 @@ const GPU_OVERRIDE_VARS: &[&str] = &[
     "VK_LOADER_DRIVERS_SELECT",
     "VK_LOADER_DRIVERS_DISABLE",
     "VK_LOADER_LAYERS_DISABLE",
+    "DISABLE_LAYER_NV_OPTIMUS_1",
+    "NODEVICE_SELECT",
     "__VK_LAYER_NV_optimus",
     "MESA_VK_DEVICE_SELECT",
     "DRI_PRIME",
     "__NV_PRIME_RENDER_OFFLOAD",
+    "__NV_PRIME_RENDER_OFFLOAD_PROVIDER",
     "__GLX_VENDOR_LIBRARY_NAME",
     "__EGL_VENDOR_LIBRARY_FILENAMES",
 ];
@@ -353,52 +371,40 @@ fn steam_gpu_override_env() -> Vec<(String, String)> {
     vec![]
 }
 
-// Steam variables that force a GPU other than `adapter` on SteamVR.
+// A running Steam client must have the explicit selection applied. Absence
+// of overrides is not proof of compatibility: its default changes with the
+// primary GPU chosen by firmware and the desktop session.
 fn conflicting_steam_overrides(adapter: &wgpu::Adapter) -> Vec<String> {
-    let nvidia = is_nvidia_proprietary(&adapter.get_info());
-    steam_gpu_override_env()
-        .into_iter()
-        .filter(|(name, value)| {
-            let value_lower = value.to_lowercase();
-            match name.as_str() {
-                "VK_DRIVER_FILES" | "VK_ICD_FILENAMES" => value_lower.contains("nvidia") != nvidia,
-                "__VK_LAYER_NV_optimus" => value == "NVIDIA_only" && !nvidia,
-                "__NV_PRIME_RENDER_OFFLOAD" => value == "1" && !nvidia,
-                "__GLX_VENDOR_LIBRARY_NAME" => (value_lower == "nvidia") != nvidia,
-                "MESA_VK_DEVICE_SELECT" | "DRI_PRIME" => nvidia,
-                _ => false,
-            }
-        })
-        .map(|(name, value)| format!("{name}={value}"))
-        .collect()
+    gpu_environment_changes(&render_gpu_environment(adapter), &steam_gpu_override_env())
+}
+
+fn gpu_environment_changes(
+    expected: &[(String, String)],
+    current: &[(String, String)],
+) -> Vec<String> {
+    let mut changes = vec![];
+    for (name, wanted) in expected {
+        match current.iter().find(|(key, _)| key == name) {
+            Some((_, value)) if value == wanted => {}
+            Some((_, value)) => changes.push(format!("{name}={value} must become {wanted}")),
+            None => changes.push(format!("{name} is not set (required: {wanted})")),
+        }
+    }
+    for (name, value) in current {
+        if !value.is_empty() && !expected.iter().any(|(key, _)| key == name) {
+            changes.push(format!("Remove {name}={value}"));
+        }
+    }
+    changes
 }
 
 // Launch options that make SteamVR / a game render on `adapter`.
 fn render_gpu_launch_options(adapter: &wgpu::Adapter) -> String {
-    let info = adapter.get_info();
-    if is_nvidia_proprietary(&info) {
-        // NVIDIA's proprietary driver: PRIME render offload.
-        let base_path = "/usr/share/vulkan/icd.d/nvidia_icd";
-        let vk_override = if Path::new(&format!("{base_path}.json")).exists() {
-            format!("VK_DRIVER_FILES={base_path}.json")
-        } else if Path::new(&format!("{base_path}.x86_64.json")).exists() {
-            format!("VK_DRIVER_FILES={base_path}.x86_64.json")
-        } else {
-            "__VK_LAYER_NV_optimus=NVIDIA_only".to_string()
-        };
-        format!("__GLX_VENDOR_LIBRARY_NAME=nvidia __NV_PRIME_RENDER_OFFLOAD=1 {vk_override}")
-    } else {
-        // Mesa drivers (Intel, AMD, NVK): select the device by PCI ids for
-        // OpenGL (DRI_PRIME) and Vulkan (MESA_VK_DEVICE_SELECT). With NVK the
-        // NVIDIA user-space libraries may still be installed: pin GLX to Mesa.
-        let ids = format!("{:04x}:{:04x}", info.vendor, info.device);
-        let glx = if info.vendor == 0x10de {
-            "__GLX_VENDOR_LIBRARY_NAME=mesa "
-        } else {
-            ""
-        };
-        format!("{glx}DRI_PRIME={ids} MESA_VK_DEVICE_SELECT={ids}")
-    }
+    render_gpu_environment(adapter)
+        .into_iter()
+        .map(|(name, value)| format!("{name}={value}"))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn linux_gpu_checks(
@@ -504,11 +510,10 @@ fn linux_gpu_checks(
     }
     if let Some(adapter) = selected_adapter {
         let conflicts = conflicting_steam_overrides(adapter);
-        if !conflicts.is_empty() {
+        if !conflicts.is_empty() && !running_steam_pids().is_empty() {
             warn!(
-                "Render GPU is {}, but Steam was started with {}: SteamVR and games inherit \
-                this and will not render on the chosen GPU. Start Steam without these variables \
-                (for example not through a PRIME-offload wrapper), or choose the GPU they select.",
+                "Render GPU is {}, but the running Steam client has not applied its GPU \
+                environment: {}. Use Launch/Restart to review and apply the selected Render GPU.",
                 adapter.get_info().name,
                 conflicts.join(" ")
             );
@@ -702,5 +707,81 @@ fn probe_libva_encoder_profile(
                 message
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod gpu_environment_tests {
+    use super::gpu_environment_changes;
+
+    fn pairs(values: &[(&str, &str)]) -> Vec<(String, String)> {
+        values
+            .iter()
+            .map(|(name, value)| (name.to_string(), value.to_string()))
+            .collect()
+    }
+
+    fn nvidia() -> Vec<(String, String)> {
+        pairs(&[
+            ("__NV_PRIME_RENDER_OFFLOAD", "1"),
+            ("__GLX_VENDOR_LIBRARY_NAME", "nvidia"),
+            ("__VK_LAYER_NV_optimus", "NVIDIA_only"),
+        ])
+    }
+
+    fn intel() -> Vec<(String, String)> {
+        pairs(&[
+            ("DRI_PRIME", "8086:a782"),
+            ("MESA_VK_DEVICE_SELECT", "8086:a782!"),
+            ("__GLX_VENDOR_LIBRARY_NAME", "mesa"),
+        ])
+    }
+
+    #[test]
+    fn unconfigured_steam_needs_selection_for_either_primary_gpu() {
+        for selected in [nvidia(), intel()] {
+            assert!(!gpu_environment_changes(&selected, &[]).is_empty());
+        }
+    }
+
+    #[test]
+    fn applied_selection_does_not_request_another_restart() {
+        for selected in [nvidia(), intel()] {
+            assert!(gpu_environment_changes(&selected, &selected).is_empty());
+        }
+    }
+
+    #[test]
+    fn switching_render_gpu_requires_both_removal_and_selection() {
+        for (selected, current) in [(nvidia(), intel()), (intel(), nvidia())] {
+            let changes = gpu_environment_changes(&selected, &current);
+            assert!(changes.iter().any(|change| change.starts_with("Remove ")));
+            assert!(changes.iter().any(|change| change.contains("is not set")));
+        }
+    }
+
+    #[test]
+    fn mixed_icd_list_does_not_prove_nvidia_is_selected() {
+        let mut selected = nvidia();
+        selected.push(("VK_DRIVER_FILES".into(), "/icd/nvidia.json".into()));
+        let mut current = selected.clone();
+        current.last_mut().unwrap().1 = "/icd/nvidia.json:/icd/intel.json".into();
+        assert!(!gpu_environment_changes(&selected, &current).is_empty());
+    }
+
+    #[test]
+    fn mesa_selection_must_hide_other_devices() {
+        let selected = intel();
+        let mut current = selected.clone();
+        current[1].1 = "8086:a782".into();
+        assert!(!gpu_environment_changes(&selected, &current).is_empty());
+    }
+
+    #[test]
+    fn stale_loader_restrictions_require_restart() {
+        let selected = intel();
+        let mut current = selected.clone();
+        current.push(("VK_LOADER_LAYERS_DISABLE".into(), "~implicit~".into()));
+        assert!(!gpu_environment_changes(&selected, &current).is_empty());
     }
 }

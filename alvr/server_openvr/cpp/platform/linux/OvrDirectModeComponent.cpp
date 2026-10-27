@@ -10,10 +10,10 @@
 #include <iostream>
 #include <unistd.h>
 
+#include "GpuDiag.h"
 #include "OvrDirectModeComponent.h"
 #include "SteamVrSync.h"
 #include "TextureTimelineWait.h"
-#include "GpuDiag.h"
 
 #include "alvr_server/Logger.h"
 #include "alvr_server/include/openvr_math.h"
@@ -215,8 +215,12 @@ void OvrDirectModeComponent::EncodeWorkerLoop() {
                 (confirmed ? diagConfirmed : diagSkipped)++;
                 auto diagNow = std::chrono::steady_clock::now();
                 if (diagNow - diagLast >= std::chrono::seconds(10)) {
-                    Info("[gpu-diag] last 10 s: %llu frames confirmed by SteamVR's timeline, %llu skipped",
-                        (unsigned long long)diagConfirmed, (unsigned long long)diagSkipped);
+                    InfoToDriver(
+                        "[gpu-diag] last 10 s: %llu frames confirmed by SteamVR's timeline, %llu "
+                        "skipped",
+                        (unsigned long long)diagConfirmed,
+                        (unsigned long long)diagSkipped
+                    );
                     diagConfirmed = diagSkipped = 0;
                     diagLast = diagNow;
                 }
@@ -375,7 +379,9 @@ void OvrDirectModeComponent::CreateSwapTextureSet(
                 compositorLogged = true;
                 alvr::gpudiag::logCompositor();
             }
-            Info("[gpu-diag] shared texture set for pid %d created and fd received", (int)unPid);
+            InfoToDriver(
+                "[gpu-diag] shared texture set for pid %d created and fd received", (int)unPid
+            );
         }
 
         {

@@ -116,6 +116,7 @@ class Encoder {
     // into this device once per handle and kept until SteamVR destroys their
     // texture or the encoder goes.
     std::map<u64, vk::Semaphore> timelines;
+    bool timelineImportFailureLogged = false;
 
     // Whether the current pass chain ends in a shader carrying the warp fold,
     // which is ffr.comp or quad.comp. A colour-correction-only chain does not,
@@ -294,7 +295,7 @@ class Encoder {
         bool const nouveau = resolved.vendor == Vendor::Nvidia && kernelDriver == "nouveau";
         if (backend == EncoderBackend::Automatic) {
             backend = resolved.vendor == Vendor::Nvidia && !nouveau ? EncoderBackend::Nvenc
-                                                                     : EncoderBackend::Vaapi;
+                                                                    : EncoderBackend::Vaapi;
         }
         if (nouveau) {
             Warn(
@@ -376,10 +377,12 @@ public:
 
     void initEncoding() {
         Info("Using device path %s", target.devicePath.c_str());
-        Info(
+        InfoToDriver(
             "[gpu-diag] encoder node (GPU selector): %s, backend %d, %s",
-            alvr::gpudiag::describeNode(target.devicePath).c_str(), (int)target.backend,
-            target.crossDevice ? "on a DIFFERENT GPU than the render device (host-memory hand-over)" : "on the render device"
+            alvr::gpudiag::describeNode(target.devicePath).c_str(),
+            (int)target.backend,
+            target.crossDevice ? "on a DIFFERENT GPU than the render device (host-memory hand-over)"
+                               : "on the render device"
         );
 
         // av_log_set_level(AV_LOG_DEBUG);
@@ -422,6 +425,7 @@ public:
         }
         timelines.clear();
         encoderMissingLogged = false;
+        timelineImportFailureLogged = false;
     }
 
     // Waits until SteamVR's timeline semaphore for a texture reaches value,
@@ -433,10 +437,25 @@ public:
 
     TimelineWait
     waitTimeline(u64 handle, std::function<int()> const& dupFd, u64 value, u64 timeoutNs) {
+        auto reportFailure = [&](char const* stage, char const* detail) {
+            if (!timelineImportFailureLogged) {
+                Warn(
+                    "[gpu-diag] SteamVR timeline %llx failed at %s on ALVR render GPU %s: %s. "
+                    "SteamVR and ALVR must use the same GPU and Vulkan driver; restart Steam "
+                    "from the Dashboard to apply Render GPU.",
+                    (unsigned long long)handle,
+                    stage,
+                    vkCtx.physDev.getProperties().deviceName.data(),
+                    detail
+                );
+                timelineImportFailureLogged = true;
+            }
+        };
         auto it = timelines.find(handle);
         if (it == timelines.end()) {
             int fd = dupFd();
             if (fd < 0) {
+                reportFailure("SteamVR IPC", "no semaphore file descriptor received");
                 return TimelineWait::NotImportable;
             }
             vk::SemaphoreTypeCreateInfo typeInfo {
@@ -449,7 +468,8 @@ public:
             vk::Semaphore sem;
             try {
                 sem = vkCtx.dev.createSemaphore(semInfo);
-            } catch (...) {
+            } catch (std::exception const& e) {
+                reportFailure("vkCreateSemaphore", e.what());
                 close(fd);
                 return TimelineWait::NotImportable;
             }
@@ -458,8 +478,9 @@ public:
                 .handleType = vk::ExternalSemaphoreHandleTypeFlagBits::eOpaqueFd,
                 .fd = fd,
             };
-            if (vkCtx.dev.importSemaphoreFdKHR(&importInfo, vkCtx.dispatch)
-                != vk::Result::eSuccess) {
+            auto const result = vkCtx.dev.importSemaphoreFdKHR(&importInfo, vkCtx.dispatch);
+            if (result != vk::Result::eSuccess) {
+                reportFailure("vkImportSemaphoreFdKHR", vk::to_string(result).c_str());
                 close(fd);
                 vkCtx.dev.destroy(sem);
                 return TimelineWait::NotImportable;
