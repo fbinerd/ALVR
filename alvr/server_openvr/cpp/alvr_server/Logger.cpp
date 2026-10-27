@@ -50,6 +50,13 @@ void Info(const char* format, ...) {
     va_end(args);
 }
 
+void InfoToDriver(const char* format, ...) {
+    va_list args;
+    va_start(args, format);
+    _log(format, args, LogInfo, true);
+    va_end(args);
+}
+
 void Debug(const char* format, ...) {
 #ifdef ALVR_DEBUG_LOG
     va_list args;
