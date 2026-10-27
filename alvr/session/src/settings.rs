@@ -240,7 +240,7 @@ The ALVR_VULKAN_DEVICE environment variable, if set, takes precedence."#
         display_name = "Encoder GPU",
         help = r#"GPU that encodes the video. Unset: the render GPU.
 Value: a DRM render node (/dev/dri/renderD129), a device index or part of the GPU name.
-A GPU other than the render GPU needs VAAPI: the frame is handed over as a linear dma-buf. This cross-GPU path is not tested yet."#
+A different GPU receives frames through host memory using NVENC on NVIDIA or VAAPI on Intel/AMD. This adds a frame transfer whose cost depends on resolution."#
     ))]
     #[schema(flag = "steamvr-restart")]
     pub encoder_gpu: Option<String>,

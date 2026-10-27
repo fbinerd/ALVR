@@ -151,6 +151,7 @@ fn main() {
     }
 
     if platform_name == "linux" {
+        build.include(alvr_filesystem::deps_dir().join("linux/nv-codec-headers/include"));
         #[cfg(all(target_os = "linux", feature = "gpl"))]
         {
             let x264_path = get_linux_x264_path();

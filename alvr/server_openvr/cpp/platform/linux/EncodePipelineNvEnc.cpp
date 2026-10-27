@@ -63,10 +63,9 @@ void set_hwframe_ctx(AVCodecContext* ctx, AVBufferRef* hw_device_ctx, AVPixelFor
         throw alvr::AvException("Failed to initialize CUDA frame context:", err);
     }
     ctx->hw_frames_ctx = av_buffer_ref(hw_frames_ref);
-    if (!ctx->hw_frames_ctx)
-        err = AVERROR(ENOMEM);
-
     av_buffer_unref(&hw_frames_ref);
+    if (!ctx->hw_frames_ctx)
+        throw std::runtime_error("Could not reference CUDA frame context");
 }
 
 // Last target the bitrate manager delivered; see initEncoding.
@@ -76,21 +75,58 @@ int64_t last_known_bitrate_bps = 0;
 alvr::EncodePipelineNvEnc::EncodePipelineNvEnc(
     HWContext& vk_ctx, VkContext& v_ctx, VkFrame& input_frame, uint32_t width, uint32_t height
 )
-    : v_ctx(v_ctx)
-    , frame_ctx(vk_ctx.avCtx, input_frame.imageInfo()) {
+    : v_ctx(&v_ctx)
+    , frame_ctx(std::make_unique<VkFrameCtx>(vk_ctx.avCtx, input_frame.imageInfo())) {
     // The surface format has to follow the output image's channel order. A
     // mismatch still encodes successfully, with red and blue swapped.
-    auto input_frame_ctx = (AVHWFramesContext*)frame_ctx.ctx->data;
+    auto input_frame_ctx = (AVHWFramesContext*)frame_ctx->ctx->data;
     auto surface_format = nvenc_surface_format(input_frame_ctx->sw_format);
 
     int err;
-    vk_frame = input_frame.make_av_frame(frame_ctx);
+    vk_frame = input_frame.make_av_frame(*frame_ctx);
 
     err = av_hwdevice_ctx_create_derived(&hw_ctx, AV_HWDEVICE_TYPE_CUDA, vk_ctx.avCtx, 0);
     if (err < 0) {
         throw alvr::AvException("Failed to create a CUDA device:", err);
     }
 
+    try {
+        initEncoder(surface_format, width, height);
+    } catch (...) {
+        av_buffer_unref(&hw_ctx);
+        av_frame_free(&hw_frame);
+        throw;
+    }
+}
+
+alvr::EncodePipelineNvEnc::EncodePipelineNvEnc(
+    EncoderTarget const& target, uint32_t width, uint32_t height
+) {
+    hostInput = std::make_unique<NvencHostInput>(
+        target.devicePath,
+        target.hostPixels,
+        target.hostRowPitch,
+        VkFormat(target.hostFormat),
+        width,
+        height
+    );
+    hw_ctx = av_buffer_ref(hostInput->device());
+    if (!hw_ctx)
+        throw std::runtime_error("Could not reference NVENC CUDA device");
+    try {
+        initEncoder(hostInput->format(), width, height);
+    } catch (...) {
+        av_buffer_unref(&hw_ctx);
+        av_frame_free(&hw_frame);
+        throw;
+    }
+    InfoToDriver("[gpu-diag] NVENC initialized with host upload from a different render GPU");
+}
+
+void alvr::EncodePipelineNvEnc::initEncoder(
+    AVPixelFormat surface_format, uint32_t width, uint32_t height
+) {
+    int err;
     const auto* settings = Settings_Instance();
 
     auto codec_id = ALVR_CODEC(settings->m_codec);
@@ -200,6 +236,8 @@ alvr::EncodePipelineNvEnc::EncodePipelineNvEnc(
     }
 
     hw_frame = av_frame_alloc();
+    if (!hw_frame)
+        throw std::runtime_error("Could not allocate NVENC CUDA frame");
 }
 
 alvr::EncodePipelineNvEnc::~EncodePipelineNvEnc() {
@@ -221,32 +259,40 @@ void alvr::EncodePipelineNvEnc::SetParams(FfiDynamicEncoderParams params) {
 }
 
 void alvr::EncodePipelineNvEnc::PushFrame(uint64_t targetTimestampNs, bool idr) {
-    AVVkFrame* vkf = reinterpret_cast<AVVkFrame*>(vk_frame->data[0]);
-    vkf->sem_value[0]++;
-
-    VkTimelineSemaphoreSubmitInfo timelineInfo = {};
-    timelineInfo.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
-    timelineInfo.signalSemaphoreValueCount = 1;
-    timelineInfo.pSignalSemaphoreValues = &vkf->sem_value[0];
-
-    vk::PipelineStageFlags waitStage = vk::PipelineStageFlagBits::eBottomOfPipe;
-
-    vk::SubmitInfo submitInfo = {};
-    submitInfo.pNext = &timelineInfo;
-    // submitInfo.waitSemaphoreCount = 1;
-    // submitInfo.pWaitSemaphores = &r->GetOutput().semaphore;
-    submitInfo.pWaitDstStageMask = &waitStage;
-    submitInfo.signalSemaphoreCount = 1;
-    submitInfo.pSignalSemaphores = reinterpret_cast<vk::Semaphore*>(&vkf->sem[0]);
-    v_ctx.useQueue([&](auto& queue) { queue.submit(submitInfo); });
-
+    struct Unref {
+        AVFrame* frame;
+        ~Unref() { av_frame_unref(frame); }
+    } unref { hw_frame };
     int err = av_hwframe_get_buffer(encoder_ctx->hw_frames_ctx, hw_frame, 0);
     if (err < 0) {
         throw alvr::AvException("Failed to allocate CUDA frame", err);
     }
-    err = av_hwframe_transfer_data(hw_frame, vk_frame.get(), 0);
-    if (err < 0) {
-        throw alvr::AvException("Failed to transfer Vulkan image to CUDA frame", err);
+    if (hostInput) {
+        hostInput->upload(hw_frame);
+    } else {
+        AVVkFrame* vkf = reinterpret_cast<AVVkFrame*>(vk_frame->data[0]);
+        vkf->sem_value[0]++;
+
+        VkTimelineSemaphoreSubmitInfo timelineInfo = {};
+        timelineInfo.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
+        timelineInfo.signalSemaphoreValueCount = 1;
+        timelineInfo.pSignalSemaphoreValues = &vkf->sem_value[0];
+
+        vk::PipelineStageFlags waitStage = vk::PipelineStageFlagBits::eBottomOfPipe;
+
+        vk::SubmitInfo submitInfo = {};
+        submitInfo.pNext = &timelineInfo;
+        // submitInfo.waitSemaphoreCount = 1;
+        // submitInfo.pWaitSemaphores = &r->GetOutput().semaphore;
+        submitInfo.pWaitDstStageMask = &waitStage;
+        submitInfo.signalSemaphoreCount = 1;
+        submitInfo.pSignalSemaphores = reinterpret_cast<vk::Semaphore*>(&vkf->sem[0]);
+        v_ctx->useQueue([&](auto& queue) { queue.submit(submitInfo); });
+
+        err = av_hwframe_transfer_data(hw_frame, vk_frame.get(), 0);
+        if (err < 0) {
+            throw alvr::AvException("Failed to transfer Vulkan image to CUDA frame", err);
+        }
     }
 
     hw_frame->pict_type = idr ? AV_PICTURE_TYPE_I : AV_PICTURE_TYPE_NONE;
@@ -255,6 +301,4 @@ void alvr::EncodePipelineNvEnc::PushFrame(uint64_t targetTimestampNs, bool idr) 
     if ((err = avcodec_send_frame(encoder_ctx, hw_frame)) < 0) {
         throw alvr::AvException("avcodec_send_frame failed:", err);
     }
-
-    av_frame_unref(hw_frame);
 }
