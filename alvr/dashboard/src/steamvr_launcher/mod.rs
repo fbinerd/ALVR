@@ -140,6 +140,9 @@ impl Launcher {
             if let Err(e) = linux_steamvr::maybe_unwrap_vrcompositor_launcher() {
                 error!("Could not remove a leftover vrcompositor wrapper: {e}");
             }
+            if let Err(e) = linux_steamvr::configure_compositor_mirror() {
+                error!("Could not configure SteamVR's Intel mirror compatibility: {e}");
+            }
             linux_steamvr::linux_hardware_checks();
         }
 
