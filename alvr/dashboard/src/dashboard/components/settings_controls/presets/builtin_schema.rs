@@ -597,7 +597,8 @@ pub fn encoder_gpu_schema() -> PresetSchemaNode {
         "session_settings.video.encoder_config.linux_gpu.encoder_gpu",
         "Automatic (same as render GPU)",
         "GPU that encodes the video. Automatic encodes on the render GPU, as ALVR always did. \
-        Another GPU needs VAAPI (the frame crosses GPUs as a linear dma-buf; not tested yet).",
+        Another GPU receives frames through host memory using NVENC on NVIDIA or VAAPI on Intel/AMD. \
+        This adds a frame transfer whose cost depends on resolution.",
     )
 }
 
