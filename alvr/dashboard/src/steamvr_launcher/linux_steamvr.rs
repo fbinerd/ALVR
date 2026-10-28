@@ -171,19 +171,48 @@ fn render_gpu_environment(adapter: &wgpu::Adapter) -> Vec<(String, String)> {
             set("VK_DRIVER_FILES", &path);
         }
     } else {
-        let ids = format!("{:04x}:{:04x}", info.vendor, info.device);
-        set("DRI_PRIME", &ids);
-        set("MESA_VK_DEVICE_SELECT", &format!("{ids}!"));
-        set("__GLX_VENDOR_LIBRARY_NAME", "mesa");
         let mesa_egl = "/usr/share/glvnd/egl_vendor.d/50_mesa.json";
-        if Path::new(mesa_egl).is_file() {
-            set("__EGL_VENDOR_LIBRARY_FILENAMES", mesa_egl);
-        }
+        variables.extend(mesa_render_gpu_environment(
+            info.vendor,
+            info.device,
+            is_x11_session(),
+            Path::new(mesa_egl).is_file().then_some(mesa_egl),
+        ));
         // MESA_VK_DEVICE_SELECT (with "!") already hides the other GPUs.
         // Limiting VK_DRIVER_FILES to one host ICD as well breaks Proton
         // games (VRChat: no graphics device on Intel), so leave it alone.
     }
     variables
+}
+
+// SteamVR and ALVR render with Vulkan. Forcing Intel's GLX/EGL vendor in
+// NVIDIA-primary X11 also changes Steam's UI and hardware queries, and has
+// crashed the X server inside nvidia_drv.so. Select Intel for Vulkan without
+// changing the desktop's OpenGL/EGL vendor. Keep the validated Wayland path.
+fn mesa_render_gpu_environment(
+    vendor: u32,
+    device: u32,
+    x11: bool,
+    mesa_egl: Option<&str>,
+) -> Vec<(String, String)> {
+    let ids = format!("{vendor:04x}:{device:04x}");
+    let mut variables = vec![("MESA_VK_DEVICE_SELECT".into(), format!("{ids}!"))];
+    if vendor != 0x8086 || !x11 {
+        variables.push(("DRI_PRIME".into(), ids));
+        variables.push(("__GLX_VENDOR_LIBRARY_NAME".into(), "mesa".into()));
+        if let Some(path) = mesa_egl {
+            variables.push(("__EGL_VENDOR_LIBRARY_FILENAMES".into(), path.into()));
+        }
+    }
+    variables
+}
+
+fn is_x11_session() -> bool {
+    match std::env::var("XDG_SESSION_TYPE").as_deref() {
+        Ok("x11") => true,
+        Ok("wayland") => false,
+        _ => std::env::var_os("WAYLAND_DISPLAY").is_none() && std::env::var_os("DISPLAY").is_some(),
+    }
 }
 
 pub fn apply_selected_render_gpu_environment(command: &mut Command) -> bool {
@@ -608,6 +637,12 @@ fn linux_gpu_checks(
             adapter.get_info().driver,
             adapter.get_info().driver_info
         );
+        if adapter.get_info().vendor == 0x8086 && is_x11_session() {
+            info!(
+                "Intel render selection on X11 applies to Vulkan; OpenGL/EGL keep the desktop \
+                default to avoid changing Steam's UI graphics vendor."
+            );
+        }
         warn!("{steamvr_opts}\n{options} {vrmonitor_path_string} %command%");
         warn!("{game_opts}\n{options} %command%");
         return;
@@ -793,7 +828,43 @@ fn probe_libva_encoder_profile(
 
 #[cfg(test)]
 mod gpu_environment_tests {
-    use super::gpu_environment_changes;
+    use super::{gpu_environment_changes, mesa_render_gpu_environment};
+
+    #[test]
+    fn intel_x11_selects_vulkan_without_forcing_steam_gl_vendors() {
+        let selected = mesa_render_gpu_environment(0x8086, 0xa782, true, Some("/egl/mesa.json"));
+        assert_eq!(
+            selected,
+            vec![("MESA_VK_DEVICE_SELECT".into(), "8086:a782!".into())]
+        );
+        // Restart confirmation must also remove overrides inherited from the
+        // previously selected NVIDIA GPU or the old Intel launch environment.
+        let mut current = selected.clone();
+        current.extend(nvidia());
+        current.push((
+            "__EGL_VENDOR_LIBRARY_FILENAMES".into(),
+            "/egl/mesa.json".into(),
+        ));
+        current.push(("DRI_PRIME".into(), "8086:a782".into()));
+        let changes = gpu_environment_changes(&selected, &current);
+        assert_eq!(changes.len(), current.len() - selected.len());
+        assert!(changes.iter().all(|change| change.starts_with("Remove ")));
+        assert!(gpu_environment_changes(&selected, &selected).is_empty());
+    }
+
+    #[test]
+    fn wayland_intel_and_x11_amd_keep_full_render_selection() {
+        for (vendor, x11, ids) in [(0x8086, false, "8086:a782"), (0x1002, true, "1002:a782")] {
+            let selected = mesa_render_gpu_environment(vendor, 0xa782, x11, Some("/egl/mesa.json"));
+            assert!(selected.contains(&("DRI_PRIME".into(), ids.into())));
+            assert!(selected.contains(&("MESA_VK_DEVICE_SELECT".into(), format!("{ids}!"))));
+            assert!(selected.contains(&("__GLX_VENDOR_LIBRARY_NAME".into(), "mesa".into())));
+            assert!(selected.contains(&(
+                "__EGL_VENDOR_LIBRARY_FILENAMES".into(),
+                "/egl/mesa.json".into()
+            )));
+        }
+    }
 
     fn pairs(values: &[(&str, &str)]) -> Vec<(String, String)> {
         values
