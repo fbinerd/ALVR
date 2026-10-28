@@ -11,6 +11,22 @@ use alvr_common::{
 use sysinfo::Process;
 
 pub fn launch_steamvr_with_steam() {
+    if let Some(adapter) = selected_render_gpu_adapter()
+        && adapter.get_info().vendor == 0x8086
+        && is_x11_session()
+    {
+        let Some(script) = steam_script_path() else {
+            error!("Cannot prepare Intel X11 WebHelpers: Steam's steam.sh was not found");
+            return;
+        };
+        let mut steam = Command::new(&script);
+        apply_render_gpu_environment(&mut steam, &adapter);
+        let mut steamvr = Command::new(script);
+        steamvr.arg("steam://rungameid/250820");
+        apply_render_gpu_environment(&mut steamvr, &adapter);
+        super::linux_webhelper::launch(steam, steamvr);
+        return;
+    }
     if running_steam_pids().is_empty()
         && let Some(adapter) = selected_render_gpu_adapter()
     {
@@ -131,7 +147,7 @@ fn running_steam_pids() -> Vec<u32> {
         .collect()
 }
 
-fn steam_script_path() -> Option<std::path::PathBuf> {
+pub(super) fn steam_script_path() -> Option<std::path::PathBuf> {
     let home = std::env::var_os("HOME")?;
     [".steam/root/steam.sh", ".local/share/Steam/steam.sh"]
         .iter()
@@ -187,7 +203,9 @@ fn render_gpu_environment(adapter: &wgpu::Adapter) -> Vec<(String, String)> {
 // SteamVR and ALVR render with Vulkan. Forcing Intel's GLX/EGL vendor in
 // NVIDIA-primary X11 also changes Steam's UI and hardware queries, and has
 // crashed the X server inside nvidia_drv.so. Select Intel for Vulkan without
-// changing the desktop's OpenGL/EGL vendor. Keep the validated Wayland path.
+// changing the desktop's OpenGL/EGL vendor. The 64-bit WebHelpers get Intel
+// GL separately so their VR overlays can share images with Intel Vulkan.
+// Keep the validated Wayland path.
 fn mesa_render_gpu_environment(
     vendor: u32,
     device: u32,
@@ -212,6 +230,12 @@ fn is_x11_session() -> bool {
         Ok("wayland") => false,
         _ => std::env::var_os("WAYLAND_DISPLAY").is_none() && std::env::var_os("DISPLAY").is_some(),
     }
+}
+
+pub fn configure_webhelper_gpu() -> Result<()> {
+    let enabled = is_x11_session()
+        && selected_render_gpu_adapter().is_some_and(|adapter| adapter.get_info().vendor == 0x8086);
+    super::linux_webhelper::configure(enabled)
 }
 
 pub fn apply_selected_render_gpu_environment(command: &mut Command) -> bool {
@@ -639,7 +663,7 @@ fn linux_gpu_checks(
         if adapter.get_info().vendor == 0x8086 && is_x11_session() {
             info!(
                 "Intel render selection on X11 applies to Vulkan; OpenGL/EGL keep the desktop \
-                default to avoid changing Steam's UI graphics vendor."
+                default for Steam startup; its 64-bit WebHelpers select Intel GL separately."
             );
         }
         warn!("{steamvr_opts}\n{options} {vrmonitor_path_string} %command%");

@@ -100,3 +100,15 @@ SteamVR's fallback-mirror setting did not solve it and was cleared.
 - Steam CEF GPU processes crashed during one Intel-selected startup, but the
   user reported a normal interface and VR worked afterward; no separate CEF
   fix was implemented.
+
+## Later Zorin X11 recovery
+
+Applying the full Mesa GL environment to Steam crashed Xorg inside NVIDIA's
+driver. Vulkan-only Intel selection preserved the desktop but left NVIDIA GL
+in Steam's VR menu, producing framebuffer/interop failures. A scoped Intel GL
+environment in the two 64-bit WebHelpers restored the in-headset menu (user
+confirmed); Steam startup keeps its default GL vendor. The Dashboard prepares
+the scripts after Steam's updater runs and restarts only a stale browser before
+launching SteamVR. Wayland remains on its earlier path. Ordinary OpenGL games
+keep their own/desktop GL selection. Separate compositor crashes remain under
+investigation; desktop/menu recovery is not full-session stability proof.

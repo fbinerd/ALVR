@@ -585,7 +585,8 @@ pub fn render_gpu_schema() -> PresetSchemaNode {
         "GPU that SteamVR and the games render on; ALVR's Vulkan device follows it. \
         SteamVR and games pick their GPU from their launch options: with a GPU chosen here, \
         the dashboard prints those launch options when it starts SteamVR. \
-        On X11, an Intel selection applies to Vulkan; OpenGL/EGL keep the desktop default. \
+        On X11, Intel selection applies to Vulkan and the 64-bit Steam WebHelpers; \
+        other OpenGL programs keep the desktop default. \
         Automatic forces nothing; the GPU it shows is the one ALVR's automatic rule takes \
         (the system's choice: the first hardware GPU listed, as ALVR always did).",
     )
