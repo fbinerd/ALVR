@@ -168,23 +168,15 @@ fn apply_render_gpu_environment(command: &mut Command, adapter: &wgpu::Adapter) 
 // GPU requested by ALVR on a hybrid system.
 fn render_gpu_environment(adapter: &wgpu::Adapter) -> Vec<(String, String)> {
     let mut variables = vec![];
-    let mut set = |name: &str, value: &str| {
-        variables.push((name.to_owned(), value.to_owned()));
-    };
     let info = adapter.get_info();
     if is_nvidia_proprietary(&info) {
-        set("__GLX_VENDOR_LIBRARY_NAME", "nvidia");
-        set("__NV_PRIME_RENDER_OFFLOAD", "1");
         // Keep this even when pinning the host ICD. Steam's runtime can
         // rewrite ICD paths; this layer still hides the integrated device.
-        set("__VK_LAYER_NV_optimus", "NVIDIA_only");
         let base = "/usr/share/vulkan/icd.d/nvidia_icd";
         let path = [format!("{base}.json"), format!("{base}.x86_64.json")]
             .into_iter()
             .find(|path| Path::new(path).is_file());
-        if let Some(path) = path {
-            set("VK_DRIVER_FILES", &path);
-        }
+        variables.extend(nvidia_render_gpu_environment(is_x11_session(), path.as_deref()));
     } else {
         let mesa_egl = "/usr/share/glvnd/egl_vendor.d/50_mesa.json";
         variables.extend(mesa_render_gpu_environment(
@@ -196,6 +188,20 @@ fn render_gpu_environment(adapter: &wgpu::Adapter) -> Vec<(String, String)> {
         // MESA_VK_DEVICE_SELECT (with "!") already hides the other GPUs.
         // Limiting VK_DRIVER_FILES to one host ICD as well breaks Proton
         // games (VRChat: no graphics device on Intel), so leave it alone.
+    }
+    variables
+}
+
+// Select NVIDIA Vulkan without changing the desktop GL vendor in the
+// 32-bit Steam client on X11. Keep the existing non-X11 offload policy.
+fn nvidia_render_gpu_environment(x11: bool, icd: Option<&str>) -> Vec<(String, String)> {
+    let mut variables = vec![("__VK_LAYER_NV_optimus".into(), "NVIDIA_only".into())];
+    if let Some(path) = icd {
+        variables.push(("VK_DRIVER_FILES".into(), path.into()));
+    }
+    if !x11 {
+        variables.push(("__GLX_VENDOR_LIBRARY_NAME".into(), "nvidia".into()));
+        variables.push(("__NV_PRIME_RENDER_OFFLOAD".into(), "1".into()));
     }
     variables
 }
@@ -851,7 +857,31 @@ fn probe_libva_encoder_profile(
 
 #[cfg(test)]
 mod gpu_environment_tests {
-    use super::{gpu_environment_changes, mesa_render_gpu_environment};
+    use super::{gpu_environment_changes, mesa_render_gpu_environment, nvidia_render_gpu_environment};
+
+    #[test]
+    fn nvidia_x11_selects_only_vulkan_and_removes_old_gl_overrides() {
+        let selected = nvidia_render_gpu_environment(true, Some("/icd/nvidia.json"));
+        assert_eq!(selected, pairs(&[
+            ("__VK_LAYER_NV_optimus", "NVIDIA_only"),
+            ("VK_DRIVER_FILES", "/icd/nvidia.json"),
+        ]));
+        let mut old = selected.clone();
+        old.extend(pairs(&[("__GLX_VENDOR_LIBRARY_NAME", "nvidia"),
+                           ("__NV_PRIME_RENDER_OFFLOAD", "1")]));
+        let changes = gpu_environment_changes(&selected, &old);
+        assert_eq!(changes.len(), 2);
+        assert!(changes.iter().all(|change| change.starts_with("Remove ")));
+    }
+
+    #[test]
+    fn nvidia_non_x11_keeps_offload_and_handles_missing_icd_path() {
+        let selected = nvidia_render_gpu_environment(false, None);
+        assert!(selected.contains(&("__GLX_VENDOR_LIBRARY_NAME".into(), "nvidia".into())));
+        assert!(selected.contains(&("__NV_PRIME_RENDER_OFFLOAD".into(), "1".into())));
+        assert!(selected.contains(&("__VK_LAYER_NV_optimus".into(), "NVIDIA_only".into())));
+        assert!(!selected.iter().any(|(name, _)| name == "VK_DRIVER_FILES"));
+    }
 
     #[test]
     fn intel_x11_selects_vulkan_without_forcing_steam_gl_vendors() {
