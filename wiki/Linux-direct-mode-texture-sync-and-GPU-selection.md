@@ -461,3 +461,36 @@ Separate GPU additions (committed individually on top of that PR):
 | fix | Compositor-only headless mirror compatibility for Intel render on NVIDIA-primary Wayland |
 | test | NVENC host-transfer/encode checks and Dashboard environment/mirror regressions |
 | docs | Code comment clarifications; these wiki pages |
+
+## Intel render on NVIDIA-primary X11: Steam and WebHelper environments
+
+The October 27 Zorin X11 trial exposed a different failure from the remote
+Wayland mirror issue: starting all of Steam with the full Mesa GLX/EGL
+environment terminated Xorg in NVIDIA's `nvidia_drv.so`. Keeping only
+`MESA_VK_DEVICE_SELECT=8086:a782!` selected Intel Vulkan and preserved the
+desktop, but left Steam's OpenGL VR menu on NVIDIA. The WebHelper then failed
+to create framebuffer objects for Intel Vulkan images, and the in-headset
+menu was absent.
+
+A 64-bit Intel `glxinfo` probe passed without resetting Xorg. Applying
+`DRI_PRIME=8086:a782` and `__GLX_VENDOR_LIBRARY_NAME=mesa` only inside the
+64-bit Steam and SteamVR WebHelper shell launchers recovered texture sharing;
+the user confirmed the in-headset menu returned. The 32-bit Steam startup
+retains its desktop GL vendor. This is evidence for this environment split,
+not proof of which individual variable or client request caused Xorg's fault.
+
+The Dashboard now prepares small conditional sections in the two existing
+shell launchers. Steam startup may restore its script, so the ordinary Steam
+launch path waits for the browser, prepares again after startup, and restarts
+only that browser once if its environment is stale. SteamVR launches after
+the browser advertises the selected Intel Vulkan/GL environment. Preparation
+cancels on a selector change, times out after 120 seconds, and is removed on
+selection of another GPU. The Wayland path is retained. Ordinary OpenGL games
+on X11 still follow their own/desktop GL choice; this does not force every
+OpenGL application onto Intel. Direct/custom server launch is not validated
+by this ordinary-Steam-launch trial.
+
+Desktop and menu recovery do not establish full session stability: separate
+SteamVR compositor crashes were observed during longer X11 trials. No claim
+of sustained 72 fps or complete VR stability is made. Source and live-test
+evidence continues in the host repository's mirror-startup analysis.

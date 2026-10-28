@@ -1,5 +1,7 @@
 #[cfg(target_os = "linux")]
 pub(crate) mod linux_steamvr;
+#[cfg(target_os = "linux")]
+mod linux_webhelper;
 #[cfg(windows)]
 mod windows_steamvr;
 
@@ -155,6 +157,10 @@ impl Launcher {
             }
             if let Err(e) = linux_steamvr::configure_compositor_mirror() {
                 error!("Could not configure SteamVR's Intel mirror compatibility: {e}");
+            }
+            if let Err(e) = linux_steamvr::configure_webhelper_gpu() {
+                error!("Could not configure Intel X11 WebHelpers: {e}");
+                return;
             }
             linux_steamvr::linux_hardware_checks();
         }
