@@ -17,14 +17,15 @@ extern "C" {
 #endif
 
 #define MHL_DEPTH_MAGIC UINT32_C(0x5044484d) /* MHDP */
-#define MHL_DEPTH_VERSION 1u
+#define MHL_DEPTH_VERSION 1u /* Default full colour+depth recording contract. */
+#define MHL_DEPTH_VERSION_DEPTH_ONLY 2u
 #define MHL_DEPTH_EYES 2u
 #define MHL_DEPTH_NO_FD UINT32_MAX
 
 enum MhlDepthSource { MHL_SOURCE_OPENXR_DECLARED=1, MHL_SOURCE_STEREO=2,
     MHL_SOURCE_VULKAN_LAYER=3, MHL_SOURCE_SYNTHETIC=4 };
 enum MhlDepthFlags { MHL_PACKET_VALID=1u, MHL_CLOCK_MONOTONIC=2u,
-    MHL_TRACKING_ALIGNED=4u };
+    MHL_TRACKING_ALIGNED=4u, MHL_DEPTH_ONLY=8u };
 enum MhlDepthSpace { MHL_SPACE_LOCAL_UNALIGNED=0, MHL_SPACE_TRACKING=1 };
 enum MhlDepthTransport { MHL_TRANSPORT_RECORDING=0, MHL_TRANSPORT_VULKAN_OPAQUE_FD=1,
     MHL_TRANSPORT_DMA_BUF=2 };
@@ -128,7 +129,9 @@ static inline float mhl_depth_to_metres(float sample,const MhlDepthEncoding *e) 
  */
 static inline const char *mhl_depth_validate(const MhlDepthPacket *p,size_t available) {
     if(!p || available<sizeof(*p))return "truncated_header";
-    if(p->magic!=MHL_DEPTH_MAGIC || p->version!=MHL_DEPTH_VERSION)return "version";
+    if(p->magic!=MHL_DEPTH_MAGIC || (p->version!=MHL_DEPTH_VERSION && p->version!=MHL_DEPTH_VERSION_DEPTH_ONLY))return "version";
+    int depth_only=p->version==MHL_DEPTH_VERSION_DEPTH_ONLY;
+    if(depth_only!=!!(p->flags&MHL_DEPTH_ONLY))return "version_flags";
     if(p->size<sizeof(*p) || p->size>available || p->size>4096)return "header_size";
     if((p->flags&(MHL_PACKET_VALID|MHL_CLOCK_MONOTONIC))!=(MHL_PACKET_VALID|MHL_CLOCK_MONOTONIC))return "validity_or_clock";
     if(p->eye_count!=2 || !p->source_tag || !p->producer_id)return "identity";
@@ -137,7 +140,7 @@ static inline const char *mhl_depth_validate(const MhlDepthPacket *p,size_t avai
     if(p->pose_space>MHL_SPACE_TRACKING || ((p->flags&MHL_TRACKING_ALIGNED) && p->pose_space!=MHL_SPACE_TRACKING))return "pose_space";
     if(p->transport>MHL_TRANSPORT_DMA_BUF || !p->buffer_size || p->buffer_size>(UINT64_C(1)<<32))return "transport_or_buffer_size";
     if(p->transport!=MHL_TRANSPORT_RECORDING && (p->memory_fd_index!=0 || p->semaphore_fd_index!=1 || !p->timeline_value))return "transport_descriptors";
-    const MhlDepthPlane *planes[4];
+    const MhlDepthPlane *planes[4]={NULL,NULL,NULL,NULL};
     for(unsigned eye=0;eye<2;eye++){
         const MhlDepthEye *e=&p->eyes[eye];
         float norm=0;for(unsigned i=0;i<3;i++)if(!isfinite(e->pose.position[i]))return "position";
@@ -159,12 +162,16 @@ static inline const char *mhl_depth_validate(const MhlDepthPacket *p,size_t avai
         const MhlDepthPlane *eye_planes[2]={&e->depth,&e->colour};
         for(unsigned i=0;i<2;i++){
             const MhlDepthPlane *plane=eye_planes[i];unsigned bpp=i?8:4;
+            if(depth_only && i){
+                if(plane->format||plane->width||plane->height||plane->row_stride||plane->offset||plane->bytes)return "depth_only_colour_plane";
+                continue;
+            }
             if(plane->format!=(i?MHL_CANONICAL_COLOUR_RGBA16F:MHL_CANONICAL_DEPTH_R32F) || plane->width!=sources[i]->rect.width || plane->height!=sources[i]->rect.height || (uint64_t)plane->row_stride<(uint64_t)plane->width*bpp || plane->row_stride%bpp)return "canonical_plane";
             if(plane->offset%bpp || plane->bytes!=(uint64_t)plane->row_stride*plane->height || plane->offset>p->buffer_size || plane->bytes>p->buffer_size-plane->offset)return "plane_bounds";
             planes[eye*2+i]=plane;
         }
     }
-    for(unsigned i=0;i<4;i++)for(unsigned j=i+1;j<4;j++)if(planes[i]->offset<planes[j]->offset+planes[j]->bytes && planes[j]->offset<planes[i]->offset+planes[i]->bytes)return "plane_overlap";
+    for(unsigned i=0;i<4;i++)for(unsigned j=i+1;j<4;j++)if(planes[i]&&planes[j]&&planes[i]->offset<planes[j]->offset+planes[j]->bytes && planes[j]->offset<planes[i]->offset+planes[i]->bytes)return "plane_overlap";
     return NULL;
 }
 
