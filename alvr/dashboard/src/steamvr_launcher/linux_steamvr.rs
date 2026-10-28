@@ -65,9 +65,8 @@ pub fn restart_steam_with_render_gpu() {
 
         // Re-enter the normal launcher so the current ALVR driver is
         // registered even when the confirmation interrupted the Launch action.
-        let launcher = super::LAUNCHER.lock();
-        launcher.ensure_steamvr_shutdown();
-        launcher.launch_steamvr();
+        let mut launcher = super::LAUNCHER.lock();
+        launcher.restart_steamvr();
     });
 }
 
