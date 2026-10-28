@@ -25,6 +25,7 @@ use std::{
 use sysinfo::{ProcessesToUpdate, System};
 
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
+const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 
 // Dropping a Child does not reap it, and a zombie's pid still passes
 // kill(pid, 0), which vrmonitor's single-instance check runs on the last holder
@@ -124,10 +125,22 @@ fn unblock_alvr_driver_within_vrsettings(text: &str) -> Result<String> {
 
 pub struct Launcher {
     _phantom: PhantomData<()>,
+    launch_started: Option<Instant>,
 }
 
 impl Launcher {
-    pub fn launch_steamvr(&self) {
+    pub fn launch_steamvr(&mut self) {
+        // The mutex serializes calls, but Steam's asynchronous startup has no
+        // vrserver yet. Repeated UI requests must not spawn another Steam.
+        if self
+            .launch_started
+            .is_some_and(|started| started.elapsed() < STARTUP_TIMEOUT)
+            && !is_steamvr_running()
+        {
+            debug!("SteamVR launch already requested; waiting for startup");
+            return;
+        }
+
         // The ADB server might be left running because of an unclean termination of SteamVR.
         // Kill it unconditionally to ensure clean state, regardless of current connection mode.
         // Note: this will also kill a system-wide ADB server not started by ALVR.
@@ -176,6 +189,7 @@ impl Launcher {
             return;
         }
 
+        self.launch_started = Some(Instant::now());
         debug!("SteamVR is dead. Launching...");
 
         if data_sources::get_read_only_local_session()
@@ -237,8 +251,9 @@ impl Launcher {
         maybe_kill_steamvr();
     }
 
-    pub fn restart_steamvr(&self) {
+    pub fn restart_steamvr(&mut self) {
         self.ensure_steamvr_shutdown();
+        self.launch_started = None;
         self.launch_steamvr();
     }
 }
@@ -246,4 +261,5 @@ impl Launcher {
 // Singleton with exclusive access
 pub static LAUNCHER: Mutex<Launcher> = Mutex::new(Launcher {
     _phantom: PhantomData,
+    launch_started: None,
 });
