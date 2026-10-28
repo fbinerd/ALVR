@@ -602,15 +602,15 @@ impl eframe::App for Dashboard {
         if let Some((gpu, variables)) = &self.steam_gpu_conflict_popup {
             let mut restart = false;
             let mut cancel = false;
-            egui::Window::new("Steam GPU setting conflicts with ALVR")
+            egui::Window::new("Apply ALVR Render GPU to Steam")
                 .collapsible(false)
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
                 .show(ui.ctx(), |ui| {
                     ui.label(format!("ALVR Render GPU: {gpu}"));
-                    ui.label(format!("Steam was started with: {variables}"));
+                    ui.label(variables);
                     ui.add_space(8.0);
-                    ui.label("Steam passes its startup GPU settings to SteamVR and games. Restarting Steam closes SteamVR and any running Steam games.");
+                    ui.label("SteamVR and games inherit Steam's GPU settings. Without an explicit selection, the GPU can follow the BIOS or desktop default. Restarting Steam applies the selected Render GPU and closes SteamVR and any running Steam games.");
                     ui.horizontal(|ui| {
                         restart = ui.button("Restart Steam on ALVR GPU").clicked();
                         cancel = ui.button("Cancel").clicked();
