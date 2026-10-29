@@ -146,8 +146,17 @@ void payloadCheck(MhlDepthPacket const& p,void const* data,size_t bytes,PlaneWor
     if(!data||bytes!=p.buffer_size||bytes>MaxBytes)throw std::runtime_error("payload size");
     std::array<char const*,4> errors{};
     bool checked=workers.normalize([&](unsigned i){
-        auto const& plane=i%2?p.eyes[i/2].colour:p.eyes[i/2].depth;
-        errors[i]=mhl_depth_validate_plane_pixels(&plane,i%2,data);return errors[i]==nullptr;
+        auto plane=i%2?p.eyes[i/2].colour:p.eyes[i/2].depth;
+        unsigned role=i%2;
+        if(p.version==MHL_DEPTH_VERSION_DEPTH_ONLY){
+            // Both depth planes, split in rows across all four workers.
+            // Odd/one-row images retain every row; never scan absent colour.
+            role=0;plane=p.eyes[i/2].depth;
+            uint32_t begin=uint64_t(plane.height)*(i%2)/2;
+            uint32_t end=uint64_t(plane.height)*((i%2)+1)/2;
+            plane.offset+=uint64_t(begin)*plane.row_stride;plane.height=end-begin;
+        }
+        errors[i]=mhl_depth_validate_plane_pixels(&plane,role,data);return errors[i]==nullptr;
     });
     for(auto error:errors)if(error)throw std::runtime_error(error);
     if(!checked)throw std::runtime_error("payload validation failed");

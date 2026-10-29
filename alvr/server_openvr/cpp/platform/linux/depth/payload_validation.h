@@ -3,9 +3,15 @@
 /* Shared CPU recording and GPU-export boundary validation; packet v1 unchanged. */
 #include "depth_packet.h"
 #include <string.h>
+#include "payload_validation_simd.h"
 /* Pixel scan only: caller must first validate packet/plane bounds. */
 static inline const char *mhl_depth_validate_plane_pixels(const MhlDepthPlane *plane,unsigned role,const void *payload) {
         const unsigned char *base=(const unsigned char *)payload+plane->offset;
+        if(!role){
+            for(uint32_t y=0;y<plane->height;y++)
+                if(mhl_depth_invalid_row(base+(size_t)y*plane->row_stride,plane->width))return "invalid_canonical_depth";
+            return NULL;
+        }
         for(uint32_t y=0;y<plane->height;y++)for(uint32_t x=0;x<plane->width;x++){
             const unsigned char *pixel=base+(size_t)y*plane->row_stride+x*(role?8:4);
             if(role){
@@ -18,11 +24,6 @@ static inline const char *mhl_depth_validate_plane_pixels(const MhlDepthPlane *p
 #else
                 for(unsigned c=0;c<4;c++)if((pixel[2*c+1]&0x7c)==0x7c)return "nonfinite_colour";
 #endif
-            }else{
-                uint32_t bits;memcpy(&bits,pixel,4);
-                // IEEE R32F: all nonnegative finite values sort below +Inf;
-                // negative values (including -0) and NaNs sort above it.
-                if(bits>=UINT32_C(0x7f800000))return "invalid_canonical_depth";
             }
         }
     return NULL;

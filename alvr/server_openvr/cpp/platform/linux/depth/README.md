@@ -106,3 +106,22 @@ late. A forced missing-query interval verifies packets survive without being
 accepted early. The optical-flow constructor is test-only stubbed; predict is
 never called. This is not live acceptance/quality evidence. A matching capture
 layer with record-v4 support is required; do not mix older layer binaries.
+
+### Exact payload scanning acceleration (2026-10-29)
+
+Record4 live testing removed clock rejects/resets but missed first-prediction
+readiness and did not pass object-judder/repeat gates. Do not treat that run as
+a quality success. The next candidate preserves every validation check while
+using runtime AVX2/SSE2 unsigned IEEE-word scans (scalar elsewhere) for R32F.
+Depth-only payload rows use all four existing validator workers; full-v1 colour
+half checks retain their prior semantics. No validation is skipped, no FP math
+or match tolerance changed. Nonnegative finite values/+0 pass; negative values,
+-0, Inf and NaN reject. Vector loads stay within each row, excluding padding.
+
+Offline:1,134,184 reference-equivalent row cases in each native/SSE2/scalar and
+sanitized build;156 actual invalid producer payloads across both eyes/odd/one-row
+partitions refused before export, followed by one byte-exact valid image. Native
+RTX3060 ABBA64-image transport checks remain exact; validation mean1.50/1.36ms
+before vs.55/.61ms after. This timing isolates the CPU export-boundary scan and
+is not a live packet-coverage or quality claim. Capture/transport lifetime and
+the first-generated-frame attachment cutoff remain unchanged.
