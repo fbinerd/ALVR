@@ -6,6 +6,7 @@
 #include "native_motion_recording_metrics.hpp"
 #include "platform/linux/depth/DepthPacket.h"
 #include "platform/linux/motion/StereoDepth.hpp"
+#include "platform/linux/motion/PicturePoseClock.hpp"
 #include <deque>
 #include <numeric>
 
@@ -189,6 +190,49 @@ int main(int argc,char** argv) {
     if(testMode!=7&&testMode!=9)throw std::runtime_error("DEPTH_MODE must be 7 or 9");
     unsigned frameDivisor=std::getenv("DEPTH_DIVISOR")?std::stoul(std::getenv("DEPTH_DIVISOR")):2;
     if(frameDivisor<2||frameDivisor>3)throw std::runtime_error("DEPTH_DIVISOR must be 2 or 3");
+    // Test-only clock fault injection; scoring and synthesis stay unchanged.
+    // Keep an identical prefix in all three cases to leave recorded future
+    // samples available for the deliberately newer rotation-only labels.
+    std::string stampTest=std::getenv("DEPTH_PICTURE_STAMP_TEST")?std::getenv("DEPTH_PICTURE_STAMP_TEST"):"";
+    if(!stampTest.empty()&&stampTest!="reference"&&stampTest!="legacy"&&stampTest!="rebased")
+        throw std::runtime_error("DEPTH_PICTURE_STAMP_TEST must be reference, legacy or rebased");
+    if(!stampTest.empty()&&testMode!=7)throw std::runtime_error("Picture stamp test requires mode 7");
+    size_t limit=frames.size();
+    if(!stampTest.empty())while(limit && frames[limit-1].packet.display_time_ns+50'000'000>frames.back().packet.display_time_ns)--limit;
+    auto headPosition=[&](uint64_t time){
+        std::array<double,3> result{};
+        auto next=std::lower_bound(frames.begin(),frames.end(),time,[](Frame const& f,uint64_t t){return f.packet.display_time_ns<t;});
+        if(next==frames.end() || (next==frames.begin()&&next->packet.display_time_ns!=time))throw std::runtime_error("Clock test outside recorded history");
+        auto prev=next->packet.display_time_ns==time?next:next-1;
+        double weight=prev==next?0:double(time-prev->packet.display_time_ns)/double(next->packet.display_time_ns-prev->packet.display_time_ns);
+        for(unsigned i=0;i<3;++i)for(unsigned eye=0;eye<2;++eye)
+            result[i]+=.5*((1-weight)*prev->packet.eyes[eye].pose.position[i]+weight*next->packet.eyes[eye].pose.position[i]);
+        return result;
+    };
+    auto transformFor=[&](size_t source,size_t destination,bool translation,bool history){
+        auto out=between(frames[source].packet,frames[destination].packet,translation);
+        if(!translation||stampTest.empty()||stampTest=="reference")return out;
+        uint64_t sourceTime=frames[source].packet.display_time_ns;
+        uint64_t targetTime=frames[destination].packet.display_time_ns;
+        auto delay=[](size_t index){return 9'000'000ull+(index%9)*4'629'630ull;};
+        uint64_t outputSource=sourceTime+delay(source);
+        uint64_t outputTarget=outputSource+(targetTime-sourceTime);
+        uint64_t geometrySource=sourceTime,geometryTarget=targetTime;
+        if(stampTest=="legacy"){
+            geometrySource=outputSource;
+            geometryTarget=history?targetTime+delay(destination):outputTarget;
+        }else if(!history){
+            auto mapped=alvr::motion::pictureTargetTime(sourceTime,outputSource,outputTarget);
+            if(!mapped)throw std::runtime_error("Clock test target rejected");
+            geometryTarget=*mapped;
+        }
+        auto a=headPosition(geometrySource),b=headPosition(geometryTarget);
+        Quaternion moved{b[0]-a[0],b[1]-a[1],b[2]-a[2],0};
+        auto q=orientation(frames[source].packet);Quaternion inverse{-q[0],-q[1],-q[2],q[3]};
+        auto local=multiply(multiply(inverse,moved),q);
+        for(unsigned i=0;i<3;++i)out.translation[i]=float(local[i]);
+        return out;
+    };
     for(unsigned variant=0;variant<(stereo?4u:3u);variant++){
         // DEPTH_VARIANTS=2,3 runs only those variants (quick A/B iterations;
         // the no-depth baseline does not change with depth-path edits).
@@ -207,7 +251,7 @@ int main(int argc,char** argv) {
         size_t latest=0;unsigned targets=0;double prepareMs=0,worst=-1,worstEdge=-1;Totals total;
         auto evaluate=[&](size_t i){
             auto const& f=frames[i];uint64_t clock=f.packet.display_time_ns;
-            auto transform=between(frames[latest].packet,f.packet,variant>=2);
+            auto transform=transformFor(latest,i,variant>=2,false);
             if(!motion.predict(gpu.image,gpu.view,gpu.layout,clock,{},clock,&transform))throw std::runtime_error("Production gap-fill rejected target");
             auto image=gpu.transfer(nullptr);auto timing=motion.lastPredictionTiming();auto mask=masks(f,frames[latest],size,ds);auto s=score(image,f,mask);total.add(s);targets++;
             csv<<std::setprecision(12)<<name<<','<<i<<','<<f.packet.frame_id<<','<<clock<<','<<s.mae()<<','<<s.psnr()<<','<<s.bandMae()<<','<<s.bandPixels<<','<<s.shadowPixels<<','<<s.shadowEligible<<','<<prepareMs<<','<<timing.flowMs<<','<<timing.warpMs<<','<<timing.opticalGpuMs<<','<<timing.warpGpuMs<<'\n';
@@ -218,14 +262,14 @@ int main(int argc,char** argv) {
             if(std::getenv("DEPTH_DUMP_FRAMES"))save("frame_"+std::to_string(i));
             if(s.mae()>worst){worst=s.mae();save("worst_overall");}if(s.bandMae()>worstEdge){worstEdge=s.bandMae();save("worst_edge");}
         };
-        for(size_t i=0;i<frames.size();i++){
+        for(size_t i=0;i<limit;i++){
             auto const& f=frames[i];uint64_t clock=f.packet.display_time_ns;
             if(i%frameDivisor==0){
                 motion.waitIdle();gpu.transfer(&f.colour);
                 bool queuedStereo=variant==3 && std::getenv("DEPTH_STEREO_QUEUED");
                 if(variant==3&&!queuedStereo){estimator->estimate(gpu.image,gpu.view,gpu.layout,{},{},vk::ImageLayout::eGeneral,stereoParams);}
                 else if(variant)depth.transfer(&f.depth);
-                auto transform=between(frames[latest].packet,f.packet,variant>=2);
+                auto transform=transformFor(latest,i,variant>=2,true);
                 Motion::Depth input{depth.image,depth.layout,{ds.width(),ds.height}};
                 Motion::Depth stereoInput{variant==3?estimator->internalDepthImage():vk::Image{},vk::ImageLayout::eGeneral,variant==3?estimator->depthExtent():vk::Extent2D{}};
                 motion.capture(gpu.image,gpu.layout,clock,clock,&transform,variant==3?(queuedStereo?nullptr:&stereoInput):variant?&input:nullptr);

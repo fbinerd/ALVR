@@ -117,6 +117,28 @@ std::optional<PoseHistory::TrackingHistoryFrame> PoseHistory::GetLatestPose() co
     return m_poseBuffer.back();
 }
 
+std::optional<std::array<float, 3>> PoseHistory::GetPositionInterpolated(uint64_t timestampNs) const {
+    std::unique_lock<std::mutex> lock(m_mutex);
+    TrackingHistoryFrame const* lower = nullptr;
+    TrackingHistoryFrame const* upper = nullptr;
+    for (auto const& frame : m_poseBuffer) {
+        auto t = frame.targetTimestampNs;
+        if (t <= timestampNs && (!lower || t > lower->targetTimestampNs)) lower = &frame;
+        if (t >= timestampNs && (!upper || t < upper->targetTimestampNs)) upper = &frame;
+    }
+    if (!lower || !upper || upper->targetTimestampNs - lower->targetTimestampNs > 25'000'000)
+        return {};
+    auto span = upper->targetTimestampNs - lower->targetTimestampNs;
+    double weight = span ? double(timestampNs - lower->targetTimestampNs) / double(span) : 0;
+    std::array<float, 3> position {};
+    for (unsigned i = 0; i < 3; ++i) {
+        double a = lower->motion.pose.position[i], b = upper->motion.pose.position[i];
+        if (!std::isfinite(a) || !std::isfinite(b)) return {};
+        position[i] = float(a + weight * (b - a));
+    }
+    return position;
+}
+
 void PoseHistory::SetTransform(const vr::HmdMatrix34_t& transform) {
     std::unique_lock<std::mutex> lock(m_mutex);
     m_transform = transform;

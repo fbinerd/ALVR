@@ -148,3 +148,38 @@ occurs before that held interval completes. A watchdog bounds the test's hold;
 it is not present in production. Native before/after median acquisition CPU time
 has only a modest reduction; live cadence benefit remains to be established.
 No NativeMotion/Encoder/shader/peer branch edits.
+
+### Experimental picture-pose timeline (mode 7 only)
+
+`~/.config/alvr/diag_motion_picture_pose` containing `1` opts in at SteamVR
+startup. Absent/0 and every other native-motion mode preserve the legacy path.
+This experiment requires a single unwarped layer; it does not change the normal
+rotational wire-tag matcher, output stamps, present clock, canonical depth,
+matching guards, shaders or source image lifetime.
+
+An output tag selected by rotation is not an actual picture pose during lateral
+motion. The job therefore independently retains the submitted head pose,
+converted back to raw tracking space, and its unique full-pose history tag.
+History alignment uses actual picture geometry. For a generated slot, only the
+measured tracking-tag duration `outputTarget - outputSource` is applied to the
+actual picture tag. Position is interpolated within a measured tracking bracket
+of at most 25 ms; no extrapolation, endpoint clamping or runtime-clock relabeling.
+The target packet tag and target orientation retain the existing output path.
+Missing/ambiguous picture tags or missing brackets give zero positional warp
+for that slot, while rotation continues. Horizons beyond 100 ms fail closed.
+This deliberately preserves the picture timeline's latency; it does not claim
+to late-warp every real picture to the newest physical head pose.
+
+Five-second `Motion picture pose` logs count actual-geometry frames, mapped
+translation queries, missing queries and untagged pictures; they also report
+legacy-label position error and picture/output tags. The research controller
+`depth_abc_trial.py --picture-pose` snapshots/restores this flag and applies it
+to all A/B/C arms. Live quality is still a separate gate.
+
+Offline tests: `tests/linux_motion_picture_pose.cpp` uses the production history
+and duration mapping for 4095 variable-delay/interpolated cases, strict negative
+queries and the unchanged rotational wire matcher. The recording checker option
+`DEPTH_PICTURE_STAMP_TEST=reference|legacy|rebased` injects 9–46 ms labels into
+identical retained colour/depth, with a common prefix leaving recorded future
+padding. Scoring is unchanged. The rebased case must recover reference pixels;
+it is not proof of live cadence or of correct timing in every application.

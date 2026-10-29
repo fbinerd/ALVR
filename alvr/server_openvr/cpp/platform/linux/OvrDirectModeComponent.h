@@ -113,8 +113,8 @@ private:
     SubmitLayerPerEye_t m_submitLayers[MAX_LAYERS][2];
     vr::HmdQuaternion_t m_prevFramePoseRotation;
     vr::HmdQuaternion_t m_framePoseRotation;
-    // Head position the frame was rendered with (metres), for positional
-    // correction in frame synthesis.
+    // Legacy tracking position selected by the rotational wire-tag matcher.
+    // The opt-in motion picture geometry below is captured independently.
     std::array<float, 3> m_framePosePosition {};
     uint64_t m_depthDisplayMonotonicNs=0, m_depthPoseTargetNs=0;
     uint64_t m_targetTimestampNs;
@@ -155,9 +155,14 @@ private:
         // m_framePoseRotation itself because the compositor thread has
         // overwritten it by then.
         vr::HmdQuaternion_t renderOrientation;
-        // Head position the layer was rendered with. ALVR's rewarp is
-        // rotation only, so the composed picture keeps this position.
+        // Legacy rotation-matched tracking label; it can differ from the
+        // actual submitted picture position during pure lateral motion.
         std::array<float, 3> renderPosition {};
+        // Opt-in motion geometry, independently of the monotonic video stamp.
+        std::array<float, 3> picturePosition {};
+        vr::HmdQuaternion_t pictureOrientation {1, 0, 0, 0};
+        uint64_t picturePoseTag = 0;
+        bool picturePoseValid = false;
         // Local eye geometry snapshot for the optional game-depth query.
         FfiViewParams depthViews[2] {};
         bool depthViewsValid = false;

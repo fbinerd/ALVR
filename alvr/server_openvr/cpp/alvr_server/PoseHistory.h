@@ -4,6 +4,7 @@
 #include "openvr_driver_wrap.h"
 
 #include <list>
+#include <array>
 #include <mutex>
 #include <optional>
 
@@ -25,6 +26,9 @@ public:
     std::optional<TrackingHistoryFrame> GetPoseAt(uint64_t timestampNs) const;
     // The held pose whose target timestamp is closest to timestampNs.
     std::optional<TrackingHistoryFrame> GetPoseNearest(uint64_t timestampNs) const;
+    // Translation-only picture-timeline query. Interpolate inside a measured
+    // tracking bracket of at most 25 ms; never extrapolate or clamp endpoints.
+    std::optional<std::array<float, 3>> GetPositionInterpolated(uint64_t timestampNs) const;
     // The newest pose held. Reprojection targets it, and a reprojected frame is
     // stamped with its timestamp, so the target has to be a real buffer entry
     // for that stamp to resolve on the Rust side.

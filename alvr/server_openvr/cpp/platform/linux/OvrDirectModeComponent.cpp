@@ -12,6 +12,7 @@
 #include "OvrDirectModeComponent.h"
 #include "SteamVrSync.h"
 #include "depth/RuntimeClockProbe.hpp"
+#include "motion/PicturePoseClock.hpp"
 
 #include "alvr_server/Logger.h"
 #include "alvr_server/driverlog.h"
@@ -199,6 +200,18 @@ static bool BuildMotionRotation(const vr::HmdQuaternion_t& source,
     return true;
 }
 
+// Experimental separation of picture geometry and video stamps. Restart-only
+// and off by default; no effect on mode 0 or the existing rotational matcher.
+static bool MotionPicturePoseEnabled() {
+    static bool const enabled = [] {
+        auto home = std::getenv("HOME");
+        int value = 0;
+        if (home) std::ifstream(std::string(home) + "/.config/alvr/diag_motion_picture_pose") >> value;
+        return value == 1 && alvr::motion::nativeMotionMode() == 7;
+    }();
+    return enabled;
+}
+
 void OvrDirectModeComponent::SetViewParams(const FfiViewParams params[2]) {
     std::unique_lock<std::mutex> lock(m_viewParamsMutex);
     m_viewParams[0] = params[0];
@@ -285,6 +298,20 @@ void OvrDirectModeComponent::EncodeWorkerLoop() {
     std::chrono::steady_clock::time_point heldSendAt {};
     vr::HmdQuaternion_t lastMotionOrientation {1,0,0,0};
     std::array<float, 3> lastMotionPosition {};
+    bool lastPicturePoseUsed = false;
+    uint64_t lastPicturePoseTag = 0;
+    uint64_t pictureQueries = 0, pictureMissing = 0, pictureFrames = 0, pictureUntagged = 0;
+    auto pictureReportAt = std::chrono::steady_clock::now();
+    auto targetPosition = [&](uint64_t outputTarget, std::array<float, 3> legacy) {
+        if (!lastPicturePoseUsed) return legacy;
+        auto target = alvr::motion::pictureTargetTime(lastPicturePoseTag, lastRealStamp, outputTarget);
+        auto position = target ? m_poseHistory->GetPositionInterpolated(*target) : std::nullopt;
+        if (position) { ++pictureQueries; return *position; }
+        ++pictureMissing;
+        // Missing geometry is not permission to mix the latest tracking pose
+        // into an older picture. Keep rotation and zero only the translation.
+        return lastMotionPosition;
+    };
     bool motionPoseValid = false, motionGenerationValid = false;
     uint64_t motionGeneration = 0;
     auto tryFill = [&](bool lastChance) -> bool {
@@ -328,8 +355,10 @@ void OvrDirectModeComponent::EncodeWorkerLoop() {
                 { std::unique_lock<std::mutex> lock(m_viewParamsMutex);
                   if (!m_viewParamsValid || !motionPoseValid) return false;
                   views[0]=m_viewParams[0]; views[1]=m_viewParams[1]; }
+                auto position = targetPosition(pose->targetTimestampNs,
+                    {pose->motion.pose.position[0], pose->motion.pose.position[1], pose->motion.pose.position[2]});
                 if (!BuildMotionRotation(lastMotionOrientation,pose->motion.pose.orientation,views,rotation,
-                        lastMotionPosition.data(),pose->motion.pose.position)) return false;
+                        lastMotionPosition.data(),position.data())) return false;
             }
             if (m_encoderReady && enc.fill(pose->targetTimestampNs, slotClockNs, separateRotation?&rotation:nullptr)) {
                 lastStamp = pose->targetTimestampNs;
@@ -599,14 +628,19 @@ void OvrDirectModeComponent::EncodeWorkerLoop() {
                                             .count();
             alvr::motion::NativeMotion::Rotation historyRotation;
             bool validHistoryRotation=false;
+            bool const picturePoseUsed = MotionPicturePoseEnabled() && separateRotation && !interpolate
+                && job.picturePoseValid && !warpParams.enabled && job.layers.size() == 1;
+            auto const& motionPosition = picturePoseUsed ? job.picturePosition : job.renderPosition;
+            auto motionOrientation = picturePoseUsed ? job.pictureOrientation : stampOrientation;
+            if (picturePoseUsed != lastPicturePoseUsed) motionPoseValid = false;
             if (separateRotation) {
                 FfiViewParams views[2];
                 { std::unique_lock<std::mutex> lock(m_viewParamsMutex);
                   views[0]=m_viewParams[0]; views[1]=m_viewParams[1];
                   if (m_viewParamsValid) {
-                    FfiQuat destination {float(stampOrientation.x),float(stampOrientation.y),float(stampOrientation.z),float(stampOrientation.w)};
-                    validHistoryRotation=BuildMotionRotation(motionPoseValid?lastMotionOrientation:stampOrientation,destination,views,historyRotation,
-                        motionPoseValid?lastMotionPosition.data():job.renderPosition.data(),job.renderPosition.data());
+                    FfiQuat destination {float(motionOrientation.x),float(motionOrientation.y),float(motionOrientation.z),float(motionOrientation.w)};
+                    validHistoryRotation=BuildMotionRotation(motionPoseValid?lastMotionOrientation:motionOrientation,destination,views,historyRotation,
+                        motionPoseValid?lastMotionPosition.data():motionPosition.data(),motionPosition.data());
                     if (validHistoryRotation) {
                         // Stereo depth geometry: the composed picture's tangents
                         // and the eye separation from the view poses.
@@ -670,8 +704,21 @@ void OvrDirectModeComponent::EncodeWorkerLoop() {
                 presentClockNs, validHistoryRotation?&historyRotation:nullptr,
                 !interpolate
             );
-            lastMotionOrientation=stampOrientation;
-            lastMotionPosition=job.renderPosition;
+            lastMotionOrientation=motionOrientation;
+            lastMotionPosition=motionPosition;
+            lastPicturePoseUsed=picturePoseUsed;
+            lastPicturePoseTag=picturePoseUsed ? job.picturePoseTag : 0;
+            if (picturePoseUsed) { ++pictureFrames; pictureUntagged += !job.picturePoseTag; }
+            if (MotionPicturePoseEnabled() && std::chrono::steady_clock::now() >= pictureReportAt) {
+                double positionError=0;
+                for (unsigned i=0;i<3;++i) positionError+=std::pow(motionPosition[i]-job.renderPosition[i],2);
+                Info("Motion picture pose frames=%llu queries=%llu missing=%llu untagged=%llu label_error_mm=%.6f picture_tag=%llu output_tag=%llu",
+                    (unsigned long long)pictureFrames, (unsigned long long)pictureQueries,
+                    (unsigned long long)pictureMissing, (unsigned long long)pictureUntagged,
+                    std::sqrt(positionError)*1000, (unsigned long long)lastPicturePoseTag,
+                    (unsigned long long)stampTimestampNs);
+                pictureReportAt=std::chrono::steady_clock::now()+std::chrono::seconds(5);
+            }
             motionPoseValid=validHistoryRotation;
             MarkRead(frame);
             if (interpolate) {
@@ -1070,7 +1117,7 @@ void OvrDirectModeComponent::SubmitLayer(const SubmitLayerPerEye_t (&perEye)[2])
     }
     if (m_submitLayer == 0) {
         auto depthMode=mhl::depth::runtimeDepthMode();
-        auto depthPose = (depthMode==1||depthMode==2)?m_poseHistory->GetUniqueDepthPoseMatch(*pPose):std::nullopt;
+        auto depthPose = (depthMode==1||depthMode==2||MotionPicturePoseEnabled())?m_poseHistory->GetUniqueDepthPoseMatch(*pPose):std::nullopt;
         m_depthPoseTargetNs=depthPose?depthPose->targetTimestampNs:0;
         alvr::depth::observeRuntimeClock(m_targetTimestampNs, ownerPid, perEye[0], m_framePosePosition, entryNs, depthPose?depthPose->targetTimestampNs:0);
     }
@@ -1199,6 +1246,15 @@ void OvrDirectModeComponent::Present(vr::SharedTextureHandle_t syncTexture) {
     job.targetTimestampNs = m_targetTimestampNs;
     job.renderOrientation = m_framePoseRotation;
     job.renderPosition = m_framePosePosition;
+    if (MotionPicturePoseEnabled()) {
+        auto raw=m_poseHistory->TrackingFromSubmitted(m_submitLayers[0][0].mHmdPose);
+        job.picturePoseValid=true;
+        for (auto const& row : raw.m) for (float value : row)
+            job.picturePoseValid=job.picturePoseValid && std::isfinite(value);
+        job.pictureOrientation=vrmath::quaternionFromRotationMatrix(raw);
+        for (unsigned i=0;i<3;++i) job.picturePosition[i]=raw.m[i][3];
+        job.picturePoseTag=m_depthPoseTargetNs;
+    }
     {
         std::unique_lock<std::mutex> lock(m_viewParamsMutex);
         job.depthViews[0] = m_viewParams[0];
