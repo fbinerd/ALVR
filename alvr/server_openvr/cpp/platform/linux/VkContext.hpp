@@ -34,6 +34,7 @@
 #include "alvr_server/Logger.h"
 #include "alvr_server/Settings.h"
 #include "alvr_server/bindings.h"
+#include "GpuDiag.h"
 
 extern "C" {
 #include <libavutil/log.h>
@@ -214,6 +215,21 @@ private:
         else if (devProps.properties.vendorID == 0x10de)
             meta.vendor = Vendor::Nvidia;
 
+        // GPU selector port from codex/mesa-v3-cross-gpu-nvenc-pr3425 (4e2c15b2, 37542b1e;
+        // diagnostics only): which driver drives the device, for example NVIDIA's
+        // proprietary driver or Mesa's NVK on the same GPU.
+        auto driverProps = physDev
+                               .getProperties2<
+                                   vk::PhysicalDeviceProperties2,
+                                   vk::PhysicalDeviceDriverProperties>()
+                               .get<vk::PhysicalDeviceDriverProperties>();
+        Info(
+            "Vulkan render device: %s, driver %s (%s)",
+            devProps.properties.deviceName.data(),
+            driverProps.driverName.data(),
+            driverProps.driverInfo.data()
+        );
+
         dispatch = { instance, vkGetInstanceProcAddr };
     }
 
@@ -248,6 +264,19 @@ public:
         auto physDevs = instance.enumeratePhysicalDevices();
 
         physDev = selectPhysicalDevice(physDevs);
+        {
+            // GPU selector port from codex/mesa-v3-cross-gpu-nvenc-pr3425 (4e2c15b2, 37542b1e;
+            // diagnostics only): every device and the one the selector took.
+            size_t chosen = 0;
+            for (size_t i = 0; i < physDevs.size(); ++i)
+                if (physDevs[i] == physDev)
+                    chosen = i;
+            alvr::gpudiag::logDevices(
+                physDevs,
+                chosen,
+                "GPU selector: ALVR_VULKAN_DEVICE, Render GPU setting, else the system's order"
+            );
+        }
         //    for (auto dev : physDevs) {
         //        vk::PhysicalDeviceVulkan11Properties props11{};
         //        vk::PhysicalDeviceProperties2 props {

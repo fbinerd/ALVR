@@ -9,6 +9,7 @@
 #include <type_traits>
 
 #include "EncodePipeline.h"
+#include "GpuDiag.h"
 #include "Renderer.hpp"
 #include "motion/NativeMotion.hpp"
 #include "depth/ProductionDepthSource.hpp"
@@ -224,6 +225,7 @@ private:
     std::unique_ptr<EncodePipeline> encoder;
     std::unique_ptr<VkFrame> frame;
     bool encoderMissingLogged = false;
+    bool timelineImportFailureLogged = false;
     IDRScheduler idrScheduler;
 
     // Whether the current pass chain ends in a shader carrying the warp fold,
@@ -525,6 +527,15 @@ public:
 
     void initEncoding() {
         Info("Using device path %s", target.devicePath.c_str());
+        // GPU selector port from codex/mesa-v3-cross-gpu-nvenc-pr3425 (4e2c15b2, 37542b1e;
+        // diagnostics only).
+        InfoToDriver(
+            "[gpu-diag] encoder node (GPU selector): %s, backend %d, %s",
+            alvr::gpudiag::describeNode(target.devicePath).c_str(),
+            (int)target.backend,
+            target.crossDevice ? "on a DIFFERENT GPU than the render device (host-memory hand-over)"
+                               : "on the render device"
+        );
 
         // av_log_set_level(AV_LOG_DEBUG);
 
@@ -570,6 +581,7 @@ public:
             renderer.reset();
         }
         encoderMissingLogged = false;
+        timelineImportFailureLogged = false;
     }
 
     // Waits until SteamVR's timeline semaphore for a texture reaches value,
@@ -585,10 +597,28 @@ public:
     // imports. Tested on NVIDIA; RADV and ANV implement opaque-fd timeline
     // import.
     bool waitTimeline(u64 handle, std::function<int()> const& dupFd, u64 value, u64 timeoutNs) {
+        // GPU selector port from codex/mesa-v3-cross-gpu-nvenc-pr3425 (4e2c15b2, 37542b1e;
+        // only the log): say once, in the SteamVR log, that SteamVR and ALVR are on
+        // different GPUs, the usual reason a SteamVR timeline cannot be imported.
+        auto reportFailure = [&](char const* stage, char const* detail) {
+            if (!timelineImportFailureLogged) {
+                Warn(
+                    "[gpu-diag] SteamVR timeline %llx failed at %s on ALVR render GPU %s: %s. "
+                    "SteamVR and ALVR must use the same GPU and Vulkan driver; restart Steam "
+                    "from the Dashboard to apply Render GPU.",
+                    (unsigned long long)handle,
+                    stage,
+                    vkCtx.physDev.getProperties().deviceName.data(),
+                    detail
+                );
+                timelineImportFailureLogged = true;
+            }
+        };
         auto it = timelines.find(handle);
         if (it == timelines.end()) {
             int fd = dupFd();
             if (fd < 0) {
+                reportFailure("SteamVR IPC", "no semaphore file descriptor received");
                 return false;
             }
             vk::SemaphoreTypeCreateInfo typeInfo {
@@ -601,8 +631,9 @@ public:
                 .handleType = vk::ExternalSemaphoreHandleTypeFlagBits::eOpaqueFd,
                 .fd = fd,
             };
-            if (vkCtx.dev.importSemaphoreFdKHR(&importInfo, vkCtx.dispatch)
-                != vk::Result::eSuccess) {
+            auto const importResult = vkCtx.dev.importSemaphoreFdKHR(&importInfo, vkCtx.dispatch);
+            if (importResult != vk::Result::eSuccess) {
+                reportFailure("vkImportSemaphoreFdKHR", vk::to_string(importResult).c_str());
                 close(fd);
                 vkCtx.dev.destroy(sem);
                 return false;

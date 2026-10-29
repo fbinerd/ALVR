@@ -9,6 +9,7 @@
 #include <iostream>
 #include <unistd.h>
 
+#include "GpuDiag.h"
 #include "OvrDirectModeComponent.h"
 #include "SteamVrSync.h"
 #include "depth/RuntimeClockProbe.hpp"
@@ -908,6 +909,19 @@ void OvrDirectModeComponent::CreateSwapTextureSet(
 
         processResource->fds[i] = fd;
         processResource->sharedHandles[i] = myHandle;
+        if (i == 0) {
+            // GPU selector port from codex/mesa-v3-cross-gpu-nvenc-pr3425 (4e2c15b2, 37542b1e;
+            // diagnostics only). The texture set lives on ALVR's GPU;
+            // vrcompositor must import it on the same GPU.
+            static bool compositorLogged = false;
+            if (!compositorLogged) {
+                compositorLogged = true;
+                alvr::gpudiag::logCompositor();
+            }
+            InfoToDriver(
+                "[gpu-diag] shared texture set for pid %d created and fd received", (int)unPid
+            );
+        }
 
         m_handleMap.insert(
             std::make_pair(processResource->sharedHandles[i], std::make_pair(processResource, i))
