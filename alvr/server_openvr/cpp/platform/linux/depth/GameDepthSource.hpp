@@ -18,7 +18,9 @@ public:
         std::weak_ptr<mhl::depth::Receiver> weak=receiver;
         encoder.setDepthSource([weak,query=std::move(query)](uint64_t timestamp)->std::optional<Depth>{
             auto owner=weak.lock();if(!owner)return {};
-            auto expected=query(timestamp);mhl::depth::Query q=expected.value_or(mhl::depth::Query{});
+            auto expected=query(timestamp);
+            if(!expected){owner->pollIngress();return {};}
+            mhl::depth::Query q=*expected;
             // Never allow a replay's unaligned-space exemption into the driver.
             q.requireTrackingAligned=true;q.poseSpace=MHL_SPACE_TRACKING;
             if(q.targetTimestampNs!=timestamp)q.clockMapped=false;

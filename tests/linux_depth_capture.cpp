@@ -58,8 +58,9 @@ struct EncoderHook {
 };
 int main(int argc,char** argv){signal(SIGPIPE,SIG_IGN);pid_t producer=-1;int control=-1;try{
     check(argc==3,"Usage: depth_capture_test ONLINE_TEST_EXECUTABLE NEW_OUTPUT");fs::path root=fs::absolute(argv[2]);check(!fs::exists(root),"fresh output required");fs::create_directories(root);
-    bool poseMapped=getenv("MHL_DEPTH_CAPTURE_V3")!=nullptr;
-    auto now=ns();Calibration c{};if(poseMapped)c.version=3;c.producerId=42;c.referenceSpace=84;c.monotonicAnchor=now+1000000000;c.targetAnchor=1000000000;c.validFrom=now;c.validUntil=now+60000000000ull;c.uncertaintyNs=100;
+    bool exactFrames=getenv("MHL_DEPTH_TEST_FRAME_V4")!=nullptr;
+    bool poseMapped=getenv("MHL_DEPTH_CAPTURE_V3")!=nullptr||exactFrames;
+    auto now=ns();Calibration c{};if(poseMapped)c.version=exactFrames?4:3;c.producerId=42;c.referenceSpace=84;c.monotonicAnchor=now+1000000000;c.targetAnchor=exactFrames?c.monotonicAnchor:1000000000;c.validFrom=now;c.validUntil=now+60000000000ull;c.uncertaintyNs=100;
     auto cp=(root/"depth_calibration").string(),socket=(root/"depth_receiver.sock").string();std::ofstream(cp,std::ios::binary).write((char*)&c,sizeof(c));chmod(cp.c_str(),0600);
     alvr::VkContext ctx(std::vector<uint8_t>{});check(ctx.physDev.getProperties().vendorID==0x8086,"Intel required");
     {
@@ -74,16 +75,39 @@ int main(int argc,char** argv){signal(SIGPIPE,SIG_IGN);pid_t producer=-1;int con
         alvr::motion::NativeMotion capture(ctx,{32,16},vk::Format::eR8G8B8A8Unorm);capture.setGapFill(true);GpuImage colour(ctx);
         int fd[2];check(pipe(fd)==0,"control pipe");posix_spawn_file_actions_t actions;posix_spawn_file_actions_init(&actions);posix_spawn_file_actions_adddup2(&actions,fd[0],0);posix_spawn_file_actions_addclose(&actions,fd[1]);
         std::string exe=fs::absolute(argv[1]),gpu="Intel";char* args[]={exe.data(),(char*)"--producer",cp.data(),gpu.data(),socket.data(),nullptr};check(posix_spawn(&producer,exe.c_str(),&actions,nullptr,args,environ)==0,"spawn");posix_spawn_file_actions_destroy(&actions);close(fd[0]);control=fd[1];
-        unsigned deferredAttachments=0;alvr::depth::DeferredDepthSource deferred;
+        unsigned deferredAttachments=0;bool heldWithoutAssociation=false;alvr::depth::DeferredDepthSource deferred;
         for(unsigned id=1;id<=60;id++){
-            pic.runtime.poseTarget=c.targetAnchor+id*13888889ull;pic.timestamp=(poseMapped?100000000000ull:c.targetAnchor)+id*13888889ull;binding.prepare(encoder,device,pic);check(!encoder.source(pic.timestamp+1),"wrong callback timestamp accepted");
+            pic.runtime.poseTarget=c.targetAnchor+id*13888889ull+(exactFrames&&id%3==1?4630000:0);
+            if(exactFrames){
+                // Source-neutral producer metadata is authenticated by child
+                // PID. Clock-v4 fixture has an explicitly synthetic identity
+                // origin; a separate socket test proves measured bootstrap.
+                pic.runtime.owner=producer;pic.runtime.target=100000000000ull+id*13888889ull;
+                pic.runtime.display=c.monotonicAnchor+id*13888889ull+(id>8?27777778:0);
+                pic.head.position[0]=float(id)*.01f;pic.runtime.head=pic.head;
+                pic.runtime.localEyes=pic.localEyes;pic.runtime.fov=pic.fov;
+            }
+            pic.timestamp=(poseMapped?100000000000ull:c.targetAnchor)+id*13888889ull;binding.prepare(encoder,device,pic);check(!encoder.source(pic.timestamp+1),"wrong callback timestamp accepted");
             bool late=id%2;
             if(late){
                 capture.capture(colour.image,vk::ImageLayout::eGeneral,pic.timestamp,c.monotonicAnchor+id*13888889ull,nullptr,nullptr);
                 deferred.captured(pic.timestamp,false,true);
                 check(!deferred.retry(encoder.source,&capture),"unavailable late depth accepted");
             }
-            check(write(control,"x",1)==1,"control write");auto deadline=Clock::now()+std::chrono::seconds(10);
+            auto poseTag=pic.runtime.poseTarget;
+            if(exactFrames&&id==20){pic.runtime.poseTarget=0;binding.prepare(encoder,device,pic);}
+            check(write(control,"x",1)==1,"control write");
+            if(exactFrames&&id==20){
+                // Deliberately withhold query evidence after the GPU packet
+                // arrives. Ingress must retain it, never reject it as a clock
+                // failure or return an unassociated image.
+                for(unsigned wait=0;wait<50;wait++){
+                    check(!encoder.source(pic.timestamp),"unassociated image returned");
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                }
+                pic.runtime.poseTarget=poseTag;binding.prepare(encoder,device,pic);heldWithoutAssociation=true;
+            }
+            auto deadline=Clock::now()+std::chrono::seconds(10);
             if(late){
                 EncoderHook::DepthSource checked=[&](uint64_t stamp){
                     check(stamp==pic.timestamp,"late image retargeted");auto image=encoder.source(stamp);
@@ -104,10 +128,11 @@ int main(int argc,char** argv){signal(SIGPIPE,SIG_IGN);pid_t producer=-1;int con
             encoder.source(pic.timestamp);
         }
         check(deferredAttachments==30,"deferred attachment count");
+        check(!exactFrames||heldWithoutAssociation,"association delay fixture not exercised");
         check(!alvr::motion::depthTestOpticalExecutions,"optical flow executed");close(control);control=-1;int status;check(waitpid(producer,&status,0)==producer&&WIFEXITED(status)&&!WEXITSTATUS(status),"producer failed");producer=-1;
         // Disable live-read switch; owned images remain valid through next
         // present, while ingress is removed and no depth is returned.
         std::ofstream(root/"diag_depth_receiver")<<"0\n";std::this_thread::sleep_for(std::chrono::milliseconds(1005));binding.prepare(encoder,device,pic);check(!encoder.source(pic.timestamp),"disabled source returned depth");check(!fs::exists(socket),"disable left listening socket");
-        std::cout<<"PASS production_callback_to_real_NativeMotion_capture=60 byte_exact_images=60 optical_flow_calls=0 deferred_attachments=30 default_off=PASS live_disable=PASS\n";
+        std::cout<<"PASS production_callback_to_real_NativeMotion_capture=60 byte_exact_images=60 optical_flow_calls=0 deferred_attachments=30 default_off=PASS live_disable=PASS"<<(exactFrames?" exact_frame_v4=PASS missing_query_retention=PASS":"")<<"\n";
     }ctx.destroy();
 }catch(std::exception const& e){if(control>=0)close(control);if(producer>0){kill(producer,SIGTERM);waitpid(producer,nullptr,0);}std::cerr<<e.what()<<'\n';return 1;}}

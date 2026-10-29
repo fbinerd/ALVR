@@ -75,3 +75,34 @@ reprojection first, which is not implemented. Production query/registration
 and unmodified NativeMotion::capture are proved by build_linux_depth_capture.sh
 using a test-only optical estimator stub on Intel. Never link that stub into
 the driver. The research README has bridge assumptions and reproduction steps.
+
+## Exact source-frame association (2026-10-29)
+
+The opt-in production calibrator now writes clock/origin record **version4**.
+It retains measured public OpenXR CLOCK_MONOTONIC timestamps and the measured
+tracking/reference transform. Its two clock anchors must be equal: it is NOT
+an affine mapping from client/poll/history tags. Packet-v1/full and explicit
+packet-v2/depth-only remain608 bytes with unchanged image semantics.
+
+Eight coherent tight public-runtime pairs bootstrap the origin, as before.
+Afterward each callback resolves a unique authenticated metadata frame by both
+eye poses/FOV, producer/reference, <=100ms coarse runtime-prediction gate and
+<=250ms metadata age. A nonzero unique full-pose history tag remains required,
+but its numeric value is never extrapolated. Still/duplicate poses reject.
+The128-frame metadata cache is bounded; the present thread uses try-lock only.
+association_matched/missing/ambiguous/contended count queries, not unique images.
+Use receiver accepted/rejected counters for image coverage.
+
+The callback rechecks metadata on deferred retries for the SAME retained
+picture. Missing association polls bounded authenticated GPU ingress without
+matching/importing/returning a depth image. Valid queries still apply all strict
+clock, timestamp, both-eye geometry, source-UV, pose and device checks. Defaults,
+mode7 synthesis and image lifetime are unchanged. No Encoder/warp/motion edits.
+
+Offline proof uses tests/build_linux_depth_capture.sh and the common online
+producer with MHL_DEPTH_TEST_FRAME_V4=1 MHL_DEPTH_TEST_DEPTH_ONLY=1. Sixty images
+are checked exact in the actual callback and NativeMotion::capture;30 attach
+late. A forced missing-query interval verifies packets survive without being
+accepted early. The optical-flow constructor is test-only stubbed; predict is
+never called. This is not live acceptance/quality evidence. A matching capture
+layer with record-v4 support is required; do not mix older layer binaries.

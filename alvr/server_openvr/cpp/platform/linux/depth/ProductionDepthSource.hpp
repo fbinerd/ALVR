@@ -19,6 +19,7 @@ struct ComposedDepthPicture {
 };
 class ProductionDepthSource {
     std::optional<mhl::depth::Query> current;
+    mhl::depth::RuntimeObservation currentRuntime{};
     std::unique_ptr<GameDepthSource> binding;
     std::unique_ptr<mhl::depth::RuntimeCalibrationService> calibrator;
     std::optional<mhl::depth::Calibration> calibration;
@@ -36,23 +37,35 @@ public:
             checked=now;int enabled=0;std::ifstream(directory+"diag_depth_receiver")>>enabled;
             calibration=mhl::depth::loadCalibration(directory+"depth_calibration",now);
             if((enabled==1||enabled==2)&&!calibrator)
-                calibrator=std::make_unique<mhl::depth::RuntimeCalibrationService>(directory+"depth_receiver.sock.calibrate",directory+"depth_calibration",log);
+                calibrator=std::make_unique<mhl::depth::RuntimeCalibrationService>(directory+"depth_receiver.sock.calibrate",directory+"depth_calibration",log,true);
             if(enabled!=1&&enabled!=2)calibrator.reset();
             // Do not instantiate/bind at all on the normal default path.
             if(enabled==1&&!binding)binding=std::make_unique<GameDepthSource>(encoder,device,
                 directory+"depth_receiver.sock",directory+"diag_depth_receiver",
                 [this](uint64_t stamp)->std::optional<mhl::depth::Query>{
-                    if(!current||current->targetTimestampNs!=stamp)return {};return current;
+                    if(!current||current->targetTimestampNs!=stamp)return {};
+                    auto query=*current;
+                    if(calibration&&calibration->version==4){
+                        // Resolve on every retry: metadata can precede or follow
+                        // prepare(). The retained picture keeps its own geometry.
+                        if(!calibrator)return {};
+                        auto display=calibrator->resolve(*calibration,currentRuntime);
+                        if(!display)return {};query.displayMonotonicNs=*display;
+                    }
+                    return query;
                 },std::move(log));
         }
         if(calibrator)calibrator->observe(picture.runtime);
         if(!binding||!calibration||!mhl::depth::valid(*calibration,now)||!picture.viewsValid||!picture.unwarpedSingleLayer)return;
-        auto display=calibration->version==3
+        currentRuntime=picture.runtime;
+        auto display=calibration->version==4
+            ?std::optional<uint64_t>(0)
+            :calibration->version==3
             ?mhl::depth::poseDisplayTime(*calibration,picture.runtime.poseTarget)
             :calibration->version==2
             ?mhl::depth::runtimeDisplayTime(*calibration,picture.runtime.display)
             :mhl::depth::displayTime(*calibration,picture.timestamp);
-        if(!display||!mhl::depth::valid(*calibration,*display))return;
+        if(!display||(calibration->version!=4&&!mhl::depth::valid(*calibration,*display)))return;
         mhl::depth::Query q;q.targetTimestampNs=picture.timestamp;q.displayMonotonicNs=*display;
         q.toleranceNs=calibration->uncertaintyNs;q.producerId=calibration->producerId;
         q.clockMapped=q.fullStereoLayout=q.verifySourceUv=true;q.fov=picture.fov;q.sourceUv=picture.sourceUv;

@@ -82,6 +82,9 @@ public:
     // Query timestamps MUST already be mapped into the packet's monotonic clock.
     // Submitted image operations use the supplied driver device AND queue.
     std::optional<Image> acquire(Query const&);
+    // Bind/poll authenticated bounded ingress while frame association is not
+    // ready. No match, import or returned image; overflow still evicts/ACKs.
+    void pollIngress();
     Counters counters() const;
     // Offline diagnostics only: waits for the copy, reads back owned GPU data.
     // The driver callback never calls this blocking method.

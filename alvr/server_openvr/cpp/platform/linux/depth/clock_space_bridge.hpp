@@ -20,7 +20,8 @@ inline bool valid(Calibration const& c,uint64_t now) {
     float norm=0;
     for(float x:c.trackingFromReference.position)if(!std::isfinite(x))return false;
     for(float x:c.trackingFromReference.orientation){if(!std::isfinite(x))return false;norm+=x*x;}
-    return c.magic==0x4344484d && (c.version==1||c.version==2||c.version==3) && c.size==sizeof(c) && !c.reserved &&
+    return c.magic==0x4344484d && (c.version==1||c.version==2||c.version==3||c.version==4) && c.size==sizeof(c) && !c.reserved &&
+        (c.version!=4||c.monotonicAnchor==c.targetAnchor) &&
         c.producerId && c.referenceSpace && c.monotonicAnchor && c.targetAnchor &&
         c.validFrom<=c.monotonicAnchor && c.monotonicAnchor<=c.validUntil &&
         c.validFrom<=now && now<=c.validUntil && c.validUntil-c.validFrom<=60000000000ull &&
@@ -55,6 +56,9 @@ inline std::optional<Calibration> loadCalibration(std::string const& path,uint64
     close(fd);if(!ok||!valid(c,now))return {};return c;
 }
 inline std::optional<uint64_t> mapCalibrationClock(Calibration const& c,uint64_t target) {
+    // V4 carries a measured origin in the public source clock only. No client
+    // tag, runtime prediction or pose-history tag may be extrapolated from it.
+    if(c.version==4)return {};
     if(target>=c.targetAnchor){auto d=target-c.targetAnchor;if(d>UINT64_MAX-c.monotonicAnchor)return {};return c.monotonicAnchor+d;}
     auto d=c.targetAnchor-target;if(d>=c.monotonicAnchor)return {};return c.monotonicAnchor-d;
 }

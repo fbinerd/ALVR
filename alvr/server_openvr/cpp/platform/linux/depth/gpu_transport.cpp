@@ -385,6 +385,10 @@ struct Receiver::Impl {
 Receiver::Receiver(Device d,std::string path,std::string flag,Logger log):p(std::make_unique<Impl>(d,std::move(path),std::move(flag),std::move(log))){}
 Receiver::~Receiver()=default;
 Counters Receiver::counters()const{return p->stats;}
+void Receiver::pollIngress(){
+    p->update();p->retire();if(!p->enabled){p->stats.disabled++;return;}
+    p->poll();p->report();
+}
 std::optional<Image> Receiver::acquire(Query const& query){
     p->update();p->retire();if(!p->enabled){p->stats.disabled++;return {};}
     p->poll();std::optional<Image> result;
