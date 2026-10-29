@@ -4,6 +4,7 @@
 #include "Logger.h"
 #include "Paths.h"
 #include "PoseHistory.h"
+#include "PoseSway.h"
 #include "Utils.h"
 #include "ViveTrackerProxy.h"
 #include "bindings.h"
@@ -173,6 +174,9 @@ void Hmd::OnPoseUpdated(uint64_t targetTimestampNs, FfiDeviceMotion motion) {
     if (this->object_id == vr::k_unTrackedDeviceIndexInvalid) {
         return;
     }
+    // Diagnostic head motion for headset tests; off without its file.
+    static alvr::PoseSway sway;
+    sway.apply(motion);
     auto pose = vr::DriverPose_t {};
     pose.poseIsValid = true;
     pose.result = vr::TrackingResult_Running_OK;
