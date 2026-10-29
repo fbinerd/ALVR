@@ -190,6 +190,8 @@ struct StereoDepth::State {
         initialize();
         if (coarseLumaDimension)
             coarse = std::make_unique<StereoDepth>(ctx, extent, format, coarseLumaDimension, true, 0);
+        Info("Stereo execution: single_wait=%d combined_fine=%d luma=%ux%u coarse_cap=%u",
+            singleWait,combinedFine,lumaExtent.width,lumaExtent.height,coarseLumaDimension);
     }
 
     ~State() {
