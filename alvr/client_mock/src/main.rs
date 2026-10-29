@@ -544,6 +544,16 @@ fn main() {
     let (input_sender, input_receiver) = mpsc::channel::<WindowInput>();
     let (output_sender, output_receiver) = mpsc::channel::<WindowOutput>();
 
+    // Automated trials need neither a GUI nor a second GPU renderer. Keep
+    // both channel endpoints alive so scripted tracking and the existing
+    // video/statistics loop run independently of window focus or UI failure.
+    if std::env::var("MOCK_HEADLESS").as_deref() == Ok("1") {
+        alvr_common::info!("Mock headless mode: default input and scripted tracking; no GUI");
+        client_thread(output_sender, input_receiver);
+        drop((input_sender, output_receiver));
+        return;
+    }
+
     let client_thread = thread::spawn(|| {
         client_thread(output_sender, input_receiver);
     });
