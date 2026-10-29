@@ -33,7 +33,8 @@ private:
 struct Counters {
     uint64_t received{},accepted{},rejected{},timestamp{},geometry{},pose{},clock{},
         protocol{},device{},notReady{},missing{},disabled{},busy{},sent{},acknowledged{},
-        validationNs{},allocationNs{},writeNs{},copyNs{},publishNs{},prefetched{},prefetchNs{};
+        validationNs{},allocationNs{},writeNs{},copyNs{},publishNs{},prefetched{},prefetchNs{},
+        privateImagesAllocated{},privateImagesReused{},privateImageAllocationNs{};
 };
 struct Query {
     uint64_t targetTimestampNs{},displayMonotonicNs{},toleranceNs{},producerId{};

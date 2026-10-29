@@ -125,3 +125,26 @@ RTX3060 ABBA64-image transport checks remain exact; validation mean1.50/1.36ms
 before vs.55/.61ms after. This timing isolates the CPU export-boundary scan and
 is not a live packet-coverage or quality claim. Capture/transport lifetime and
 the first-generated-frame attachment cutoff remain unchanged.
+
+### Retired private destination cache (2026-10-29)
+
+One fully retired PRIVATE R32F destination allocation may be cached by extent.
+This is not a received FD/export allocation or raw gather slot: those are never
+rewritten/recycled by this change. It removes recurring private image creation
+without changing the callback signature or source geometry/clock policy.
+
+Keep the original two-delivery lifetime boundary and require the THIRD copy's
+same-queue fence before retirement. The second copy's fence may precede consumer
+reads submitted during that following present; the third copy is after them.
+No present-thread wait is added. Cache capacity is one allocation, resize drops
+incompatible cache, disable retains promised delivered images. A reused image
+is completely overwritten behind a discard transition; default receiver stays
+off. Existing bounded loan/backpressure/ACK and source allocation rules remain.
+
+Offscreen Intel and native RTX3060 proof covers61 exact images, previous-image
+contents through resize/disable/reconnect, and an explicitly held GPU interval.
+10 new allocations/51 reused (guard includes an extra in-flight image). No reuse
+occurs before that held interval completes. A watchdog bounds the test's hold;
+it is not present in production. Native before/after median acquisition CPU time
+has only a modest reduction; live cadence benefit remains to be established.
+No NativeMotion/Encoder/shader/peer branch edits.

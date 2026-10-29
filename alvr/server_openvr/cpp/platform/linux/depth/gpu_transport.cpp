@@ -17,6 +17,7 @@
 #include <sys/stat.h>
 #include <sys/un.h>
 #include <unistd.h>
+#include <utility>
 
 namespace mhl::depth {
 namespace {
@@ -298,6 +299,10 @@ struct Receiver::Impl {
     // throughout the next present(). Older images retire behind a newer copy
     // fence on the SAME driver queue, which also covers prior consumer reads.
     std::deque<std::unique_ptr<Resource>> delivered;
+    // Only a PRIVATE destination image, after two newer deliveries and a
+    // conservative THIRD-copy fence on the same queue.
+    // Exporter buffers/FD allocations are never pooled or rewritten here.
+    std::unique_ptr<Resource> imageCache;
     uint64_t lastProducer=0,lastFrame=0,lastDisplay=0;
     Impl(Device d,std::string path,std::string flag,Logger log):d(d),api(d.device),path(std::move(path)),flag(std::move(flag)),log(std::move(log)){}
     ~Impl(){api.DeviceWaitIdle(d.device);stop();delivered.clear();}
@@ -324,7 +329,9 @@ struct Receiver::Impl {
         auto now=std::chrono::steady_clock::now();if(reported.time_since_epoch().count()&&now-reported<std::chrono::seconds(5))return;reported=now;
         std::ostringstream s;s<<"depth match matched="<<stats.accepted<<" late="<<stats.timestamp<<" unmatched="<<stats.missing<<" received="<<stats.received<<" accepted="<<stats.accepted<<" rejected="<<stats.rejected
             <<" timestamp="<<stats.timestamp<<" geometry="<<stats.geometry<<" pose="<<stats.pose<<" clock="<<stats.clock
-            <<" protocol="<<stats.protocol<<" device="<<stats.device<<" not_ready="<<stats.notReady<<" missing="<<stats.missing;message(s.str());
+            <<" protocol="<<stats.protocol<<" device="<<stats.device<<" not_ready="<<stats.notReady<<" missing="<<stats.missing
+            <<" private_allocated="<<stats.privateImagesAllocated<<" private_reused="<<stats.privateImagesReused
+            <<" private_alloc_mean_ms="<<(stats.privateImagesAllocated?double(stats.privateImageAllocationNs)/stats.privateImagesAllocated/1e6:0);message(s.str());
     }
     void poll(){
         if(client<0&&server>=0){int s=accept4(server,nullptr,nullptr,SOCK_NONBLOCK|SOCK_CLOEXEC);if(s>=0){if(sameUid(s)){client=s;epoch++;}else close(s);}}
@@ -371,7 +378,19 @@ struct Receiver::Impl {
         return Good;
     }
     void copy(Resource& r){
-        r.makeImage(r.wire.packet);r.commands();
+        VkExtent2D wanted{r.wire.packet.eyes[0].depth.width*2,r.wire.packet.eyes[0].depth.height};
+        if(imageCache&&imageCache->extent.width==wanted.width&&imageCache->extent.height==wanted.height){
+            r.image=std::exchange(imageCache->image,VK_NULL_HANDLE);
+            r.imageMemory=std::exchange(imageCache->imageMemory,VK_NULL_HANDLE);
+            r.extent=wanted;imageCache.reset();++stats.privateImagesReused;
+        }else{
+            imageCache.reset();auto start=std::chrono::steady_clock::now();
+            r.makeImage(r.wire.packet);++stats.privateImagesAllocated;
+            stats.privateImageAllocationNs+=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-start).count();
+        }
+        // UNDEFINED discards the safely retired contents; both eye copies
+        // overwrite the whole image. No layout/content dependency is reused.
+        r.commands();
         VkBufferMemoryBarrier buffer{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};buffer.dstAccessMask=VK_ACCESS_TRANSFER_READ_BIT;buffer.srcQueueFamilyIndex=VK_QUEUE_FAMILY_EXTERNAL;buffer.dstQueueFamilyIndex=d.family;buffer.buffer=r.buffer;buffer.size=VK_WHOLE_SIZE;
         VkImageMemoryBarrier image{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};image.oldLayout=VK_IMAGE_LAYOUT_UNDEFINED;image.newLayout=VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;image.dstAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT;image.srcQueueFamilyIndex=image.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;image.image=r.image;image.subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};
         api.CmdPipelineBarrier(r.command,VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,VK_PIPELINE_STAGE_TRANSFER_BIT,0,0,nullptr,1,&buffer,1,&image);
@@ -388,7 +407,18 @@ struct Receiver::Impl {
     void retire(){
         // ACK only after GPU copy completion, so the producer lease is safe.
         for(auto& r:delivered)if(r->wire.kind==1&&r->ready()){ack(r->wire,r->connectionEpoch);r->wire.kind=2;}
-        while(delivered.size()>2&&delivered[1]->ready())delivered.pop_front();
+        // The third copy is after all reads submitted during the following
+        // present. The second copy fence can precede those consumer reads.
+        while(delivered.size()>2&&delivered[2]->ready()){
+            auto& oldest=*delivered.front();
+            if(!imageCache&&oldest.image){
+                imageCache=std::make_unique<Resource>(d,api);
+                imageCache->image=std::exchange(oldest.image,VK_NULL_HANDLE);
+                imageCache->imageMemory=std::exchange(oldest.imageMemory,VK_NULL_HANDLE);
+                imageCache->extent=oldest.extent;
+            }
+            delivered.pop_front();
+        }
     }
 };
 Receiver::Receiver(Device d,std::string path,std::string flag,Logger log):p(std::make_unique<Impl>(d,std::move(path),std::move(flag),std::move(log))){}
