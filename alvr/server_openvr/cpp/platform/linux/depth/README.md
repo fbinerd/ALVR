@@ -183,3 +183,26 @@ queries and the unchanged rotational wire matcher. The recording checker option
 identical retained colour/depth, with a common prefix leaving recorded future
 padding. Scoring is unchanged. The rebased case must recover reference pixels;
 it is not proof of live cadence or of correct timing in every application.
+
+### Bounded consumer pixel diagnostic
+
+Create an ignored output directory, then put its absolute path on the first
+line of `~/.config/alvr/diag_motion_depth_snapshot` before starting SteamVR.
+Absent file: no readback buffers, submissions, transfer-source usage changes
+or snapshots. The diagnostic saves at most three pairs per motion instance,
+only when both retained pictures have depth. It waits for the owned copy,
+reads the exact private older/newest RGBA8 and R32F images, restores layouts,
+and records their tags, clocks and transform. BGRA8 is exported as RGBA8.
+No imported/raw image or resource filename is treated as a live GPU handle.
+A GPU timeout retains submitted buffer/memory handles until device teardown.
+
+The `alvr.motion-depth-pair.v1` JSON and four raw files per pair are diagnostic
+artifacts, not the 608-byte transport. R32F is view-Z metres, +0 invalid,
+side-by-side eyes; colour is the encoded RGBA8 actually retained by synthesis.
+Readback can stall the worker: NEVER use this run for cadence, latency or
+performance comparisons. The research controller's `--depth-snapshots` snapshots
+and restores the flag. `check_motion_depth_pair.py` checks foreground coverage
+and spatial agreement. The performance reporter rejects these diagnostic runs.
+The offline checker can use `MHL_MOTION_DEPTH_SNAPSHOT=/absolute/output` instead
+of editing the user's config. Its twelve exported images must match the source
+fixture byte-exact and diagnostic-on/off summary scores must be identical.

@@ -7,6 +7,10 @@
 #include <chrono>
 #include <cmath>
 #include <stdexcept>
+#include <filesystem>
+#include <fstream>
+#include <iomanip>
+#include <unistd.h>
 
 namespace alvr::motion {
 
@@ -88,6 +92,9 @@ struct NativeMotion::State {
          interpolate = false;
     uint32_t diagnosticFlags = 0;
     bool depthOcclusion = false;
+    // Explicit, bounded diagnostic only. Never enable for performance windows.
+    std::filesystem::path snapshotDirectory;
+    unsigned snapshots = 0;
 
     State(
         VkContext& c,
@@ -102,6 +109,14 @@ struct NativeMotion::State {
         , format(f)
         , allowExactFlowExit(exactFlowExit)
         , bidirectionalFlow(bothDirections) {
+        std::string directory;
+        if (auto configured=std::getenv("MHL_MOTION_DEPTH_SNAPSHOT")) directory=configured;
+        else if (auto home=std::getenv("HOME")) {
+            std::ifstream flag(std::string(home)+"/.config/alvr/diag_motion_depth_snapshot");
+            std::getline(flag,directory);
+        }
+        if (!directory.empty() && std::filesystem::path(directory).is_absolute()
+            && std::filesystem::is_directory(directory)) snapshotDirectory=directory;
         lumaExtent = vk::Extent2D { (size.width / 4) & ~3u, (size.height / 2) & ~3u };
         if (maxLumaDimension && (maxLumaDimension < 64 || maxLumaDimension % 4))
             throw std::runtime_error(
@@ -290,7 +305,8 @@ struct NativeMotion::State {
         auto sampled = vk::ImageUsageFlagBits::eSampled;
         auto transferDst = vk::ImageUsageFlagBits::eTransferDst;
         for (auto& image : colors)
-            makeImage(image, extent, format, sampled | transferDst);
+            makeImage(image, extent, format, sampled | transferDst
+                | (snapshotDirectory.empty()?vk::ImageUsageFlags{}:vk::ImageUsageFlagBits::eTransferSrc));
         for (auto& pair : lumas)
             for (auto& image : pair) {
                 makeImage(
@@ -515,7 +531,8 @@ struct NativeMotion::State {
                 ctx.dev.free(image.memory);
                 image = {};
                 makeImage(image, depth.extent, vk::Format::eR32Sfloat,
-                    vk::ImageUsageFlagBits::eSampled | vk::ImageUsageFlagBits::eTransferDst);
+                    vk::ImageUsageFlagBits::eSampled | vk::ImageUsageFlagBits::eTransferDst
+                    | (snapshotDirectory.empty()?vk::ImageUsageFlags{}:vk::ImageUsageFlagBits::eTransferSrc));
                 // Both are bound on every prediction, written or not.
                 transition(image, vk::ImageLayout::eShaderReadOnlyOptimal);
             }
@@ -562,11 +579,81 @@ struct NativeMotion::State {
         }
     }
 
+    void snapshotPair() {
+        if (snapshotDirectory.empty() || snapshots>=3 || retained<2 || !depthValid[0] || !depthValid[1]) return;
+        // These are the exact privately retained inputs, never imported images
+        // or recycled raw slots. estimate() has already waited for capture.
+        std::array<Image*,4> images{&colors[1-latest],&colors[latest],&depths[1-latest],&depths[latest]};
+        std::array<vk::DeviceSize,4> offsets{}, sizes{};
+        vk::DeviceSize total=0;
+        for (unsigned i=0;i<4;++i) {
+            offsets[i]=total; sizes[i]=vk::DeviceSize(images[i]->extent.width)*images[i]->extent.height*4;
+            total+=sizes[i];
+        }
+        vk::UniqueDeviceMemory memory;
+        auto buffer=ctx.dev.createBufferUnique(vk::BufferCreateInfo{
+            .size=total,.usage=vk::BufferUsageFlagBits::eTransferDst,.sharingMode=vk::SharingMode::eExclusive});
+        auto required=ctx.dev.getBufferMemoryRequirements(*buffer);
+        auto properties=ctx.physDev.getMemoryProperties(); uint32_t type=UINT32_MAX;
+        auto flags=vk::MemoryPropertyFlagBits::eHostVisible|vk::MemoryPropertyFlagBits::eHostCoherent;
+        for (uint32_t i=0;i<properties.memoryTypeCount;++i)
+            if ((required.memoryTypeBits&(1u<<i)) && (properties.memoryTypes[i].propertyFlags&flags)==flags) {type=i;break;}
+        if (type==UINT32_MAX) throw std::runtime_error("Depth snapshot: no coherent host memory");
+        memory=ctx.dev.allocateMemoryUnique(vk::MemoryAllocateInfo{.allocationSize=required.size,.memoryTypeIndex=type});
+        ctx.dev.bindBufferMemory(*buffer,*memory,0);
+        try {
+            begin();
+            for (unsigned i=0;i<4;++i) {
+                auto& image=*images[i];auto before=image.layout;
+                transition(image,vk::ImageLayout::eTransferSrcOptimal);
+                vk::BufferImageCopy copy{.bufferOffset=offsets[i],
+                    .imageSubresource={vk::ImageAspectFlagBits::eColor,0,0,1},
+                    .imageExtent={image.extent.width,image.extent.height,1}};
+                command.copyImageToBuffer(image.handle,image.layout,*buffer,copy);
+                transition(image,before);
+            }
+            submit();
+        } catch (...) {
+            // A timed-out submission may still reference these handles.
+            // Retain until device teardown instead of freeing pending memory.
+            (void)buffer.release(); (void)memory.release(); throw;
+        }
+        auto data=static_cast<uint8_t*>(ctx.dev.mapMemory(*memory,0,total));
+        auto ns=std::chrono::steady_clock::now().time_since_epoch().count();
+        auto prefix=snapshotDirectory/("pair_"+std::to_string(getpid())+"_"+std::to_string(ns));
+        std::array<char const*,4> suffix{"_older.rgba8","_newest.rgba8","_older.r32f","_newest.r32f"};
+        bool written=true;
+        for (unsigned i=0;i<4;++i) {
+            auto bytes=data+offsets[i];
+            if (i<2 && format==vk::Format::eB8G8R8A8Unorm)
+                for (vk::DeviceSize j=0;j<sizes[i];j+=4) std::swap(bytes[j],bytes[j+2]);
+            std::ofstream file(prefix.string()+suffix[i],std::ios::binary);
+            file.write(reinterpret_cast<char const*>(bytes),sizes[i]);written=written&&bool(file);
+        }
+        ctx.dev.unmapMemory(*memory);
+        std::ofstream meta(prefix.string()+".json");
+        meta<<std::setprecision(12)<<"{\"schema\":\"alvr.motion-depth-pair.v1\",\"diagnostic_only\":true,\"row_origin\":\"top-left\",\"depth_units\":\"view-z-metres\",\"eye_layout\":\"side-by-side\",\"colour_extent\":["
+            <<extent.width<<','<<extent.height<<"],\"depth_extent\":["<<depths[latest].extent.width<<','<<depths[latest].extent.height
+            <<"],\"older_tag\":"<<timestamps[1-latest]<<",\"newest_tag\":"<<timestamps[latest]
+            <<",\"older_clock\":"<<clocks[1-latest]<<",\"newest_clock\":"<<clocks[latest]<<",\"history_translation\":[";
+        for (unsigned i=0;i<3;++i) meta<<(i?",":"")<<historyRotation.translation[i];
+        meta<<"],\"history_quaternion\":[";
+        for (unsigned i=0;i<4;++i) meta<<(i?",":"")<<historyRotation.quaternion[i];
+        meta<<"],\"left_tans\":[";
+        for (unsigned i=0;i<4;++i) meta<<(i?",":"")<<historyRotation.leftTans[i];
+        meta<<"],\"right_tans\":[";
+        for (unsigned i=0;i<4;++i) meta<<(i?",":"")<<historyRotation.rightTans[i];
+        meta<<"]}\n"; written=written&&bool(meta);
+        if (!written) throw std::runtime_error("Depth snapshot: incomplete files");
+        ++snapshots; Info("Motion depth snapshot diagnostic %u/3: %s",snapshots,prefix.c_str());
+    }
+
     void estimate() {
         if (!flowDirty)
             return;
         // The optical-flow queue reads lumas a deferred capture may still write.
         waitPending();
+        snapshotPair();
         double opticalGpuMs = 0;
         bool allTimed = true;
         for (unsigned eye = 0; eye < 2; ++eye)
