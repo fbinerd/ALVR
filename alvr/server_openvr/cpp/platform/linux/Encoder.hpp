@@ -10,6 +10,7 @@
 
 #include "EncodePipeline.h"
 #include "GpuDiag.h"
+#include "alvr_server/DiagPoseLog.h"
 #include "Renderer.hpp"
 #include "motion/NativeMotion.hpp"
 #include "depth/ProductionDepthSource.hpp"
@@ -794,6 +795,7 @@ public:
         alvr::FramePacket framePacket;
         if (!encoder->GetEncoded(framePacket))
             return false;
+        alvr::DiagPoseLog::get().frame(targetTimestampNs, 'S', framePacket.size, framePacket.isIDR);
         ParseFrameNals(
             encoder->GetCodec(),
             framePacket.data,
@@ -839,6 +841,7 @@ private:
             assert(false);
             return;
         }
+        alvr::DiagPoseLog::get().frame(targetTimestampNs, 'R', framePacket.size, framePacket.isIDR);
         ParseFrameNals(
             encoder->GetCodec(),
             framePacket.data,
