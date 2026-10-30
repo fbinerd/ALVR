@@ -223,6 +223,8 @@ extern "C" unsigned long long PathStringToHash(const char* path);
 extern "C" void ReportPresent(unsigned long long timestamp_ns, unsigned long long offset_ns);
 #ifdef __linux__
 extern "C" bool ShouldEncodeAirLinkTestFrame();
+// Optional Linux synthesis diagnostic: exact geometry of the encoded frame.
+extern "C" bool ReportEncodedFramePose(unsigned long long timestampNs, FfiPose pose);
 #endif
 extern "C" void ReportComposed(unsigned long long timestamp_ns, unsigned long long offset_ns);
 extern "C" FfiDynamicEncoderParams GetDynamicEncoderParams();

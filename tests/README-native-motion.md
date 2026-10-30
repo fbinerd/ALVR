@@ -1,5 +1,46 @@
 # Native motion offline checks
 
+## Encoded-pose contract diagnostic (Linux, mode 7)
+
+`~/.config/alvr/diag_motion_frame_pose` is read once per driver process.
+Absent/0 leaves the existing path; `2` observes the submitted-picture/label
+discrepancy without changing packet geometry; `1` supplies the actual geometry
+to the normal ALVR video packet. Both diagnostic modes require `encoder_rewarp=0`
+and mode 7. Restart SteamVR between conditions. Do not use diagnostic injected
+`diag_pose_sway` as a real-motion control: it deliberately changes driver
+geometry after the Rust tracking queue and explicit metadata now names it.
+
+For a single unwarped scene, real-frame metadata uses the submitted pose
+converted back to tracking space. History uses the same pose. Gap-fill metadata
+uses the selected target orientation and the exact position used in synthesis,
+including the bounded picture-clock translation query. Existing wire timestamps,
+presentation clocks, FOVs, encode cadence and packet schema do not change.
+Unsupported compositions retain the legacy path and do not validate this test.
+The metadata cache requires an existing exact tracking stamp, keeps up to 360
+entries for repeated NAL queries, and resets on tracking timestamp rollback.
+Invalid explicit geometry is rejected. No settings schema/CppInit/layout change.
+
+`Motion frame pose mode=... real=... filled=... rejected=...` logs cumulative
+counts, maximum real-label angular difference (degrees), and maximum gap-fill
+translation-label difference (mm), about every five seconds. Those are input
+contract errors, not a direct image-quality score. A trace with zero discrepancy
+cannot support attributing a headset defect to this candidate.
+
+CPU-only tests, from the companion research repo:
+
+```sh
+bash scripts/test_motion_head_pose_contract.sh ../ALVR-codex-headpath
+MHL_DEPTH_TEST_SANITIZE=1 bash scripts/test_motion_head_pose_contract.sh ../ALVR-codex-headpath out/headpath_sanitized
+```
+
+The recording checker also accepts `--head-pose-self-test` before creating any
+GPU context. It models asymmetric stereo projection, pitch/yaw/roll and the
+alternation of actual real-picture poses with selected gap-fill poses, including
+client reprojection. It does not execute optical flow or prove physical-headset
+success. Existing GPU recording runs and shaders remain unchanged. This change
+targets the normal ALVR client: the separate Air Link sender chooses its own
+head pose and is outside this diagnostic.
+
 From the companion MetaHorizonLinux repository, run:
 
 ```sh

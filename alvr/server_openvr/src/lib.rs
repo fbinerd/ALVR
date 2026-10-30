@@ -3,6 +3,8 @@ mod graphics;
 mod props;
 mod tracking;
 mod vsync;
+#[cfg(target_os = "linux")]
+mod encoded_frame_pose;
 
 #[allow(
     non_camel_case_types,
@@ -46,6 +48,11 @@ const FOVEATION_CENTER_HISTORY_CAPACITY: usize = 360;
 static SERVER_CORE_CONTEXT: RwLock<Option<ServerCoreContext>> = RwLock::new(None);
 static LOCAL_VIEW_PARAMS: RwLock<[ViewParams; 2]> = RwLock::new([ViewParams::DUMMY; 2]);
 static HEAD_POSE_QUEUE: Mutex<VecDeque<(Duration, Pose)>> = Mutex::new(VecDeque::new());
+#[cfg(target_os = "linux")]
+static ENCODED_FRAME_POSES: Mutex<encoded_frame_pose::FramePoses<Pose>> =
+    Mutex::new(encoded_frame_pose::FramePoses::new());
+#[cfg(target_os = "linux")]
+static HAS_ENCODED_FRAME_POSES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static FOVEATION_CENTER_QUEUE: Mutex<VecDeque<(Duration, [[f32; 2]; 2])>> =
     Mutex::new(VecDeque::new());
 static EYE_TRACKED_FOVEATION: Mutex<Option<EyeTrackedFoveation>> = Mutex::new(None);
@@ -356,6 +363,11 @@ fn spawn_event_loop(events_receiver: mpsc::Receiver<ServerCoreEvent>) {
                             let motion = motion.predict(poll_timestamp, target_timestamp);
 
                             let mut head_pose_queue_lock = HEAD_POSE_QUEUE.lock();
+                            #[cfg(target_os = "linux")]
+                            if head_pose_queue_lock.back().is_some_and(|(ts, _)| *ts > poll_timestamp) {
+                                ENCODED_FRAME_POSES.lock().clear();
+                                HAS_ENCODED_FRAME_POSES.store(false, std::sync::atomic::Ordering::Relaxed);
+                            }
                             head_pose_queue_lock.push_back((poll_timestamp, motion.pose));
                             while head_pose_queue_lock.len() > 360 {
                                 head_pose_queue_lock.pop_front();
@@ -652,6 +664,26 @@ extern "C" fn report_encoder_foveation_centers(
     }
 }
 
+#[cfg(target_os = "linux")]
+#[unsafe(export_name = "ReportEncodedFramePose")]
+extern "C" fn report_encoded_frame_pose(timestamp_ns: u64, pose: FfiPose) -> bool {
+    use alvr_common::glam::{Quat, Vec3};
+    let q = pose.orientation;
+    let orientation = Quat::from_xyzw(q.x, q.y, q.z, q.w);
+    let position = Vec3::from_array(pose.position);
+    if timestamp_ns == 0 || !orientation.is_finite() || !position.is_finite()
+        || (orientation.length_squared() - 1.0).abs() > 0.01
+        || !HEAD_POSE_QUEUE.lock().iter().any(|(ts, _)| ts.as_nanos() == timestamp_ns as u128)
+    {
+        return false;
+    }
+    ENCODED_FRAME_POSES.lock().insert(timestamp_ns, Pose {
+        orientation: orientation.normalize(), position,
+    });
+    HAS_ENCODED_FRAME_POSES.store(true, std::sync::atomic::Ordering::Relaxed);
+    true
+}
+
 #[unsafe(export_name = "VideoSend")]
 extern "C" fn send_video(timestamp_ns: u64, buffer_ptr: *mut u8, len: i32, is_idr: bool) {
     if let Some(context) = &*SERVER_CORE_CONTEXT.read() {
@@ -666,6 +698,11 @@ extern "C" fn send_video(timestamp_ns: u64, buffer_ptr: *mut u8, len: i32, is_id
             // We can't submit the frame without its pose
             return;
         };
+
+        #[cfg(target_os = "linux")]
+        let head_pose = if HAS_ENCODED_FRAME_POSES.load(std::sync::atomic::Ordering::Relaxed) {
+            ENCODED_FRAME_POSES.lock().get(timestamp_ns).unwrap_or(head_pose)
+        } else { head_pose };
 
         let local_views_params = LOCAL_VIEW_PARAMS.read();
 

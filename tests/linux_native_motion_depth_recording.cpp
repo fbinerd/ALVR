@@ -7,6 +7,7 @@
 #include "platform/linux/depth/DepthPacket.h"
 #include "platform/linux/motion/StereoDepth.hpp"
 #include "platform/linux/motion/PicturePoseClock.hpp"
+#include "native_motion_head_pose_contract.hpp"
 #include <deque>
 #include <numeric>
 
@@ -152,6 +153,7 @@ void selfTest() {
 int main(int argc,char** argv) {
  try {
     using namespace recordeddepth;
+    if(argc==2&&std::string(argv[1])=="--head-pose-self-test"){headposecheck::run();return 0;}
     if(argc==2&&std::string(argv[1])=="--self-test"){selfTest();return 0;}
     if(argc!=3)throw std::runtime_error("Usage: depth_recording_test VERIFIED_FIXTURE NEW_OUTPUT");
     std::filesystem::path root(argv[1]),output(argv[2]);

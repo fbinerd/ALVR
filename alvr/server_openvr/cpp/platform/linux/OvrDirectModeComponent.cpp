@@ -14,6 +14,7 @@
 #include "SteamVrSync.h"
 #include "depth/RuntimeClockProbe.hpp"
 #include "motion/PicturePoseClock.hpp"
+#include "motion/FramePoseContract.hpp"
 
 #include "alvr_server/Logger.h"
 #include "alvr_server/driverlog.h"
@@ -213,6 +214,19 @@ static bool MotionPicturePoseEnabled() {
     return enabled;
 }
 
+// Restart-only, mode7 and default off. Stamps remain tracking sample IDs;
+// explicit packet geometry describes the pixels instead of guessing by ID.
+static int EncodedPoseMode() {
+    static int const mode = [] {
+        auto home = std::getenv("HOME");
+        int value = 0;
+        if (home) std::ifstream(std::string(home)+"/.config/alvr/diag_motion_frame_pose") >> value;
+        return (value == 1 || value == 2) && alvr::motion::nativeMotionMode() == 7 && !RewarpEnabled ? value : 0;
+    }();
+    return mode;
+}
+static bool EncodedPoseEnabled() { return EncodedPoseMode() == 1; }
+
 void OvrDirectModeComponent::SetViewParams(const FfiViewParams params[2]) {
     std::unique_lock<std::mutex> lock(m_viewParamsMutex);
     m_viewParams[0] = params[0];
@@ -302,6 +316,8 @@ void OvrDirectModeComponent::EncodeWorkerLoop() {
     bool lastPicturePoseUsed = false;
     uint64_t lastPicturePoseTag = 0;
     uint64_t pictureQueries = 0, pictureMissing = 0, pictureFrames = 0, pictureUntagged = 0;
+    uint64_t poseReal = 0, poseFilled = 0, poseRejected = 0;
+    double realPoseAngleMax = 0, fillPosePositionMax = 0;
     auto pictureReportAt = std::chrono::steady_clock::now();
     auto targetPosition = [&](uint64_t outputTarget, std::array<float, 3> legacy) {
         if (!lastPicturePoseUsed) return legacy;
@@ -351,6 +367,7 @@ void OvrDirectModeComponent::EncodeWorkerLoop() {
                                          std::chrono::nanoseconds>(nextSlot.time_since_epoch())
                                          .count();
             alvr::motion::NativeMotion::Rotation rotation;
+            std::optional<FfiPose> framePose;
             if (separateRotation) {
                 FfiViewParams views[2];
                 { std::unique_lock<std::mutex> lock(m_viewParamsMutex);
@@ -360,10 +377,22 @@ void OvrDirectModeComponent::EncodeWorkerLoop() {
                     {pose->motion.pose.position[0], pose->motion.pose.position[1], pose->motion.pose.position[2]});
                 if (!BuildMotionRotation(lastMotionOrientation,pose->motion.pose.orientation,views,rotation,
                         lastMotionPosition.data(),position.data())) return false;
+                if (EncodedPoseMode()) {
+                    auto q = pose->motion.pose.orientation;
+                    framePose = alvr::motion::encodedFramePose({q.w,q.x,q.y,q.z}, position);
+                    if (!framePose || (EncodedPoseEnabled() && !ReportEncodedFramePose(pose->targetTimestampNs, *framePose))) {
+                        ++poseRejected;
+                        if (EncodedPoseEnabled()) return false;
+                    }
+                    double error = 0;
+                    for (unsigned i=0; i<3; ++i) error += std::pow(position[i]-pose->motion.pose.position[i],2);
+                    fillPosePositionMax = std::max(fillPosePositionMax, std::sqrt(error)*1000);
+                }
             }
             if (m_encoderReady && enc.fill(pose->targetTimestampNs, slotClockNs, separateRotation?&rotation:nullptr)) {
                 lastStamp = pose->targetTimestampNs;
                 ++filled;
+                if (framePose) ++poseFilled;
                 return true;
             }
             ++rejected;
@@ -629,7 +658,7 @@ void OvrDirectModeComponent::EncodeWorkerLoop() {
                                             .count();
             alvr::motion::NativeMotion::Rotation historyRotation;
             bool validHistoryRotation=false;
-            bool const picturePoseUsed = MotionPicturePoseEnabled() && separateRotation && !interpolate
+            bool const picturePoseUsed = (MotionPicturePoseEnabled() || EncodedPoseEnabled()) && separateRotation && !interpolate
                 && job.picturePoseValid && !warpParams.enabled && job.layers.size() == 1;
             auto const& motionPosition = picturePoseUsed ? job.picturePosition : job.renderPosition;
             auto motionOrientation = picturePoseUsed ? job.pictureOrientation : stampOrientation;
@@ -694,6 +723,31 @@ void OvrDirectModeComponent::EncodeWorkerLoop() {
                         auto const& b = job.layers[0].eyes[eye];
                         depthPicture.sourceUv[eye] = {b.uMin, b.vMin, b.uMax, b.vMax};
                     }
+                }
+            }
+            if (EncodedPoseMode()) {
+                // A single unwarped scene has a public submitted HMD pose.
+                // For warped/multi-layer frames keep the legacy path rather
+                // than claiming one geometry describes unsupported composition.
+                if (job.picturePoseValid && !warpParams.enabled && job.layers.size() == 1) {
+                    auto exact = alvr::motion::encodedFramePose(job.pictureOrientation, job.picturePosition);
+                    if (!exact || (EncodedPoseEnabled() && !ReportEncodedFramePose(stampTimestampNs, *exact))) {
+                        ++poseRejected;
+                        if (EncodedPoseEnabled()) {
+                            MarkRead(frame);
+                            continue;
+                        }
+                    }
+                    FfiQuat label{float(stampOrientation.x),float(stampOrientation.y),float(stampOrientation.z),float(stampOrientation.w)};
+                    if (exact) realPoseAngleMax = std::max(realPoseAngleMax,
+                        alvr::motion::orientationErrorDegrees(exact->orientation, label));
+                    ++poseReal;
+                }
+                if (std::chrono::steady_clock::now() >= pictureReportAt) {
+                    Info("Motion frame pose mode=%d real=%llu filled=%llu rejected=%llu real_label_max_deg=%.6f fill_label_max_mm=%.6f",
+                        EncodedPoseMode(), (unsigned long long)poseReal, (unsigned long long)poseFilled,
+                        (unsigned long long)poseRejected, realPoseAngleMax, fillPosePositionMax);
+                    if (!MotionPicturePoseEnabled()) pictureReportAt=std::chrono::steady_clock::now()+std::chrono::seconds(5);
                 }
             }
             enc.prepareGameDepth(depthPicture);
@@ -1260,7 +1314,7 @@ void OvrDirectModeComponent::Present(vr::SharedTextureHandle_t syncTexture) {
     job.targetTimestampNs = m_targetTimestampNs;
     job.renderOrientation = m_framePoseRotation;
     job.renderPosition = m_framePosePosition;
-    if (MotionPicturePoseEnabled()) {
+    if (MotionPicturePoseEnabled() || EncodedPoseMode()) {
         auto raw=m_poseHistory->TrackingFromSubmitted(m_submitLayers[0][0].mHmdPose);
         job.picturePoseValid=true;
         for (auto const& row : raw.m) for (float value : row)
