@@ -373,8 +373,13 @@ void OvrDirectModeComponent::EncodeWorkerLoop() {
                 { std::unique_lock<std::mutex> lock(m_viewParamsMutex);
                   if (!m_viewParamsValid || !motionPoseValid) return false;
                   views[0]=m_viewParams[0]; views[1]=m_viewParams[1]; }
-                auto position = targetPosition(pose->targetTimestampNs,
-                    {pose->motion.pose.position[0], pose->motion.pose.position[1], pose->motion.pose.position[2]});
+                std::array<float, 3> selectedPosition{pose->motion.pose.position[0],
+                    pose->motion.pose.position[1], pose->motion.pose.position[2]};
+                auto rebasedPosition = targetPosition(pose->targetTimestampNs, selectedPosition);
+                // One destination pose: rotation and translation must name
+                // the SAME selected tracking entry. Rebasing just translation
+                // creates a mixed-time camera under real head translation.
+                auto position = EncodedPoseEnabled() ? selectedPosition : rebasedPosition;
                 if (!BuildMotionRotation(lastMotionOrientation,pose->motion.pose.orientation,views,rotation,
                         lastMotionPosition.data(),position.data())) return false;
                 if (EncodedPoseMode()) {
@@ -385,7 +390,7 @@ void OvrDirectModeComponent::EncodeWorkerLoop() {
                         if (EncodedPoseEnabled()) return false;
                     }
                     double error = 0;
-                    for (unsigned i=0; i<3; ++i) error += std::pow(position[i]-pose->motion.pose.position[i],2);
+                    for (unsigned i=0; i<3; ++i) error += std::pow(rebasedPosition[i]-selectedPosition[i],2);
                     fillPosePositionMax = std::max(fillPosePositionMax, std::sqrt(error)*1000);
                 }
             }

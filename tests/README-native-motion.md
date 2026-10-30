@@ -12,8 +12,10 @@ geometry after the Rust tracking queue and explicit metadata now names it.
 
 For a single unwarped scene, real-frame metadata uses the submitted pose
 converted back to tracking space. History uses the same pose. Gap-fill metadata
-uses the selected target orientation and the exact position used in synthesis,
-including the bounded picture-clock translation query. Existing wire timestamps,
+uses the selected tracking entry for BOTH orientation and position. The old
+translation-only picture-clock rebase is bypassed in mode 1: mixing its older
+position with the selected target orientation creates a mixed-time camera.
+Mode 2 measures the old rebased-versus-selected position difference. Existing wire timestamps,
 presentation clocks, FOVs, encode cadence and packet schema do not change.
 Unsupported compositions retain the legacy path and do not validate this test.
 The metadata cache requires an existing exact tracking stamp, keeps up to 360
@@ -40,6 +42,14 @@ client reprojection. It does not execute optical flow or prove physical-headset
 success. Existing GPU recording runs and shaders remain unchanged. This change
 targets the normal ALVR client: the separate Air Link sender chooses its own
 head pose and is outside this diagnostic.
+
+`MOCK_PITCH="15,3"` adds deterministic +/-15 degree pitch with a three-second
+period; `MOCK_SWEEP` remains yaw and `MOCK_SWAY` remains lateral. It composes
+`yaw * pitch` and supplies the corresponding world-space angular velocity,
+so server prediction does not treat pitch as yaw or rotate around a wrong axis.
+`poses.csv` already records pitch; its existing schema is unchanged. No mock
+was run during concurrent Quest testing. Pure pitch does NOT simulate the
+neck-pivot translation of a physical head. Test coupled translation separately.
 
 From the companion MetaHorizonLinux repository, run:
 

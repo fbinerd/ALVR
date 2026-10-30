@@ -1,4 +1,5 @@
 mod video;
+mod pitch;
 
 use alvr_client_core::{ClientCapabilities, ClientCoreContext, ClientCoreEvent};
 use alvr_common::{
@@ -44,7 +45,8 @@ impl Default for WindowInput {
             pitch: 0.0,
             // A scripted sweep (MOCK_SWEEP) should be repeatable.
             use_random_orientation: std::env::var_os("MOCK_SWEEP").is_none()
-                && std::env::var_os("MOCK_SWAY").is_none(),
+                && std::env::var_os("MOCK_SWAY").is_none()
+                && std::env::var_os("MOCK_PITCH").is_none(),
             emulated_decode_ms: 5,
             emulated_compositor_ms: 1,
             emulated_vsync_ms: 25,
@@ -263,6 +265,7 @@ fn tracking_thread(
     let timestamp_origin = Instant::now();
     context.send_view_params(mock_view_params());
     let sweep = video::Sweep::from_env();
+    let pitch_sweep = pitch::PitchSweep::from_env();
     let sway = video::Sway::from_env();
     let hand_sweep = video::HandSweep::from_env();
     if hand_sweep.is_some() {
@@ -317,18 +320,20 @@ fn tracking_thread(
         let poll_timestamp = timestamp_origin.elapsed();
         let (sweep_yaw, yaw_velocity) = sweep.map_or((0.0, 0.0), |s| s.at(poll_timestamp));
         let yaw = input_lock.yaw + sweep_yaw;
+        let (extra_pitch, pitch_velocity) = pitch_sweep.map_or((0.0, 0.0), |s| s.at(poll_timestamp));
+        let pitch = input_lock.pitch + extra_pitch;
         let (sway_x, x_velocity) = sway.map_or((0.0, 0.0), |s| s.at(poll_timestamp));
         let (hand_x, hand_x_velocity) = hand_sweep.map_or((0.0, 0.0), |s| s.at(poll_timestamp));
         pose_log.write(
             poll_timestamp,
             yaw,
-            input_lock.pitch,
+            pitch,
             yaw_velocity,
             sway_x,
             hand_x,
         );
 
-        let mut orientation = Quat::from_rotation_y(yaw) * Quat::from_rotation_x(input_lock.pitch);
+        let mut orientation = Quat::from_rotation_y(yaw) * Quat::from_rotation_x(pitch);
 
         if input_lock.use_random_orientation {
             orientation *= Quat::from_rotation_z(rand::random::<f32>() * 0.001);
@@ -344,7 +349,9 @@ fn tracking_thread(
                     position,
                 },
                 linear_velocity: Vec3::new(x_velocity, 0.0, 0.0),
-                angular_velocity: Vec3::new(0.0, yaw_velocity, 0.0),
+                // DeviceMotion::predict expects world-space angular velocity:
+                // local pitch axis is the right vector after the yaw rotation.
+                angular_velocity: Vec3::from_array(pitch::world_angular_velocity(yaw, yaw_velocity, pitch_velocity)),
             },
         )];
         if hand_sweep.is_some() {
